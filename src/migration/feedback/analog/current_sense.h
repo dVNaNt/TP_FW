@@ -1,0 +1,284 @@
+#pragma once  // Ensure this header is included only once during compilation
+
+// Sequence: calibrating offset -> recalculating normalized full scale -> convert
+
+// 3-channel current sensing helper (integer-only, fast path).
+// - Input: 3x uint16_t raw current sensor ADC values
+// - Per-channel zero calibration over N ticks (independent)
+// - Per-channel full-scale current range in mA (0 => sensor missing)
+// - Output: 3x int16_t normalized currents, where the *largest* configured range
+//   is treated as INT16_MAX (Q15), with INT16_MIN reserved as "sensor missing".
+
+#include "../../common.h"  // Include common migration definitions and types
+
+// Helper struct for passing 3 raw current values by value
+struct RawCurrents3 {
+    uint16_t values[3];
+};
+
+struct CurrentSense {  // Define the CurrentSense structure for 3-channel current sensing
+public:
+    // Channel enumeration for type-safe channel selection
+    enum Channel : uint8_t {
+        CH1 = 0,  // Channel 1 (array index 0)
+        CH2 = 1,  // Channel 2 (array index 1)
+        CH3 = 2   // Channel 3 (array index 2)
+    };
+
+private:
+    // ---------------------------------------------------------------------------
+    // Private data members
+    // ---------------------------------------------------------------------------
+
+    // Full-scale current amplitude in mA for each channel (0 => sensor missing)
+    int32_t full_scale_ma[3];  // Maximum current range in milliamps for each channel (0 means sensor absent)
+
+    // Cached maximum full-scale range among channels (mA)
+    int32_t full_scale_max_ma;  // The largest full-scale value among all three channels
+
+    // Precomputed per-channel ratio in Q15:
+    //   scale[ch] = full_scale_ma[ch] / full_scale_max_ma * 2^15
+    // Range: 0..32768
+    int32_t scale[3];  // Scaling ratios in Q15 fixed-point format for normalization
+
+    // Per-channel calibration
+    int32_t cal_n[3];    // Current calibration sample counter (0 to n_samples+1)
+    int32_t cal_val[3];  // Calibration accumulator during sampling, then zero-current offset after calibration
+
+    // Noise measurement during calibration
+    int32_t cal_min[3];  // Minimum value during calibration for noise calculation
+    int32_t cal_max[3];  // Maximum value during calibration for noise calculation
+    int32_t noise_amplitude[3];  // Measured noise amplitude (max - min) for each channel
+    int32_t noise_amplitude_norm[3];  // Normalized noise amplitude (Q15 format, relative to max noise)
+    int32_t max_noise_norm;  // Maximum noise amplitude among all channels in normalized form (Q15, relative to INT16_MAX full amplitude)
+
+    // Calibration configuration
+    int32_t n_samples;    // Number of samples for calibration (1 to 1000)
+    bool all_calibrated;  // Flag indicating all channels are calibrated
+
+    // Normalized outputs (Q15-like), INT16_MIN => sensor missing
+    int16_t out_norm[3];  // Normalized current outputs in Q15 format (INT16_MIN indicates missing sensor)
+
+    // Absolute current values in milliamperes
+    int32_t out_ma[3];  // Absolute current values in milliamperes for each channel
+
+    bool is_changed;    // Flag indicating that new data is available and needs conversion
+
+    bool valid; // False by default untill at least one sensor cal started AND full scale != 0
+
+    // ---------------------------------------------------------------------------
+    // Private helper methods
+    // ---------------------------------------------------------------------------
+
+    static inline int16_t sat_i32_to_i16_no_min(int32_t x) {  // Saturate 32-bit integer to 16-bit range, avoiding INT16_MIN
+        // Reserve INT16_MIN as a sentinel "sensor missing".
+        if (x > INT16_MAX)
+            return INT16_MAX;  // Clamp to maximum positive 16-bit value if input exceeds it
+        if (x < -INT16_MAX)
+            return (int16_t)(-INT16_MAX);  // Clamp to -32767 (not -32768) to reserve INT16_MIN
+        return (int16_t)x;                 // Return the value as 16-bit integer if within valid range
+    }
+
+    // Main fast tick: store inputs, progress calibrations (if active), compute normalized outputs. Zero value means sensor inactive
+    void tick(const uint16_t currents[3]) {  // Main processing function called each cycle with new ADC readings array
+        is_changed = true;  // Mark that new data is available
+        
+        // Short exit
+        if (!valid) {                                          // Check if all sensors are missing (no valid full-scale ranges)
+            out_norm[0] = INT16_MIN;                           // Set channel 0 output to sensor missing indicator
+            out_norm[1] = INT16_MIN;                           // Set channel 1 output to sensor missing indicator
+            out_norm[2] = INT16_MIN;                           // Set channel 2 output to sensor missing indicator
+            return;                                            // Exit early since no valid sensors are configured
+        }
+
+        const int32_t raw[3] = {(int32_t)currents[0], (int32_t)currents[1], (int32_t)currents[2]};  // Store raw ADC readings in local array
+
+        // Calibration (independent per channel) - three-stage process
+        for (uint8_t ch = 0u; ch < 3u; ++ch) {          // Iterate through all three channels
+            const int32_t cal_n_val = cal_n[ch];        // Read current calibration counter value
+            // Normal run
+            if (cal_n_val > n_samples) {
+                if (scale[ch] == 0 or raw[ch] == UINT16_MAX) {  // Check if this specific channel's sensor is missing or invalid
+                    out_norm[ch] = INT16_MIN;              // Set output to sensor missing indicator
+                    continue;                              // Skip to next channel
+                }
+
+                const int32_t bipolar = (int32_t)raw[ch] - cal_val[ch];  // Calculate ADC delta from zero-current offset
+                                
+                // Scale delta by channel ratio: Q15 ratio => Q15 output
+                const int32_t scaled = (bipolar * scale[ch]) >> 15;
+                
+                out_norm[ch] = sat_i32_to_i16_no_min(scaled);  // Saturate result to 16-bit range and store as normalized output
+            } // Calibration
+            else if (cal_n_val < n_samples) 
+            {                // Stage A: Accumulating samples (cal_n < n_samples)
+                cal_val[ch] += raw[ch];                 // Add current raw reading to calibration accumulator
+                // Track min/max for noise measurement
+                if (raw[ch] < cal_min[ch]) cal_min[ch] = raw[ch];
+                if (raw[ch] > cal_max[ch]) cal_max[ch] = raw[ch];
+                cal_n[ch] = cal_n_val + 1u;             // Increment calibration sample counter
+                out_norm[ch] = INT16_MIN;               // Set output to sensor missing indicator
+            } // Calibration finish
+            else {        // Stage B: Calculate average (cal_n == n_samples)
+                cal_val[ch] = cal_val[ch] / n_samples;  // Set zero-current offset to calculated average
+                // Calculate noise amplitude
+                noise_amplitude[ch] = cal_max[ch] - cal_min[ch];
+                cal_n[ch] = n_samples + 1u;             // Increment cal_n to n_samples+1 to move to stage C
+
+                // Check if all channels are calibrated
+                all_calibrated = (cal_n[0] > n_samples) && (cal_n[1] > n_samples) && (cal_n[2] > n_samples);
+                
+                // Normalize noise amplitudes when all channels are calibrated
+                if (all_calibrated) {
+                    int32_t max_noise = noise_amplitude[0];
+                    if (noise_amplitude[1] > max_noise) max_noise = noise_amplitude[1];
+                    if (noise_amplitude[2] > max_noise) max_noise = noise_amplitude[2];
+                    
+                    // Q15 normalization: (noise << 15) / max_noise
+                    if (max_noise) {
+                        noise_amplitude_norm[0] = (noise_amplitude[0] << 15) / max_noise;
+                        noise_amplitude_norm[1] = (noise_amplitude[1] << 15) / max_noise;
+                        noise_amplitude_norm[2] = (noise_amplitude[2] << 15) / max_noise;
+                    }
+                    
+                    // Calculate max noise normalized to INT16_MAX (full sensor amplitude)
+                    // max_noise is in ADC units (0-65535), normalize to Q15 (INT16_MAX = 32767)
+                    // Formula: (max_noise * INT16_MAX) / UINT16_MAX
+                    max_noise_norm = (max_noise * INT16_MAX) / UINT16_MAX;
+                }
+                out_norm[ch] = INT16_MIN;  // Set output to sensor missing indicator
+            }
+        }
+    }
+
+    friend struct Feedback;
+
+public:
+    CurrentSense(int16_t ch1_fs_ma, int16_t ch2_fs_ma, int16_t ch3_fs_ma)  // Constructor: Create and initialize with full-scale ranges
+        : full_scale_ma{(int32_t)ch1_fs_ma, (int32_t)ch2_fs_ma, (int32_t)ch3_fs_ma},
+          full_scale_max_ma(0),
+          scale{0, 0, 0},
+          cal_n{0, 0, 0},
+          cal_val{0, 0, 0},
+          cal_min{INT32_MAX, INT32_MAX, INT32_MAX},
+          cal_max{INT32_MIN, INT32_MIN, INT32_MIN},
+          noise_amplitude{0, 0, 0},
+          noise_amplitude_norm{0, 0, 0},
+          max_noise_norm(0),
+          n_samples(100),
+          all_calibrated(false),
+          out_norm{INT16_MIN, INT16_MIN, INT16_MIN},
+          out_ma{INT32_MIN, INT32_MIN, INT32_MIN},
+          is_changed(false),
+          valid(false) {
+        // Validate and calculate ratios
+        if (!(ch1_fs_ma == 0 && ch2_fs_ma == 0 && ch3_fs_ma == 0)) {
+            // Find maximum absolute full-scale value among all channels
+            int32_t max_scale = 0;
+            for (uint8_t ch = 0u; ch < 3u; ++ch) {
+                const int32_t abs_fs = (full_scale_ma[ch] >= 0) ? full_scale_ma[ch] : -full_scale_ma[ch];
+                if (abs_fs > max_scale) {
+                    max_scale = abs_fs;
+                }
+            }
+
+            full_scale_max_ma = max_scale;  // Cache the maximum full-scale value
+
+            // Q15 ratio: (abs(full_scale_ma) << 15) / max_scale
+            // Negative full_scale_ma means inverted sensor
+            for (uint8_t ch = 0u; ch < 3u; ++ch) {
+                scale[ch] = (full_scale_ma[ch]  << 14) / max_scale;
+            }
+        }
+    }
+
+    // Set the number of calibration samples (1 to 1000)
+    inline void set_calibration_samples(int32_t n) {        // Set the number of samples to use for calibration
+        n_samples = (n < 1) ? 1 : ((n > 1000) ? 1000 : n);  // Clamp value between 1 and 1000
+    }
+
+    // Start calibration for a specific channel
+    // Resets cal_n to 0 and cal_val to 0 to begin accumulating samples
+    inline void calibrate(Channel channel) {  // Begin zero-current calibration for specified channel
+        valid = full_scale_max_ma != 0;
+        cal_n[channel] = 0u;                  // Reset calibration sample counter to zero
+        cal_val[channel] = 0;                 // Reset calibration accumulator to zero
+        cal_min[channel] = INT32_MAX;         // Reset minimum value for noise measurement
+        cal_max[channel] = INT32_MIN;         // Reset maximum value for noise measurement
+        noise_amplitude_norm[channel] = 0;    // Reset normalized noise amplitude
+        max_noise_norm = 0;                   // Reset maximum noise normalized value
+        all_calibrated = false;               // Reset all calibrated flag since we're starting a new calibration
+    }
+
+    // Start calibration for all channels
+    inline void calibrate() {  // Begin zero-current calibration for all channels
+        calibrate(CH1);        // Calibrate channel 1
+        calibrate(CH2);        // Calibrate channel 2
+        calibrate(CH3);        // Calibrate channel 3
+    }
+
+    inline bool is_calibrated(Channel ch) const {  // Check if a specific channel is calibrated
+        return (cal_n[ch] > n_samples);            // Return true if calibration is complete (cal_n > n_samples)
+    }
+
+    inline bool is_calibrated() const {  // Check if all channels are calibrated (overload with no parameters)
+        return all_calibrated;           // Return the all calibrated flag
+    }
+
+    // Returns pointer to 3-element array of normalized currents (Q15), INT16_MIN => sensor missing.
+    inline const int16_t* norm() const {  // Get pointer to array of all normalized current outputs
+        return out_norm;                  // Return pointer to the 3-element normalized output array
+    }
+
+    inline int16_t norm_ch(Channel ch) const {  // Get normalized current output for a specific channel
+        return out_norm[ch];                    // Return the normalized output for the specified channel
+    }
+
+
+    // Get normalized noise amplitude for a specific channel (Q15 format, relative to max noise)
+    inline int32_t get_noise_amplitude_norm(Channel ch) const {
+        return noise_amplitude_norm[ch];
+    }
+
+    // Get pointer to array of all noise amplitudes (raw ADC units)
+    inline const int32_t* get_noise_amplitudes() const {
+        return noise_amplitude;
+    }
+
+    // Get pointer to array of all normalized noise amplitudes (Q15 format)
+    inline const int32_t* get_noise_amplitudes_norm() const {
+        return noise_amplitude_norm;
+    }
+    
+    // Get maximum noise amplitude among all channels in normalized form (Q15, relative to INT16_MAX full amplitude)
+    // Returns value in range [0, INT16_MAX] where INT16_MAX represents full sensor amplitude
+    inline int32_t get_max_noise_norm() const {
+        return max_noise_norm;
+    }
+    
+    // Get maximum full-scale current range among all channels (in milliamps)
+    inline int32_t get_full_scale_max_ma() const {
+        return full_scale_max_ma;
+    }
+
+    // Get absolute current value in milliamperes for a specific channel
+    // Converts from normalized Q15 format to milliamperes only when is_changed is true
+    const int32_t* get_current_ma() {
+        if (is_changed) {
+            // Convert normalized values to milliamperes for all channels
+            for (uint8_t i = 0u; i < 3u; ++i) {
+                if (out_norm[i] == INT16_MIN) {
+                    out_ma[i] = INT32_MIN;  // Sensor missing or not calibrated
+                } else {
+                    // Convert Q15 normalized value to milliamperes
+                    // out_norm is in range [-32767, 32767] representing [-full_scale_max_ma, full_scale_max_ma]
+                    out_ma[i] = ((int32_t)out_norm[i] * full_scale_max_ma) >> 15;
+                }
+            }
+            is_changed = false;  // Reset flag after conversion
+        }
+        
+        // Return absolute value
+        return out_ma;
+    }
+};  // End of CurrentSense structure definition
