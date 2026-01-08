@@ -6,7 +6,11 @@
 #include "common.h"
 #include "feedback/feedback.h"  // Include unified feedback module
 #include "math_integer/filters/lpf.h"
-#include "motor_driver/mod.h"
+#include "motor_driver/types.h"
+#include "motor_driver/driver_pwm/driver_pwm.h"
+#include "motor_driver/calibration/angle_calibrator.h"
+#include "motor_driver/motor.h"
+#include "error.h"  // Include error management system
 
 // Forward declaration
 struct TunePulseHeart;
@@ -43,6 +47,11 @@ public:
     // Unified feedback system (inputs, supply, current, position)
     // ========================================================================
     Feedback feedback;
+    
+    // ========================================================================
+    // Error management system (public member)
+    // ========================================================================
+    ErrorManager error;
     
 public:
     // ========================================================================
@@ -151,6 +160,9 @@ public:
     }
 
     void tick() {
+        // Update error manager (auto-clear expired errors)
+        error.tick();
+        
         // Update all feedback sensors (supply, current, position)
         feedback.tick();  // Process all feedback data
         
@@ -191,6 +203,15 @@ public:
             }
         }
 
+        // If fatal error is active, disable power stage (set all channels to INT16_MIN)
+        if (error.has_fatal()) {
+            pwm_norm_[0] = INT16_MIN;
+            pwm_norm_[1] = INT16_MIN;
+            pwm_norm_[2] = INT16_MIN;
+            update_pwm_duty();
+            return;  // Skip normal control when fatal error is active
+        }
+
         // Use FOC control with phase currents
         driver_.tick_control_foc((int16_t)angle_el_, amplitude_, feedback, pwm_norm_);  // Pass feedback reference instead of separate data
 
@@ -218,13 +239,7 @@ public:
     // Motor test interface
     // ========================================================================
     
-    bool is_motor_test_complete() const {
-        return driver_.is_motor_test_complete();
-    }
-    
-    bool is_motor_test_cycle_complete() const {
-        return driver_.is_motor_test_cycle_complete();
-    }
+
     
     DriverStatus get_driver_status() const {
         return driver_.get_status();

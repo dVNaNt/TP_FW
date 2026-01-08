@@ -24,6 +24,10 @@ volatile uint8_t g_fault_source = FAULT_NONE;  // Which comparator triggered
 volatile uint32_t g_fault_timestamp = 0;       // When fault occurred (millis)
 volatile bool g_fault_active = false;          // Fault lockout active
 
+// Forward declaration of TunePulseHeart for error flag access
+struct TunePulseHeart;
+extern TunePulseHeart* g_heart_ptr;  // Global pointer to TunePulseHeart instance
+
 // Forward declarations
 void PWM_Emergency_Disable(uint8_t fault_source);
 void COMP_Update_Fault_State(void);
@@ -207,16 +211,25 @@ inline void PWM_Emergency_Disable(uint8_t fault_source) {
     g_fault_timestamp = millis();
     g_fault_active = true;
     
-    // // Disable all EN_CH pins (set to LOW for Hi-Z)
-    // LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_10); // EN_CH1 = 0
-    // LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_2);  // EN_CH2 = 0
-    // LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_1);  // EN_CH3 = 0
-    // LL_GPIO_ResetOutputPin(GPIOA, LL_GPIO_PIN_6);  // EN_CH4 = 0
+    // Set error flags in TunePulseHeart error manager
+    if (g_heart_ptr != nullptr) {
+        if (fault_source == FAULT_COMP2) {
+            g_heart_ptr->error.set_fatal_phase1_oc();  // COMP2 (PA3) -> Phase 1 overcurrent
+        } else if (fault_source == FAULT_COMP4) {
+            g_heart_ptr->error.set_fatal_phase3_oc();  // COMP4 (PB0) -> Phase 3 overcurrent
+        }
+    }
     
-    // // Set PWM to 100% duty (outputs stay low when EN is disabled)
-    // TIM2->CCR1 = TIM2->ARR;  // Channel 1 = 100%
-    // TIM2->CCR3 = TIM2->ARR;  // Channel 3 = 100%
-    // TIM2->CCR4 = TIM2->ARR;  // Channel 4 = 100%
+    // Disable all EN_CH pins (set to LOW for Hi-Z)
+    LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_10); // EN_CH1 = 0
+    LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_2);  // EN_CH2 = 0
+    LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_1);  // EN_CH3 = 0
+    LL_GPIO_ResetOutputPin(GPIOA, LL_GPIO_PIN_6);  // EN_CH4 = 0
+    
+    // Set PWM to 100% duty (outputs stay low when EN is disabled)
+    TIM2->CCR1 = TIM2->ARR;  // Channel 1 = 100%
+    TIM2->CCR3 = TIM2->ARR;  // Channel 3 = 100%
+    TIM2->CCR4 = TIM2->ARR;  // Channel 4 = 100%
     
     // Set LED based on fault source (only one LED at a time)
     if (fault_source == FAULT_COMP2) {

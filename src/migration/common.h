@@ -39,13 +39,20 @@ static inline int32_t tunepulse_clamp_i32(int32_t value, int32_t limit) {
 // Forward declaration for conversion
 struct Pol2D;
 
-/// 2D Vector in Cartesian coordinates (sin, cos) using i1.15 fixed-point format
+/// 2D Vector in Cartesian coordinates using i1.15 fixed-point format
+/// Union allows accessing components as sin/cos, a/b, or d/q pairs
 struct Vec2D {
-    int16_t sin;  // Sine component (y-axis) in i1.15 format
-    int16_t cos;  // Cosine component (x-axis) in i1.15 format
+    union {
+        struct { int16_t x;   int16_t y;   }; 
+        struct { int16_t cos; int16_t sin; };  // Sine/Cosine components (trigonometric)
+        struct { int16_t a;   int16_t b;   };  // Alpha/Beta components (Clarke transform)
+        struct { int16_t alpha; int16_t beta; };
+        struct { int16_t d;   int16_t q;   };  // Direct/Quadrature components (Park transform)
+        struct { int16_t flux;   int16_t torque;   };
+    };
 
     /// Constructor
-    Vec2D(int16_t s = 0, int16_t c = 0) : sin(s), cos(c) {}
+    Vec2D(int16_t cos_val, int16_t sin_val) : cos(cos_val), sin(sin_val) {}
 
     /// Scale the vector by a coefficient in i1.15 format
     /// @param scale_factor Scaling factor in i1.15 (32768 = 1.0)
@@ -65,20 +72,25 @@ struct Vec2D {
     /// @param rotation Rotation vector (sin, cos) in i1.15 format
     /// @return Rotated vector
     Vec2D rotate(const Vec2D& rotation) const {
-        int32_t ss = (int32_t)sin;
-        int32_t sc = (int32_t)cos;
-        int32_t rs = (int32_t)rotation.sin;
-        int32_t rc = (int32_t)rotation.cos;
+        // Current vector components
+        int32_t x_val = (int32_t)x; // cos
+        int32_t y_val = (int32_t)y; // sin
+        
+        // Rotation vector components
+        int32_t rot_cos = (int32_t)rotation.cos;
+        int32_t rot_sin = (int32_t)rotation.sin;
 
-        // Rotation formula:
-        // out_sin = sin * rotation.cos + cos * rotation.sin
-        // out_cos = cos * rotation.cos - sin * rotation.sin
-        int32_t new_sin = ss * rc + sc * rs;
-        int32_t new_cos = sc * rc - ss * rs;
+        // Standard Rotation Matrix:
+        // X' = X*cos - Y*sin
+        // Y' = X*sin + Y*cos
+        
+        int32_t new_x = x_val * rot_cos - y_val * rot_sin;
+        int32_t new_y = x_val * rot_sin + y_val * rot_cos;
 
+        // Возвращаем (X, Y)
         return Vec2D(
-            (int16_t)(new_sin >> 15),
-            (int16_t)(new_cos >> 15)
+            (int16_t)(new_x >> 15), 
+            (int16_t)(new_y >> 15)
         );
     }
 

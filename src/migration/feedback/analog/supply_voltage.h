@@ -96,6 +96,16 @@ public:
         return (int16_t)norm_calc;  // Return clamped normalized value
     }
     
+    // Convert millivolts to duty cycle (Q15 format)
+    // target_mv: Target voltage in millivolts
+    // Returns: Duty cycle in Q15 format (0..32767, where 32767 = 100%)
+    inline int16_t mv2duty(int32_t target_mv) const {  // Convert millivolts to duty cycle
+        if (voltage_mv_ <= 0 or target_mv <= 0) return 0;   // Avoid division by zero or neg duty
+        if (voltage_mv_ <= target_mv) return INT16_MAX; // Clamp to maximum duty (100%)
+        int32_t duty = (target_mv << 15) / voltage_mv_;  // Calculate duty: (target / supply) * 32768
+        return (int16_t)duty;                         // Return duty cycle in Q15
+    }
+    
     // Get normalized voltage in Q15 format (0..32767 representing 0..max_voltage_mv)
     inline int16_t get_voltage_norm() const {  // Get normalized voltage output
         return voltage_norm_;  // Return Q15 normalized voltage

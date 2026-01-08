@@ -64,34 +64,34 @@ void MX_ADC1_Init() {
     }
 
     // Configure ADC channels
-    // Configure Regular Channel 1 - I_CH1 (PA3 -> ADC1_IN4)
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_4);
-    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_4, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_4, LL_ADC_SINGLE_ENDED);
-
-    // Configure Regular Channel 2 - I_CH4 (PB0 -> ADC1_IN15)
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_15);
+        // Configure Regular Channel 2 - I_CH4 (PB0 -> ADC1_IN15)
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_15);
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_15, LL_ADC_SAMPLINGTIME_2CYCLES_5);
     LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_15, LL_ADC_SINGLE_ENDED);
+
+    // Configure Regular Channel 1 - I_CH1 (PA3 -> ADC1_IN4)
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_4);
+    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_4, LL_ADC_SAMPLINGTIME_2CYCLES_5);
+    LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_4, LL_ADC_SINGLE_ENDED);
 
     // Configure Regular Channel 3 - VSENS (PB14 -> ADC1_IN5)
     LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, LL_ADC_CHANNEL_5);
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_5, LL_ADC_SAMPLINGTIME_2CYCLES_5);
     LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_5, LL_ADC_SINGLE_ENDED);
 
-    // Setup Vref and Temp Channel
-    LL_ADC_SetCommonPathInternalCh(__LL_ADC_COMMON_INSTANCE(ADC1),
-                                   LL_ADC_PATH_INTERNAL_VREFINT | LL_ADC_PATH_INTERNAL_TEMPSENSOR);
+    // // Setup Vref and Temp Channel
+    // LL_ADC_SetCommonPathInternalCh(__LL_ADC_COMMON_INSTANCE(ADC1),
+    //                                LL_ADC_PATH_INTERNAL_VREFINT | LL_ADC_PATH_INTERNAL_TEMPSENSOR);
 
-    // Configure Vref Channel
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, LL_ADC_CHANNEL_VREFINT);
-    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_VREFINT, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_VREFINT, LL_ADC_SINGLE_ENDED);
+    // // Configure Vref Channel
+    // LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_4, LL_ADC_CHANNEL_VREFINT);
+    // LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_VREFINT, LL_ADC_SAMPLINGTIME_2CYCLES_5);
+    // LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_VREFINT, LL_ADC_SINGLE_ENDED);
 
-    // Configure Temperature Sensor Channel
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_5, LL_ADC_CHANNEL_TEMPSENSOR_ADC1);
-    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR_ADC1, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_TEMPSENSOR_ADC1, LL_ADC_SINGLE_ENDED);
+    // // Configure Temperature Sensor Channel
+    // LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_5, LL_ADC_CHANNEL_TEMPSENSOR_ADC1);
+    // LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_TEMPSENSOR_ADC1, LL_ADC_SAMPLINGTIME_2CYCLES_5);
+    // LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_TEMPSENSOR_ADC1, LL_ADC_SINGLE_ENDED);
 }
 
 // Function to start ADC1
@@ -178,9 +178,9 @@ void ADC_get_values(uint16_t& current_a,
                     uint16_t& voltage_supply,
                     uint16_t& voltage_vref,
                     uint16_t& voltage_temp) {
-    current_a = dma_buffer_adc1[0];       // I_CH1 (PA3)
+    current_a = dma_buffer_adc1[1];       // I_CH1 (PA3)
     current_b = dma_buffer_adc2[0];       // I_CH2 (PA7 via ADC2)
-    current_c = dma_buffer_adc1[1];       // I_CH4 (PB0)
+    current_c = dma_buffer_adc1[0];       // I_CH4 (PB0)
     voltage_supply = dma_buffer_adc1[2];  // VSENS (PB14)
     voltage_vref = dma_buffer_adc1[3];    // VREFINT
     voltage_temp = dma_buffer_adc1[4];    // TEMPSENSOR

@@ -7,12 +7,15 @@
 
 TunePulseHeart TUNE_HEART;
 
+// Global pointer for comparator interrupt handlers to access error manager
+TunePulseHeart* g_heart_ptr = &TUNE_HEART;
+
 // Track status changes
 static MigrationDriverStatus last_status = DriverStatus_Error;
 
 void setup() {
     tunepulse_init();
-    TUNE_HEART.motor_params.set_current_limit(1500);
+    TUNE_HEART.motor_params.set_current_limit(2500);
 
     SerialUSB.begin();
     
@@ -52,26 +55,6 @@ void loop() {
                 break;
             case DriverStatus_Error:
                 SerialUSB.println("Error");
-                break;
-        }
-    }
-    
-
-    
-    // Periodic status update every 1 second
-    static uint32_t last_status_print = 0;
-    uint32_t now = millis();
-    if (now - last_status_print >= 1000) {
-        last_status_print = now;
-        SerialUSB.println("Status");
-        switch (current_status) {
-            case DriverStatus_CalibrateCurrent:
-                SerialUSB.println("Calibrating current sensors...");
-                break;
-            case DriverStatus_Ready:
-                SerialUSB.println("Ready");
-                break;
-            default:
                 break;
         }
     }

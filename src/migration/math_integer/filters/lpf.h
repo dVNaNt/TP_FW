@@ -28,21 +28,21 @@
 struct FilterLPF {
     // Filter coefficient (0u..255u = 0.0f..1.0f)
     int32_t alpha;
-    uint16_t output;
+    int16_t output;
     int32_t temp; // Stores scaled filtered value
 
     /// Default constructor
     FilterLPF() : alpha(0), output(0), temp(0) {}
 
     /// Constructor to initialize the filter with the input and alpha
-    FilterLPF(uint16_t input_default, uint8_t alpha_value) {
+    FilterLPF(int16_t input_default, uint8_t alpha_value) {
         alpha = (int32_t)alpha_value;
         output = input_default;
         temp = ((int32_t)input_default) << 16;
     }
 
     /// Math call
-    uint16_t tick(uint16_t input) {
+    int16_t tick(int16_t input) {
         // Convert the input to a 32-bit integer and shift left by 16 bits to allow wrapping as i32
         int32_t current = ((int32_t)input) << 16;
 
@@ -59,13 +59,13 @@ struct FilterLPF {
         temp = (diff * alpha) + current;
 
         // Convert to u32 to allow correct bitshift and scale back to u16
-        output = (uint16_t)(((uint32_t)temp) >> 16);
+        output = (int16_t)(((uint32_t)temp) >> 16);
 
         return output;
     }
 
     /// Function to retrieve the output value
-    uint16_t get_output() const {
+    int16_t get_output() const {
         return output;
     }
 
@@ -75,7 +75,7 @@ struct FilterLPF {
     }
 
     /// Function to reset the filter with a new value
-    void reset(uint16_t value) {
+    void reset(int16_t value) {
         output = value;
         temp = ((int32_t)value) << 16;
     }

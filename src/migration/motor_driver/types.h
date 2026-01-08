@@ -35,6 +35,12 @@ typedef enum {
     DriverStatus_CalibrateCurrent,
     /// Motor connection and parameters are being identified.
     DriverStatus_MotorConnectionCalibration,
+    /// Playing startup melody through motor coils.
+    DriverStatus_PlayingMelody,
+    /// HFI warmup phase: applying DC current to D-axis for 1 second.
+    DriverStatus_HFI_Warmup,
+    /// HFI running: injecting high-frequency signal and measuring response.
+    DriverStatus_HFI_Running,
     /// Motor calibration completed successfully and ready for normal operation.
     DriverStatus_Ready,
     /// An error occurred during calibration or normal operation.

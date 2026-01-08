@@ -261,6 +261,28 @@ public:
         return full_scale_max_ma;
     }
 
+    // =========================================================================
+    // CONVERSION METHODS: Between normalized Q15 and milliamps
+    // =========================================================================
+    
+    // Convert milliamps to normalized Q15 value
+    // ma: Current in milliamps
+    // Returns: Normalized current in Q15 format (-32767..32767)
+    int16_t ma2norm(int32_t ma) const {
+        if (full_scale_max_ma <= 0) return 0;           // Avoid division by zero
+        int32_t norm = (ma << 15) / full_scale_max_ma;  // Scale milliamps to Q15
+        if (norm > INT16_MAX) return INT16_MAX;         // Clamp to max positive
+        if (norm < -INT16_MAX) return -INT16_MAX;       // Clamp to max negative (avoid INT16_MIN)
+        return (int16_t)norm;                           // Return normalized value
+    }
+    
+    // Convert normalized Q15 value to milliamps
+    // norm: Normalized current in Q15 format (-32767..32767)
+    // Returns: Current in milliamps
+    inline int32_t norm2ma(int16_t norm) const {
+        return ((int32_t)norm * full_scale_max_ma) >> 15;  // Scale Q15 to milliamps
+    }
+
     // Get absolute current value in milliamperes for a specific channel
     // Converts from normalized Q15 format to milliamperes only when is_changed is true
     const int32_t* get_current_ma() {
