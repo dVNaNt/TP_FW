@@ -20,7 +20,7 @@ struct TunePulseHeart;
 #endif
 
 #ifndef PWM_TIMER_PERIOD
-#define PWM_TIMER_PERIOD 3600
+#define PWM_TIMER_PERIOD 4722
 #endif
 
 // ============================================================================
@@ -81,7 +81,7 @@ public:
     // ========================================================================
     // PWM output
     // ========================================================================
-    int16_t pwm_norm_[3];
+    Vec3D pwm_norm_;
     int16_t pwm_duty_[3];
     uint16_t pwm_resolution_;
 
@@ -101,7 +101,7 @@ public:
     // Constructor
     TunePulseHeart(int32_t motor_res_ohm_milli = 2000,
                    MotorType motor_type = MotorType_Invalid,
-                   PhasePattern phase_pattern = ABC,
+                   PhasePattern phase_pattern = PhasePattern_CBA,
                    uint16_t freq_hz = PWM_TIMER_FREQ_HZ,
                    uint16_t pwm_res = PWM_TIMER_PERIOD,
                    int32_t max_sup_mv = 85000)
@@ -198,10 +198,12 @@ public:
                         }
                     }
                 }
+
                 angle_el_ = feedback.position.get_value();  // Use Feedback accessor without underscore
                 break;
             }
         }
+        angle_el_ = 0;
 
         // If fatal error is active, disable power stage (set all channels to INT16_MIN)
         if (error.has_fatal()) {
@@ -213,8 +215,8 @@ public:
         }
 
         // Use FOC control with phase currents
-        driver_.tick_control_foc((int16_t)angle_el_, amplitude_, feedback, pwm_norm_);  // Pass feedback reference instead of separate data
-
+        driver_.tick_control_foc((int16_t)angle_el_, amplitude_, feedback);  // Pass feedback reference instead of separate data
+        pwm_norm_ = driver_.get_output();
         update_pwm_duty();
     }
 

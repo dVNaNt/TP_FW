@@ -50,7 +50,7 @@ public:
     // Constructor with default values
     Motor()
         : motor_type_(MotorType_Invalid),
-          phase_pattern_(ABC),
+          phase_pattern_(PhasePattern_CBA),
           status_(DriverStatus_CalibrateCurrent),
           calib_status_(MotorStatus::CurrentCalibration),
           pole_count_(7),
@@ -202,7 +202,7 @@ public:
         // Conditions: Any short detected OR invalid count is 0 (all open) OR 2 (ambiguous).
         if (short_detected || valid_count == 0 || valid_count == 2) {
             motor_type_ = MotorType_Invalid;
-            phase_pattern_ = ABC;  // Default safe pattern
+            phase_pattern_ = PhasePattern_CBA;  // Default safe pattern (CBA for BLDC)
             total_resistance_mohm_ = 0;  // Invalid motor - no resistance calculation
             return;
         }
@@ -229,7 +229,7 @@ public:
 
         if (deviation <= 25) {  // Threshold: 25%
             motor_type_ = MotorType_BLDC;
-            phase_pattern_ = ABC;  // Standard 3-phase pattern
+            phase_pattern_ = PhasePattern_CBA;  // Default BLDC pattern (CBA)
             // BLDC: R = (AB + BC + AC) / 6 = (r[0] + r[1] + r[2]) / 6
             // Each phase measurement is line-to-line, so total = sum / 6
             total_resistance_mohm_ = r_sum_valid / 6;
@@ -297,14 +297,14 @@ public:
         // Phase pattern
         serial.print("Pattern: ");
         switch (phase_pattern_) {
-            case ABC:
+            case PhasePattern_ABC:
                 serial.println("ABC");
                 break;
-            case BCA:
-                serial.println("BCA");
+            case PhasePattern_ACB:
+                serial.println("ACB");
                 break;
-            case CAB:
-                serial.println("CAB");
+            case PhasePattern_CBA:
+                serial.println("CBA");
                 break;
         }
 

@@ -162,6 +162,46 @@ struct Pol2D {
     }
 };
 
+/// 3-Phase value container using i1.15 fixed-point format
+struct Vec3D {
+    union {
+        struct {int16_t a;   int16_t b;   int16_t c;   };   // Phase naming (A, B, C)
+        struct { int16_t ch1; int16_t ch2; int16_t ch3; };   // Channel naming (CH1, CH2, CH3)
+        struct { int16_t x; int16_t y; int16_t z; };   // Channel naming (CH1, CH2, CH3)
+        int16_t arr[3];                           // Array access
+    };
+
+    /// Default constructor - zero initialize
+    Vec3D() : a(0), b(0), c(0) {}
+
+    /// Constructor with individual values
+    Vec3D(int16_t val_a, int16_t val_b, int16_t val_c) : a(val_a), b(val_b), c(val_c) {}
+
+    /// Array subscript operator for indexed access
+    int16_t& operator[](size_t idx) { return arr[idx]; }
+    const int16_t& operator[](size_t idx) const { return arr[idx]; }
+};
+
+/// 3-Phase value container using int32_t for extended range
+struct Vec3D_i32 {
+    union {
+        struct {int32_t a;   int32_t b;   int32_t c;   };   // Phase naming (A, B, C)
+        struct { int32_t ch1; int32_t ch2; int32_t ch3; };   // Channel naming (CH1, CH2, CH3)
+        struct { int32_t x; int32_t y; int32_t z; };   // Channel naming (CH1, CH2, CH3)
+        int32_t arr[3];                           // Array access
+    };
+
+    /// Default constructor - zero initialize
+    Vec3D_i32() : a(0), b(0), c(0) {}
+
+    /// Constructor with individual values
+    Vec3D_i32(int32_t val_a, int32_t val_b, int32_t val_c) : a(val_a), b(val_b), c(val_c) {}
+
+    /// Array subscript operator for indexed access
+    int32_t& operator[](size_t idx) { return arr[idx]; }
+    const int32_t& operator[](size_t idx) const { return arr[idx]; }
+};
+
 /// Frequency configuration structure
 /// Manages core frequency, PWM frequency, and PWM period with automatic calculation
 struct Frequency {

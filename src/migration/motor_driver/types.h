@@ -12,12 +12,15 @@ typedef enum {
 } MotorType;
 
 /// PhasePattern enumeration for 3-phase remap (output ordering)
-/// 4 just to ensure easier calibration algo
+/// PhasePattern_CBA is default for BLDC motors (positive calibration polarity)
+/// Calibration sequence: CBA(0) -> ACB(1) -> ABC(2)
 typedef enum {
-    ABC = 0, 
-    BCA = 1,
-    CAB = 2,
+    PhasePattern_CBA = 0, // Default BLDC pattern, positive calibration polarity
+    PhasePattern_ACB = 1, // Negative calibration polarity
+    PhasePattern_ABC = 2, // Negative calibration polarity
 } PhasePattern;
+
+
 
 /// ControlMode enumeration
 typedef enum {
@@ -41,6 +44,12 @@ typedef enum {
     DriverStatus_HFI_Warmup,
     /// HFI running: injecting high-frequency signal and measuring response.
     DriverStatus_HFI_Running,
+    /// HFI amplitude tuning: adjusting voltage to achieve target current.
+    DriverStatus_HFI_AmplitudeTuning,
+    /// HFI Ld measurement: measuring D-axis inductance.
+    DriverStatus_HFI_LdMeasure,
+    /// HFI Lq measurement: measuring Q-axis inductance.
+    DriverStatus_HFI_LqMeasure,
     /// Motor calibration completed successfully and ready for normal operation.
     DriverStatus_Ready,
     /// An error occurred during calibration or normal operation.

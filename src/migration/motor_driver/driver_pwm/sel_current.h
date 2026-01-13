@@ -29,9 +29,9 @@ private:
     int32_t epsilon_abs_;  // Absolute balance tolerance in Q15 format
 
     // Output cache
-    int16_t abc_used_[3];  // Recombined ABC currents after sensor recombination
-    Vec2D ab_out_;         // Output Vec2D: sin=alpha, cos=beta in Q15 format
-
+    Vec3D abc_used_;  // Recombined ABC currents after sensor recombination
+    Vec2D ab_out_;    // Output Vec2D: sin=alpha, cos=beta in Q15 format
+    
     // State
     uint8_t err_;  // Error flag: 1=error occurred, 0=no error
 
@@ -44,7 +44,7 @@ public:
           ,
           epsilon_abs_(0)  // Will be calculated in set_epsilon()
           ,
-          abc_used_{0, 0, 0}  // Initialize recombined currents to zeros
+          abc_used_(0, 0, 0)  // Initialize recombined currents to zeros
           ,
           ab_out_{0, 0}  // Initialize output Vec2D to zeros
           ,
@@ -69,9 +69,9 @@ public:
         err_ = 1u;      // Start with error flag set (pessimistic)
         static const Vec2D err_out = Vec2D(INT16_MIN, INT16_MIN);
 
-        abc_used_[0] = 0;  // Clear recombined phase A
-        abc_used_[1] = 0;  // Clear recombined phase B
-        abc_used_[2] = 0;  // Clear recombined phase C
+        abc_used_.a = 0;  // Clear recombined phase A
+        abc_used_.b = 0;  // Clear recombined phase B
+        abc_used_.c = 0;  // Clear recombined phase C
 
         const uint32_t mt = motor_type;  // Cache motor type for efficiency
         // Validate motor type is supported
@@ -104,9 +104,9 @@ public:
             }
 
             // Store which sensors are present (keep INT16_MIN for missing)
-            abc_used_[0] = (present & 1u) ? ia : INT16_MIN;  // Phase A if present
-            abc_used_[1] = (present & 2u) ? ib : INT16_MIN;  // Phase B if present
-            abc_used_[2] = (present & 4u) ? ic : INT16_MIN;  // Phase C if present
+            abc_used_.a = (present & 1u) ? ia : INT16_MIN;  // Phase A if present
+            abc_used_.b = (present & 2u) ? ib : INT16_MIN;  // Phase B if present
+            abc_used_.c = (present & 4u) ? ic : INT16_MIN;  // Phase C if present
 
             int16_t val;
             // If both sensors present, calculate (a - b) / 2 and validate difference
@@ -123,8 +123,8 @@ public:
                 val = (present & 1u) ? ia : - ib;     // Or B, or C
             }
 
-            ab_out_.sin = val;  // Alpha = calculated current
-            ab_out_.cos = 0;    // Beta = 0 for DC motor
+            ab_out_.alpha = val;  // Alpha = calculated current
+            ab_out_.beta = 0;     // Beta = 0 for DC motor
             err_ = 0u;          // Clear error flag (DC motor successful)
             return;             // Exit after DC motor handling
         }
@@ -151,12 +151,12 @@ public:
             }
 
             // Store recombined values (use measured if present, calculated if missing)
-            abc_used_[0] = (present & 1u) ? ia : sat_i32_to_i16(a);  // Phase A
-            abc_used_[1] = (present & 2u) ? ib : sat_i32_to_i16(b);  // Phase B
-            abc_used_[2] = (present & 4u) ? ic : sat_i32_to_i16(c);  // Phase C
+            abc_used_.a = (present & 1u) ? ia : sat_i32_to_i16(a);  // Phase A
+            abc_used_.b = (present & 2u) ? ib : sat_i32_to_i16(b);  // Phase B
+            abc_used_.c = (present & 4u) ? ic : sat_i32_to_i16(c);  // Phase C
 
             // Perform Clarke Transform to convert ABC to alpha-beta
-            clarke_transform(abc_used_[0], abc_used_[1], abc_used_[2], &ab_out_.sin, &ab_out_.cos);
+            clarke_transform(abc_used_.a, abc_used_.b, abc_used_.c, &ab_out_.alpha, &ab_out_.beta);
 
             // Validate balance if all 3 sensors are present
             if (present_cnt == 3u) {  // All sensors available
@@ -187,13 +187,13 @@ public:
             }
 
             // Store recombined values (use measured if present, calculated if missing)
-            abc_used_[0] = (present & 1u) ? ia : sat_i32_to_i16(a);  // Phase A (coil A)
-            abc_used_[1] = (present & 2u) ? ib : sat_i32_to_i16(b);  // Phase B (coil B)
-            abc_used_[2] = (present & 4u) ? ic : sat_i32_to_i16(c);  // Phase C (return path)
+            abc_used_.a = (present & 1u) ? ia : sat_i32_to_i16(a);  // Phase A (coil A)
+            abc_used_.b = (present & 2u) ? ib : sat_i32_to_i16(b);  // Phase B (coil B)
+            abc_used_.c = (present & 4u) ? ic : sat_i32_to_i16(c);  // Phase C (return path)
 
             // For stepper: coils A and B map directly to alpha and beta
-            ab_out_.sin = abc_used_[0];  // Alpha = coil A current
-            ab_out_.cos = abc_used_[1];  // Beta = coil B current
+            ab_out_.alpha = abc_used_.a;  // Alpha = coil A current
+            ab_out_.beta = abc_used_.b;   // Beta = coil B current
 
             // Validate balance if all 3 sensors are present
             if (present_cnt == 3u) {  // All sensors available

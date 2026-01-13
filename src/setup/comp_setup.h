@@ -9,7 +9,7 @@
 
 // Overcurrent threshold: 2048 + 512 = 2560 (DAC3_OUT2 value)
 // This corresponds to ~2.06V at 3.3V reference
-constexpr uint32_t OVERCURRENT_DAC_VALUE = 3500U;
+constexpr uint32_t OVERCURRENT_DAC_VALUE = 3700U;
 
 // Fault lockout duration in milliseconds
 constexpr uint32_t FAULT_LOCKOUT_MS = 1000U;
@@ -300,7 +300,7 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
     // Check if COMP2 triggered (EXTI line 22)
     if (EXTI->PR1 & EXTI_PR1_PIF22) {
         EXTI->PR1 = EXTI_PR1_PIF22;       // Clear pending flag
-        PWM_Emergency_Disable(FAULT_COMP2); // Disable PWM, green LED
+        // PWM_Emergency_Disable(FAULT_COMP2); // Disable PWM, green LED
     }
 }
 
@@ -309,7 +309,7 @@ extern "C" void COMP4_IRQHandler(void) {
     // Check if COMP4 triggered (EXTI line 30)
     if (EXTI->PR1 & EXTI_PR1_PIF30) {
         EXTI->PR1 = EXTI_PR1_PIF30;       // Clear pending flag
-        PWM_Emergency_Disable(FAULT_COMP4); // Disable PWM, blue LED
+        // PWM_Emergency_Disable(FAULT_COMP4); // Disable PWM, blue LED
     }
 }
 

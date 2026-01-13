@@ -36,7 +36,7 @@ public:
     /// @param freq_target Target output frequency in Hz (max 2000 Hz)
     /// @return true if frequency is valid and set, false if out of range
     bool set_frequency_target(uint16_t freq_target) {
-        if (freq_target >= 2000) {       // Check frequency limit
+        if (freq_target > 2000) {       // Check frequency limit
             return false;                // Reject invalid frequency
         }
         frequency_target_ = freq_target; // Update target frequency

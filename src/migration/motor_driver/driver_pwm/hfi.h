@@ -36,12 +36,12 @@ private:
     
     // DFT accumulators for D-axis current (real and imaginary components)
     // Real = correlation with cosine, Imaginary = correlation with sine
-    int64_t dft_d_real_;   // Accumulator for D-axis real component (cos correlation)
-    int64_t dft_d_imag_;   // Accumulator for D-axis imaginary component (sin correlation)
+    int32_t dft_d_real_;   // Accumulator for D-axis real component (cos correlation)
+    int32_t dft_d_imag_;   // Accumulator for D-axis imaginary component (sin correlation)
     
     // DFT accumulators for Q-axis current (real and imaginary components)
-    int64_t dft_q_real_;   // Accumulator for Q-axis real component (cos correlation)
-    int64_t dft_q_imag_;   // Accumulator for Q-axis imaginary component (sin correlation)
+    int32_t dft_q_real_;   // Accumulator for Q-axis real component (cos correlation)
+    int32_t dft_q_imag_;   // Accumulator for Q-axis imaginary component (sin correlation)
     
     // Sample counter for tracking progress within injection cycles
     uint32_t sample_count_;      // Current sample index within all periods
@@ -170,10 +170,10 @@ public:
         // DC Rejection: When integrating over complete periods, DC component averages to zero
         // because sum(cos) = sum(sin) = 0 over complete cycles
         
-        // === D-axis current correlation ===
+        // === D-axis (flux) current correlation ===
         // Multiply D-axis current by reference cos and sin, accumulate
         // Using 64-bit accumulators to prevent overflow over many samples
-        int32_t i_d = (int32_t)current_dq.cos;  // D-axis current (cos component of Vec2D)
+        int32_t i_d = (int32_t)current_dq.flux;  // D-axis current (flux component of Vec2D)
         
         // Real part: correlation with cosine (in-phase component)
         dft_d_real_ += (int64_t)i_d * (int64_t)ref_cos;
@@ -181,9 +181,9 @@ public:
         // Imaginary part: correlation with sine (quadrature component)
         dft_d_imag_ += (int64_t)i_d * (int64_t)ref_sin;
         
-        // === Q-axis current correlation ===
+        // === Q-axis (torque) current correlation ===
         // Multiply Q-axis current by reference cos and sin, accumulate
-        int32_t i_q = (int32_t)current_dq.sin;  // Q-axis current (sin component of Vec2D)
+        int32_t i_q = (int32_t)current_dq.torque;  // Q-axis current (torque component of Vec2D)
         
         // Real part: correlation with cosine (in-phase component)
         dft_q_real_ += (int64_t)i_q * (int64_t)ref_cos;
@@ -293,9 +293,6 @@ private:
         // Use integer square root approximation
         amplitude_d_ = fast_magnitude(d_real_norm, d_imag_norm);
         
-        // Calculate phase: atan2(imag, real)
-        // Phase indicates the lag between voltage and current response
-        phase_d_ = fast_atan2(d_imag_norm, d_real_norm);
         
         // === Q-axis amplitude and phase calculation ===
         // Normalize accumulators
@@ -304,9 +301,7 @@ private:
         
         // Calculate amplitude: sqrt(real² + imag²)
         amplitude_q_ = fast_magnitude(q_real_norm, q_imag_norm);
-        
-        // Calculate phase: atan2(imag, real)
-        phase_q_ = fast_atan2(q_imag_norm, q_real_norm);
+
     }
     
     /// Fast integer magnitude calculation: sqrt(x² + y²)
@@ -342,70 +337,5 @@ private:
         }
         
         return (int16_t)mag;
-    }
-    
-    /// Fast integer atan2 approximation
-    /// Returns angle in normalized format (INT16_MIN to INT16_MAX = -π to π)
-    /// @param y Imaginary component (sine-like)
-    /// @param x Real component (cosine-like)
-    /// @return Angle in normalized int16 format
-    static int16_t fast_atan2(int32_t y, int32_t x) {
-        // Handle special cases
-        if (x == 0 && y == 0) {
-            return 0;                       // Undefined, return 0
-        }
-        
-        // Determine quadrant and compute angle
-        // Using CORDIC-like approach with lookup table would be more accurate
-        // Here we use a polynomial approximation
-        
-        int32_t abs_x = (x >= 0) ? x : -x;
-        int32_t abs_y = (y >= 0) ? y : -y;
-        
-        int32_t angle;
-        
-        if (abs_x >= abs_y) {
-            // |x| >= |y|: angle is in range [-45°, 45°] from x-axis
-            // atan(y/x) ≈ (y/x) * (π/4) for small angles
-            // In normalized format: angle ≈ (y * 8192) / x (8192 = 45° in int16)
-            if (abs_x > 0) {
-                // Scale to prevent overflow: (y << 13) / x gives angle in [-8192, 8192]
-                angle = ((int64_t)y << 13) / x;
-            } else {
-                angle = 0;
-            }
-        } else {
-            // |y| > |x|: angle is closer to ±90°
-            // atan(y/x) = sign(y) * 90° - atan(x/y)
-            if (abs_y > 0) {
-                int32_t atan_xy = ((int64_t)x << 13) / y;
-                // 90° in normalized int16 = 16384 (quarter of full range)
-                if (y > 0) {
-                    angle = 16384 - atan_xy;   // First/second quadrant
-                } else {
-                    angle = -16384 - atan_xy;  // Third/fourth quadrant
-                }
-            } else {
-                angle = 0;
-            }
-        }
-        
-        // Adjust for quadrant (handle x < 0 cases)
-        if (x < 0) {
-            if (y >= 0) {
-                angle = 32768 + angle;      // Second quadrant: add 180°
-            } else {
-                angle = -32768 + angle;     // Third quadrant: subtract 180°
-            }
-        }
-        
-        // Clamp to int16 range
-        if (angle > INT16_MAX) {
-            angle = INT16_MAX;
-        } else if (angle < INT16_MIN) {
-            angle = INT16_MIN;
-        }
-        
-        return (int16_t)angle;
     }
 };

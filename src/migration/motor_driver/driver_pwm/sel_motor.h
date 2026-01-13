@@ -53,10 +53,10 @@ private:
     uint8_t idx2_;  // Index for output channel 2
 
     // Output cache for voltage path (only final remapped result)
-    int16_t abc_voltages_remapped_[3];  // ABC voltages after phase remapping
+    Vec3D abc_voltages_remapped_;  // ABC voltages after phase remapping
 
     // Intermediate current values (after duty masking)
-    int16_t abc_currents_masked_[3];  // Physical currents after high-duty masking
+    Vec3D abc_currents_masked_;  // Physical currents after high-duty masking
 
     // Error flags
     uint8_t err_voltage_;  // Error flag for voltage path
@@ -72,7 +72,7 @@ public:
     /// @param current_epsilon Balance tolerance for current in Q15 format
     MotorSelector(Feedback& parent,
                   uint32_t motor_type = MotorType_STEP,
-                  PhasePattern phase_pattern = ABC,
+                  PhasePattern phase_pattern = PhasePattern_ABC,
                   uint16_t duty_permille = 995u,
                   int16_t current_epsilon = 256)
         : feedback_(parent),
@@ -83,7 +83,7 @@ public:
           idx0_(0),
           idx1_(1),
           idx2_(2),
-          abc_voltages_remapped_{0, 0, 0},
+          abc_voltages_remapped_(0, 0, 0),
           err_voltage_(0u),
           err_current_(0u) {
         set_phase_pattern(phase_pattern);
@@ -110,17 +110,17 @@ public:
         // BCA -> [1,2,0]
         // CAB -> [2,0,1]
         switch (phase_pattern) {
-            case BCA:
-                idx0_ = 1;
-                idx1_ = 2;
+            case PhasePattern_CBA:
+                idx0_ = 2;
+                idx1_ = 1;
                 idx2_ = 0;
                 break;
-            case CAB:
-                idx0_ = 2;
-                idx1_ = 0;
+            case PhasePattern_ACB:
+                idx0_ = 0;
+                idx1_ = 2;
                 idx2_ = 1;
                 break;
-            case ABC:
+            case PhasePattern_ABC:
             default:
                 idx0_ = 0;
                 idx1_ = 1;
@@ -146,11 +146,11 @@ public:
 
         // Apply inline phase remapping (logical ABC -> physical channels)
         const int16_t* abc = voltage_converter_.get_phase_duty();
-        abc_voltages_remapped_[0] = abc[idx0_];
-        abc_voltages_remapped_[1] = abc[idx1_];
-        abc_voltages_remapped_[2] = abc[idx2_];
+        abc_voltages_remapped_.a = abc[idx0_];
+        abc_voltages_remapped_.b = abc[idx1_];
+        abc_voltages_remapped_.c = abc[idx2_];
 
-        return abc_voltages_remapped_;
+        return abc_voltages_remapped_.arr;
     }
 
     /// Process current path: ABC currents -> AB currents
@@ -160,13 +160,13 @@ public:
         // Apply high duty cycle masking: if PWM duty > 30720, invalidate corresponding current sensor
         // Apply inline inverse phase remapping (physical channels -> logical ABC)
         constexpr int16_t DUTY_THRESHOLD = 30720;  // ~93.8% duty cycle
-        int16_t logical[3];
-        logical[idx0_] = (abc_voltages_remapped_[0] > DUTY_THRESHOLD) ? INT16_MIN : physical[0];
-        logical[idx1_] = (abc_voltages_remapped_[1] > DUTY_THRESHOLD) ? INT16_MIN : physical[1];
-        logical[idx2_] = (abc_voltages_remapped_[2] > DUTY_THRESHOLD) ? INT16_MIN : physical[2];
+        Vec3D logical;
+        logical[idx0_] = (abc_voltages_remapped_.a > DUTY_THRESHOLD) ? INT16_MIN : physical[0];
+        logical[idx1_] = (abc_voltages_remapped_.b > DUTY_THRESHOLD) ? INT16_MIN : physical[1];
+        logical[idx2_] = (abc_voltages_remapped_.c > DUTY_THRESHOLD) ? INT16_MIN : physical[2];
 
         // Convert logical ABC to AB using current converter
-        current_converter_.tick(logical, motor_type_);
+        current_converter_.tick(logical.arr, motor_type_);
         err_current_ = current_converter_.is_err();
         return current_converter_.get_ab();
     }
@@ -185,7 +185,7 @@ public:
 
     /// Get pointer to remapped ABC voltages (final output for PWM)
     /// @return Pointer to 3-element array [A, B, C] in Q15 format
-    const int16_t* get_voltages() const { return abc_voltages_remapped_; }
+    const int16_t* get_voltages() const { return abc_voltages_remapped_.arr; }
 
     /// Get AB currents as Vec2D (alpha-beta)
     /// @return Vec2D with sin=alpha, cos=beta in Q15 format

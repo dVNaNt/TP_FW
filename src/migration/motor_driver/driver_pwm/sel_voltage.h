@@ -25,7 +25,7 @@ private:
     int16_t max_duty_q15_;  // Maximum duty cycle in Q15 format [0..INT16_MAX]
 
     // Output cache
-    int16_t abc_out_[3];  // Output array: [A, B, C] PWM duty cycles in Q15 format
+    Vec3D abc_out_;  // Output: [A, B, C] PWM duty cycles in Q15 format
 
     // State
     uint8_t err_;  // Error flag: 1=error occurred, 0=no error
@@ -38,7 +38,7 @@ public:
         : feedback_(parent),
           max_duty_q15_(0)  // Will be calculated in set_duty()
           ,
-          abc_out_{0, 0, 0}  // Initialize output array to zeros
+          abc_out_(0, 0, 0)  // Initialize output to zeros
           ,
           err_(0u) {  // Clear error flag
         set_duty(duty_permille);  // Calculate and set max duty in Q15 format
@@ -58,23 +58,23 @@ public:
     /// @param input Vec2D with sin=alpha, cos=beta in Q15 format [-32768, 32767]
     /// @param motor_type Motor type (1=DC, 4=Stepper, 6=BLDC)
     void tick(Vec2D input, uint32_t motor_type) {
-        int16_t voltg_sin = input.sin;
-        int16_t voltg_cos = input.cos;
+        int16_t voltg_alpha = input.alpha;  // Alpha component of voltage
+        int16_t voltg_beta = input.beta;    // Beta component of voltage
         err_ = 1u;  // Set error flag at start of calculation
         
         // Validate motor type is one of the supported types
-        // Validate that sin²+cos² is within normalized range (≤ 32767² * 2)
-        if (!is_valid_motor_type(motor_type) or !check_sin_cos_norm(voltg_sin, voltg_cos)) {
+        // Validate that alpha²+beta² is within normalized range (≤ 32767² * 2)
+        if (!is_valid_motor_type(motor_type) or !check_alpha_beta_norm(voltg_alpha, voltg_beta)) {
             set_error_state();  // Set error and output zeros
             return;             // Exit early on invalid motor type
         }
 
         // Perform AB to ABC conversion with SVPWM algorithm
-        calculate_abc(voltg_sin, voltg_cos, motor_type, static_cast<int32_t>(max_duty_q15_), &abc_out_[0], &abc_out_[1],
-                      &abc_out_[2]);
+        calculate_abc(voltg_alpha, voltg_beta, motor_type, static_cast<int32_t>(max_duty_q15_), &abc_out_.a, &abc_out_.b,
+                      &abc_out_.c);
 
         // Verify that no output channel exceeds the configured duty limit
-        if (!(abc_out_[0] > max_duty_q15_ || abc_out_[1] > max_duty_q15_ || abc_out_[2] > max_duty_q15_)) {
+        if (!(abc_out_.a > max_duty_q15_ || abc_out_.b > max_duty_q15_ || abc_out_.c > max_duty_q15_)) {
             err_ = 0u;  // Set no error flag if everything fine
         }
     }
@@ -85,7 +85,7 @@ public:
 
     /// Get pointer to ABC output array
     /// @return Pointer to 3-element array [A, B, C] in Q15 format
-    const int16_t* get_phase_duty() const { return abc_out_; }
+    const int16_t* get_phase_duty() const { return abc_out_.arr; }
 
 private:
 
@@ -99,33 +99,33 @@ private:
     ///   V_A = V_alpha
     ///   V_B = -V_alpha/2 + V_beta * sqrt(3)/2
     ///   V_C = -V_alpha/2 - V_beta * sqrt(3)/2
-    /// @param sin Alpha component (V_alpha) in Q15 format
-    /// @param cos Beta component (V_beta) in Q15 format
+    /// @param alpha Alpha component (V_alpha) in Q15 format
+    /// @param beta Beta component (V_beta) in Q15 format
     /// @param a Output pointer for phase A voltage
     /// @param b Output pointer for phase B voltage
     /// @param c Output pointer for phase C voltage
-    static void inverse_clarke_tf(int16_t sin, int16_t cos, int32_t* a, int32_t* b, int32_t* c) {
-        int32_t sin32 = static_cast<int32_t>(sin);  // Convert alpha to 32-bit for calculations
-        int32_t cos32 = static_cast<int32_t>(cos);  // Convert beta to 32-bit for calculations
+    static void inverse_clarke_tf(int16_t alpha, int16_t beta, int32_t* a, int32_t* b, int32_t* c) {
+        int32_t alpha32 = static_cast<int32_t>(alpha);  // Convert alpha to 32-bit for calculations
+        int32_t beta32 = static_cast<int32_t>(beta);    // Convert beta to 32-bit for calculations
         // Calculate beta * sqrt(3)/2 using Q16.16 fixed-point multiplication
-        int32_t beta_sqrt3_div2 = (VOLTAGE_SQRT3DIV2_Q16_16 * cos32) >> 16;
+        int32_t beta_sqrt3_div2 = (VOLTAGE_SQRT3DIV2_Q16_16 * beta32) >> 16;
 
-        *a = sin32;                            // Phase A = V_alpha
-        *b = -(sin32 >> 1) + beta_sqrt3_div2;  // Phase B = -V_alpha/2 + V_beta*sqrt(3)/2
-        *c = -(sin32 >> 1) - beta_sqrt3_div2;  // Phase C = -V_alpha/2 - V_beta*sqrt(3)/2
+        *a = alpha32;                            // Phase A = V_alpha
+        *b = -(alpha32 >> 1) + beta_sqrt3_div2;  // Phase B = -V_alpha/2 + V_beta*sqrt(3)/2
+        *c = -(alpha32 >> 1) - beta_sqrt3_div2;  // Phase C = -V_alpha/2 - V_beta*sqrt(3)/2
     }
 
     /// Internal helper: calculates ABC from AB with configurable max duty
     /// Implements SVPWM (Space Vector PWM) with automatic scaling and centering
-    /// @param voltg_sin Alpha component (sine) in Q15 format
-    /// @param voltg_cos Beta component (cosine) in Q15 format
+    /// @param voltg_alpha Alpha component in Q15 format
+    /// @param voltg_beta Beta component in Q15 format
     /// @param motor_type Motor type (1=DC, 4=Stepper, 6=BLDC)
     /// @param max_output Maximum allowed output value
     /// @param out_a Output pointer for phase A duty cycle
     /// @param out_b Output pointer for phase B duty cycle
     /// @param out_c Output pointer for phase C duty cycle
-    void calculate_abc(int16_t voltg_sin,
-                       int16_t voltg_cos,
+    void calculate_abc(int16_t voltg_alpha,
+                       int16_t voltg_beta,
                        uint32_t motor_type,
                        int32_t max_output,
                        int16_t* out_a,
@@ -135,7 +135,7 @@ private:
 
         // Handle DC motor type (differential drive on two channels)
         if (motor_type == MotorType_DC) {
-            int16_t voltg_ref = voltg_sin;  // Only sin component used
+            int16_t voltg_ref = voltg_alpha;  // Only alpha component used for DC
             // Check for disabled state (INT16_MIN) or brake (0)
             if (voltg_ref == INT16_MIN || voltg_ref == 0) {
                 *out_a = *out_b = *out_c = voltg_ref;  // Set all outputs to reference
@@ -151,13 +151,13 @@ private:
         }
         // Handle BLDC motor type (3-phase with Clarke Transform)
         else if (motor_type == MotorType_BLDC) {
-            inverse_clarke_tf(voltg_sin, voltg_cos, &voltg_a, &voltg_b, &voltg_c);  // Convert AB to ABC
+            inverse_clarke_tf(voltg_alpha, voltg_beta, &voltg_a, &voltg_b, &voltg_c);  // Convert AB to ABC
         }
         // Handle Stepper motor type (direct 2-phase mapping)
         else if (motor_type == 4U) {
-            voltg_a = (int32_t)voltg_sin;  // Phase A = sine input (coil A)
-            voltg_b = (int32_t)voltg_cos;  // Phase B = cosine input (coil B)
-            voltg_c = 0;          // Phase C: unused for stepper
+            voltg_a = (int32_t)voltg_alpha;  // Phase A = alpha input (coil A)
+            voltg_b = (int32_t)voltg_beta;   // Phase B = beta input (coil B)
+            voltg_c = 0;                     // Phase C: unused for stepper
         }
         // Handle invalid motor type
         else {
@@ -208,9 +208,9 @@ private:
     /// Set error state and set all outputs to Hi-Z (INT16_MIN)
     void set_error_state() {
         err_ = 1u;                 // Set error flag
-        abc_out_[0] = INT16_MIN;   // Set phase A to Hi-Z
-        abc_out_[1] = INT16_MIN;   // Set phase B to Hi-Z
-        abc_out_[2] = INT16_MIN;   // Set phase C to Hi-Z
+        abc_out_.a = INT16_MIN;    // Set phase A to Hi-Z
+        abc_out_.b = INT16_MIN;    // Set phase B to Hi-Z
+        abc_out_.c = INT16_MIN;    // Set phase C to Hi-Z
     }
 
     /// Check if motor type is one of the supported types
@@ -220,16 +220,16 @@ private:
         return (mt == MotorType_DC || mt == MotorType_BLDC || mt == MotorType_STEP);  // DC, BLDC, or Stepper
     }
     
-    /// Check if sin and cos values are within normalized range
-    /// Validates that sin²+cos² ≤ 32767² * 2 (normalized magnitude check)
-    /// @param sin_val Sine component in Q15 format
-    /// @param cos_val Cosine component in Q15 format
+    /// Check if alpha and beta values are within normalized range
+    /// Validates that alpha²+beta² ≤ 32767² * 2 (normalized magnitude check)
+    /// @param alpha_val Alpha component in Q15 format
+    /// @param beta_val Beta component in Q15 format
     /// @return true if within valid range, false otherwise
-    static bool check_sin_cos_norm(int16_t sin_val, int16_t cos_val) {
-        // Calculate sin² + cos² using 32-bit arithmetic to avoid overflow
-        int32_t sin_sq = (int32_t)sin_val * sin_val;  // sin² in Q30 format
-        int32_t cos_sq = (int32_t)cos_val * cos_val;  // cos² in Q30 format
-        int32_t magnitude_sq = sin_sq + cos_sq;       // Total magnitude squared
+    static bool check_alpha_beta_norm(int16_t alpha_val, int16_t beta_val) {
+        // Calculate alpha² + beta² using 32-bit arithmetic to avoid overflow
+        int32_t alpha_sq = (int32_t)alpha_val * alpha_val;  // alpha² in Q30 format
+        int32_t beta_sq = (int32_t)beta_val * beta_val;     // beta² in Q30 format
+        int32_t magnitude_sq = alpha_sq + beta_sq;          // Total magnitude squared
         
         // Maximum valid magnitude: 32767² * 2 = 2147352578
         constexpr int32_t MAX_MAGNITUDE_SQ = 2147352578;
