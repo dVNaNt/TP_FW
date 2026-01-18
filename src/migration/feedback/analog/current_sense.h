@@ -66,6 +66,9 @@ private:
 
     bool valid; // False by default untill at least one sensor cal started AND full scale != 0
 
+    int16_t overcurrent_soft_norm;  // Soft overcurrent limit in Q15 format
+    int16_t overcurrent_hard_norm;  // Hard overcurrent limit in Q15 format
+
     // ---------------------------------------------------------------------------
     // Private helper methods
     // ---------------------------------------------------------------------------
@@ -170,7 +173,10 @@ public:
           out_norm_(INT16_MIN, INT16_MIN, INT16_MIN),
           out_ma_(INT32_MIN, INT32_MIN, INT32_MIN),
           is_changed(false),
-          valid(false) {
+          valid(false),
+          overcurrent_soft_norm(INT16_MAX),  // Initialize soft overcurrent limit to maximum
+          overcurrent_hard_norm(INT16_MAX)   // Initialize hard overcurrent limit to maximum
+    {
         // Validate and calculate ratios
         if (!(ch1_fs_ma == 0 && ch2_fs_ma == 0 && ch3_fs_ma == 0)) {
             // Find maximum absolute full-scale value among all channels
@@ -302,5 +308,56 @@ public:
         
         // Return absolute value
         return out_ma_.arr;
+    }
+
+    // =========================================================================
+    // OVERCURRENT LIMIT METHODS
+    // =========================================================================
+
+    // Set soft overcurrent limit in normalized Q15 format
+    inline void set_overcurrent_soft_norm(int16_t limit) {
+        overcurrent_soft_norm = limit;  // Store soft limit in Q15 format
+    }
+    
+
+    // Set soft overcurrent limit in milliamps
+    void set_overcurrent_soft_ma(int32_t limit) {
+        overcurrent_soft_norm = ma2norm(limit);  // Convert milliamps to Q15 and store
+    }
+
+    // Set hard overcurrent limit in normalized Q15 format
+    inline void set_overcurrent_hard_norm(int16_t limit) {
+        overcurrent_hard_norm = limit;  // Store hard limit in Q15 format
+    }
+
+    // Set hard overcurrent limit in milliamps
+    void set_overcurrent_hard_ma(int32_t limit) {
+        overcurrent_hard_norm = ma2norm(limit);  // Convert milliamps to Q15 and store
+    }
+
+    // Check if current exceeds soft limit (absolute value comparison)
+    inline bool is_overcurrent_soft_norm(int32_t current_norm) const {
+        int32_t abs_current = (current_norm >= 0) ? current_norm : -current_norm;  // Get absolute value
+        return (int32_t)abs_current >= overcurrent_soft_norm;  // Compare with soft limit
+    }
+
+    // Check if current exceeds hard limit (absolute value comparison)
+    inline bool is_overcurrent_hard_norm(int16_t current_norm) const {
+        int16_t abs_current = (current_norm >= 0) ? current_norm : -current_norm;  // Get absolute value
+        return abs_current >= overcurrent_hard_norm;  // Compare with hard limit
+    }
+
+    // Check if any channel exceeds soft overcurrent limit
+    inline bool is_any_overcurrent_soft() const {
+        return is_overcurrent_soft_norm(out_norm_.a) ||  // Check channel 1
+               is_overcurrent_soft_norm(out_norm_.b) ||  // Check channel 2
+               is_overcurrent_soft_norm(out_norm_.c);    // Check channel 3
+    }
+
+    // Check if any channel exceeds hard overcurrent limit
+    inline bool is_any_overcurrent_hard() const {
+        return is_overcurrent_hard_norm(out_norm_.a) ||  // Check channel 1
+               is_overcurrent_hard_norm(out_norm_.b) ||  // Check channel 2
+               is_overcurrent_hard_norm(out_norm_.c);    // Check channel 3
     }
 };  // End of CurrentSense structure definition

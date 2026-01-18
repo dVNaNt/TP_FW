@@ -25,7 +25,7 @@
 // Copyright 2024 Anton Khrustalev, creapunk.com
 
 #include "../../common.h"
-#include "frequency_generator.h"
+#include "../../math_integer/helpers/frequency_generator.h"
 
 /// HFI (High Frequency Injection) Signal Generator and Analyzer
 /// Generates voltage signals and analyzes current response using online DFT

@@ -20,11 +20,11 @@
 // Copyright 2024 Anton Khrustalev, creapunk.com
 
 #include "../../common.h"
-#include "../../math_integer/filters/lpf.h"
+#include "../../math_integer/filters/filter1st.h"
 #include "../motor.h"
 #include "../types.h"
 #include "sel_motor.h"
-#include "frequency_generator.h"
+#include "../../math_integer/helpers/frequency_generator.h"
 
 // Forward declarations
 struct Feedback;
@@ -115,7 +115,7 @@ private:
     int16_t duty_d_;         // D-axis duty cycle
 
     // LPF for current filtering
-    FilterLPF lpf_;          // Low-pass filter for current
+    Filter1st lpf_;          // Low-pass filter for current
 
     // State machine
     TestState state_;        // Current test state
@@ -341,7 +341,7 @@ public:
         int16_t current_d = current_dq.d;  // D-axis current (flux)
         
         // Filter D-axis current directly (no manual polarity flips)
-        int16_t filt = lpf_.tick(current_d);
+        int16_t filt = lpf_.tick_lpf(current_d);
 
         // Safety check - overcurrent protection (check absolute value)
         int16_t filt_abs = (filt >= 0) ? filt : -filt;  // Absolute value

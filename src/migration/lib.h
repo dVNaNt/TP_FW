@@ -5,7 +5,7 @@
 
 #include "common.h"
 #include "feedback/feedback.h"  // Include unified feedback module
-#include "math_integer/filters/lpf.h"
+#include "math_integer/filters/filter1st.h"
 #include "motor_driver/types.h"
 #include "motor_driver/driver_pwm/driver_pwm.h"
 #include "motor_driver/calibration/angle_calibrator.h"
@@ -64,7 +64,7 @@ public:
     // ========================================================================
     DriverPWM driver_;
     AngleCalibrator angle_calibrator_;
-    FilterLPF filter_;
+    Filter1st filter_;
 
     // ========================================================================
     // Control state

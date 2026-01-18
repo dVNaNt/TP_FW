@@ -93,27 +93,6 @@ private:
     constexpr static int32_t VOLTAGE_SQRT3DIV2_Q16_16 = 56755;
 
 
-    /// Performs Inverse Clarke Transform to convert 2-phase (alpha-beta) voltages
-    /// into 3-phase (ABC) voltages for BLDC motor control.
-    /// Clarke Transform equations:
-    ///   V_A = V_alpha
-    ///   V_B = -V_alpha/2 + V_beta * sqrt(3)/2
-    ///   V_C = -V_alpha/2 - V_beta * sqrt(3)/2
-    /// @param alpha Alpha component (V_alpha) in Q15 format
-    /// @param beta Beta component (V_beta) in Q15 format
-    /// @param a Output pointer for phase A voltage
-    /// @param b Output pointer for phase B voltage
-    /// @param c Output pointer for phase C voltage
-    static void inverse_clarke_tf(int16_t alpha, int16_t beta, int32_t* a, int32_t* b, int32_t* c) {
-        int32_t alpha32 = static_cast<int32_t>(alpha);  // Convert alpha to 32-bit for calculations
-        int32_t beta32 = static_cast<int32_t>(beta);    // Convert beta to 32-bit for calculations
-        // Calculate beta * sqrt(3)/2 using Q16.16 fixed-point multiplication
-        int32_t beta_sqrt3_div2 = (VOLTAGE_SQRT3DIV2_Q16_16 * beta32) >> 16;
-
-        *a = alpha32;                            // Phase A = V_alpha
-        *b = -(alpha32 >> 1) + beta_sqrt3_div2;  // Phase B = -V_alpha/2 + V_beta*sqrt(3)/2
-        *c = -(alpha32 >> 1) - beta_sqrt3_div2;  // Phase C = -V_alpha/2 - V_beta*sqrt(3)/2
-    }
 
     /// Internal helper: calculates ABC from AB with configurable max duty
     /// Implements SVPWM (Space Vector PWM) with automatic scaling and centering
@@ -124,7 +103,7 @@ private:
     /// @param out_a Output pointer for phase A duty cycle
     /// @param out_b Output pointer for phase B duty cycle
     /// @param out_c Output pointer for phase C duty cycle
-    void calculate_abc(int16_t voltg_alpha,
+    inline void calculate_abc(int16_t voltg_alpha,
                        int16_t voltg_beta,
                        uint32_t motor_type,
                        int32_t max_output,
@@ -150,8 +129,16 @@ private:
             return;                                                          // Exit after DC motor handling
         }
         // Handle BLDC motor type (3-phase with Clarke Transform)
-        else if (motor_type == MotorType_BLDC) {
-            inverse_clarke_tf(voltg_alpha, voltg_beta, &voltg_a, &voltg_b, &voltg_c);  // Convert AB to ABC
+        // Handle Calibration mode: voltage commutation like BLDC
+        else if (motor_type == MotorType_BLDC || motor_type == MotorType_Calibration) {
+            int32_t alpha32 = static_cast<int32_t>(voltg_alpha);  // Convert alpha to 32-bit for calculations
+            int32_t beta32 = static_cast<int32_t>(voltg_beta);    // Convert beta to 32-bit for calculations
+            // Calculate beta * sqrt(3)/2 using Q16.16 fixed-point multiplication
+            int32_t beta_sqrt3_div2 = (VOLTAGE_SQRT3DIV2_Q16_16 * beta32) >> 16;
+
+            voltg_a = alpha32;                            // Phase A = V_alpha
+            voltg_b = -(alpha32 >> 1) + beta_sqrt3_div2;  // Phase B = -V_alpha/2 + V_beta*sqrt(3)/2
+            voltg_c = -(alpha32 >> 1) - beta_sqrt3_div2;  // Phase C = -V_alpha/2 - V_beta*sqrt(3)/2
         }
         // Handle Stepper motor type (direct 2-phase mapping)
         else if (motor_type == 4U) {
@@ -215,9 +202,9 @@ private:
 
     /// Check if motor type is one of the supported types
     /// @param mt Motor type to validate
-    /// @return true if valid (DC, BLDC, or Stepper), false otherwise
+    /// @return true if valid (DC, BLDC, Stepper, or Calibration), false otherwise
     static bool is_valid_motor_type(uint32_t mt) {
-        return (mt == MotorType_DC || mt == MotorType_BLDC || mt == MotorType_STEP);  // DC, BLDC, or Stepper
+        return (mt == MotorType_DC || mt == MotorType_BLDC || mt == MotorType_STEP || mt == MotorType_Calibration);
     }
     
     /// Check if alpha and beta values are within normalized range

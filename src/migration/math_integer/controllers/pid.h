@@ -9,132 +9,138 @@
 /// - Based on integer implementation and works with i16 range
 /// - Works with constant dt only
 /// - Has integral anti-windup
-typedef struct {
-    /// Proportional gain coefficient: -10000% to 10000%.
-    /// Controls the reaction to the current error magnitude.
-    int32_t kp;
+struct PID_Int {
+private:
+    // Constants controlling fast vs. slow math operations
+    static constexpr bool FAST_MATH = true;        // Use fast bit-shift math
+    static constexpr int32_t SLOW_MATH_SCALE = 2;  // Scale factor for slow math (do not change!)
 
-    /// Integral gain coefficient: -10000% to 10000%.
-    /// Controls the reaction based on the accumulation of past errors.
-    int32_t ki;
+    int32_t kp_;             // Proportional gain coefficient (scaled)
+    int32_t ki_;             // Integral gain coefficient (scaled)
+    int32_t kd_;             // Derivative gain coefficient (scaled)
+    int32_t kff_;            // Feed-forward gain coefficient (scaled)
+    int32_t integral_;       // Accumulator for the integral term
+    int32_t previous_error_; // Stores the previous error value
+    int16_t output_;         // The PID controller output
 
-    /// Derivative gain coefficient: -10000% to 10000%.
-    /// Controls the reaction to the rate of error change.
-    int32_t kd;
+    /// Scale gain coefficient based on math mode
+    /// @param gain Raw gain value (-10000% to 10000%)
+    /// @return Scaled gain for internal calculations
+    static inline int32_t scaleGain(int32_t gain) {
+        int32_t clamped = tunepulse_clamp_i32(gain, 10000); // Clamp to valid range
+        if (FAST_MATH) {
+            return (clamped << 7) / 100; // Fast bit-shift scaling
+        }
+        return clamped; // No scaling for slow math
+    }
 
-    /// Feed-forward gain coefficient: -10000% to 10000%.
-    /// Adds an anticipated value to the output to help the system respond faster.
-    int32_t kff;
+public:
+    /// Constructor: Initialize PID controller with gain coefficients
+    /// @param kp Proportional gain (-10000% to 10000%)
+    /// @param ki Integral gain (-10000% to 10000%)
+    /// @param kd Derivative gain (-10000% to 10000%)
+    /// @param kff Feed-forward gain (-10000% to 10000%)
+    PID_Int(int32_t kp, int32_t ki, int32_t kd, int32_t kff)
+        : kp_(scaleGain(kp))       // Scale and store proportional gain
+        , ki_(scaleGain(ki))       // Scale and store integral gain
+        , kd_(scaleGain(kd))       // Scale and store derivative gain
+        , kff_(scaleGain(kff))     // Scale and store feed-forward gain
+        , integral_(0)             // Initialize integral accumulator to zero
+        , previous_error_(0)       // Initialize previous error to zero
+        , output_(0)               // Initialize output to zero
+    {}
 
-    /// Accumulator for the integral term
-    int32_t integral;
-    /// Stores the previous error value for derivative and integral calculation
-    int32_t previous_error;
-    /// The PID controller output
-    int16_t output;
-} PID_Int;
+    /// Update the PID controller calculations
+    /// @param error Difference between desired and measured values
+    /// @param feedfwd Feed-forward value to anticipate system response
+    /// @param limit Maximum output limit (positive or negative)
+    inline void tick(int16_t error, int16_t feedfwd, int16_t limit) {
+        // Convert inputs to i32 for fixed-point math
+        int32_t error_i32 = static_cast<int32_t>(error);       // Cast error to 32-bit
+        int32_t feedfwd_i32 = static_cast<int32_t>(feedfwd);   // Cast feedforward to 32-bit
+        int32_t limit_i32 = static_cast<int32_t>(limit);       // Cast limit to 32-bit
 
-// Constants controlling fast vs. slow math operations
-enum {
-    PID_INT_FAST_MATH = 1,
-    PID_INT_SLOW_MATH_SCALE = 2  // Do not change!
+        // ######################## PROPORTIONAL TERM #################################
+        int32_t p = FAST_MATH 
+            ? ((error_i32 * kp_) >> 7)                         // Fast: bit-shift division
+            : ((error_i32 * kp_) >> SLOW_MATH_SCALE);          // Slow: scaled division
+
+        // ########################## INTEGRAL TERM ###################################
+        // Tustin's method (trapezoidal rule) for integrating error with smoothing
+        integral_ += (error_i32 + previous_error_) >> 1;       // Average of current and previous error
+
+        // Clamp integral with anti-windup to prevent saturation
+        integral_ = tunepulse_clamp_i32(integral_, limit_i32); // Limit integral accumulation
+
+        // Calculate integral term
+        int32_t i = FAST_MATH 
+            ? ((integral_ * ki_) >> 7)                         // Fast: bit-shift division
+            : ((integral_ * ki_) >> SLOW_MATH_SCALE);          // Slow: scaled division
+
+        // ######################### DERIVATIVE TERM ##################################
+        // Calculate derivative by finding the difference in error
+        int32_t derivative = error_i32 - previous_error_;      // Rate of error change
+
+        // Calculate derivative term
+        int32_t d = FAST_MATH 
+            ? ((derivative * kd_) >> 7)                        // Fast: bit-shift division
+            : ((derivative * kd_) >> SLOW_MATH_SCALE);         // Slow: scaled division
+
+        // Update previous error for the next calculation
+        previous_error_ = error_i32;                           // Store current error
+
+        // ######################## FEED-FORWARD TERM #################################
+        int32_t ff = FAST_MATH 
+            ? ((feedfwd_i32 * kff_) >> 7)                      // Fast: bit-shift division
+            : ((feedfwd_i32 * kff_) >> SLOW_MATH_SCALE);       // Slow: scaled division
+
+        // ############################## OUTPUT ######################################
+        // Calculate total output by combining all components
+        int32_t out = p + i + d + ff;                          // Sum P + I + D + FF
+
+        // Apply fixed-point math correction for slow math mode
+        if (!FAST_MATH) {
+            out = out / (100 >> SLOW_MATH_SCALE);              // Scale correction
+        }
+
+        // Clamp final output to specified limits
+        output_ = static_cast<int16_t>(tunepulse_clamp_i32(out, limit_i32)); // Store clamped output
+    }
+
+    /// Get the current PID output value
+    /// @return Calculated output as 16-bit integer
+    inline int16_t output() const {
+        return output_; // Return stored output
+    }
+
+    /// Reset the controller state (integral and previous error)
+    inline void reset() {
+        integral_ = 0;       // Clear integral accumulator
+        previous_error_ = 0; // Clear previous error
+        output_ = 0;         // Clear output
+    }
+
+    /// Update proportional gain
+    /// @param kp New proportional gain (-10000% to 10000%)
+    inline void setKp(int32_t kp) {
+        kp_ = scaleGain(kp); // Scale and store new gain
+    }
+
+    /// Update integral gain
+    /// @param ki New integral gain (-10000% to 10000%)
+    inline void setKi(int32_t ki) {
+        ki_ = scaleGain(ki); // Scale and store new gain
+    }
+
+    /// Update derivative gain
+    /// @param kd New derivative gain (-10000% to 10000%)
+    inline void setKd(int32_t kd) {
+        kd_ = scaleGain(kd); // Scale and store new gain
+    }
+
+    /// Update feed-forward gain
+    /// @param kff New feed-forward gain (-10000% to 10000%)
+    inline void setKff(int32_t kff) {
+        kff_ = scaleGain(kff); // Scale and store new gain
+    }
 };
-
-// Constructor for the PID controller
-//
-// # Arguments
-// * `kp` - Proportional gain coefficient
-// * `ki` - Integral gain coefficient
-// * `kd` - Derivative gain coefficient
-// * `kff` - Feed-forward gain coefficient
-//
-// # Returns
-// A new instance of the PID controller with the given gain coefficients.
-static inline PID_Int pid_int_new(int32_t kp, int32_t ki, int32_t kd, int32_t kff) {
-    // Adjusts and fits each gain coefficient within a valid range
-    PID_Int self;
-    self.kp = tunepulse_clamp_i32(kp, 10000);
-    self.ki = tunepulse_clamp_i32(ki, 10000);
-    self.kd = tunepulse_clamp_i32(kd, 10000);
-    self.kff = tunepulse_clamp_i32(kff, 10000);
-
-    if (PID_INT_FAST_MATH) {
-        self.kp = (self.kp << 7) / 100;
-        self.ki = (self.ki << 7) / 100;
-        self.kd = (self.kd << 7) / 100;
-        self.kff = (self.kff << 7) / 100;
-    }
-
-    self.integral = 0;       // Initialize the integral accumulator
-    self.previous_error = 0; // Initialize the previous error
-    self.output = 0;         // Initialize the output
-    return self;
-}
-
-// Update the PID controller calculations
-//
-// # Arguments
-// * `error` - The difference between the desired and measured values
-// * `feedfwd` - A feed-forward value used to anticipate the system response
-// * `limit` - The maximum output limit (positive or negative)
-//
-// This method computes the new PID output based on the provided error, feed-forward value,
-// and output limits, considering the proportional, integral, derivative, and feed-forward components.
-static inline void pid_int_tick(PID_Int* self, int16_t error, int16_t feedfwd, int16_t limit) {
-    // Convert inputs as i32 to allow fixed point math
-    int32_t error_i32 = (int32_t)error;
-    int32_t feedfwd_i32 = (int32_t)feedfwd;
-    int32_t limit_i32 = (int32_t)limit;
-
-    // ######################## PROPORTIONAL TERM #################################
-    int32_t p = PID_INT_FAST_MATH ? ((error_i32 * self->kp) >> 7)
-                                  : ((error_i32 * self->kp) >> PID_INT_SLOW_MATH_SCALE); // Maximum possible value: ±100 * ±2^15
-
-    // ########################## INTEGRAL TERM ###################################
-    // Tustin's method (trapezoidal rule) for integrating the error with smoothing
-    self->integral += (error_i32 + self->previous_error) >> 1;
-
-    // Clamp integral to avoid with anti-windup
-    self->integral = tunepulse_clamp_i32(self->integral, limit_i32); // Maximum accumulation: ±2^15
-
-    // Calculate integral term
-    int32_t i = PID_INT_FAST_MATH ? ((self->integral * self->ki) >> 7)
-                                  : ((self->integral * self->ki) >> PID_INT_SLOW_MATH_SCALE); // Maximum possible value: ±100 * ±2^15
-
-    // ######################### DERIVATIVE TERM ##################################
-    // Calculate derivative by finding the difference in error
-    int32_t derivative = error_i32 - self->previous_error; // Maximum value: ±2 * ±2^15 = ±2^16
-
-    // Calculate derivative term
-    int32_t d = PID_INT_FAST_MATH ? ((derivative * self->kd) >> 7)
-                                  : ((derivative * self->kd) >> PID_INT_SLOW_MATH_SCALE); // Maximum possible value: ±100 * ±2^16
-
-    // Update previous error for the next calculation
-    self->previous_error = error_i32;
-
-    // ######################## FEED-FORWARD TERM #################################
-    int32_t ff = PID_INT_FAST_MATH ? ((feedfwd_i32 * self->kff) >> 7)
-                                   : ((feedfwd_i32 * self->kff) >> PID_INT_SLOW_MATH_SCALE); // Maximum possible value: ±100 * ±2^15
-
-    // ############################## OUTPUT ######################################
-    // Calculate the total output by combining all components
-    int32_t output = p + i + d + ff; // Maximum possible value: ±500 * 2^15
-
-    // Apply fixed-point math correction to the output
-    if (!PID_INT_FAST_MATH) {
-        output = output / (100 >> PID_INT_SLOW_MATH_SCALE);
-    }
-    
-
-    // Clamp the final output to ensure it stays within the specified limits
-    self->output = (int16_t)tunepulse_clamp_i32(output, limit_i32);
-}
-
-/// Retrieve the output value of the PID controller
-/// # Returns
-/// The calculated output as a 16-bit integer value.
-static inline int16_t pid_int_output(const PID_Int* self) {
-    return self->output;
-}
-
-

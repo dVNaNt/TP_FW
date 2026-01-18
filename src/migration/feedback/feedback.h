@@ -13,6 +13,7 @@
 #include "analog/supply_voltage.h"  // Include supply voltage sensing
 #include "analog/current_sense.h"  // Include current sensing
 #include "position/position_integrator.h"  // Include position/encoder tracking
+#include "analog/power.h"
 
 // Forward declaration to allow friend access
 struct Feedback;
@@ -24,16 +25,21 @@ public:
     SupplyVoltage supply;  // Supply voltage sensing with filtering
     CurrentSense current;  // 3-channel current sensing with calibration
     Position position;  // Encoder position tracking and integration
+    PowerMonitor power;
+    
 private:
     // Make tick() methods of internal structures accessible only to Feedback
     friend struct SupplyVoltage;
     friend struct CurrentSense;
     friend struct InputsDump;
     friend struct Position;
+    friend struct PowerMonitor;
     friend struct DriverPWM;  // Allow DriverPWM to access private methods for calibration
     bool is_updated_;
     DataInputs data_;  // Private copy of latest sensor data for external access
     uint32_t enabled_modules_;  // Bitmask of enabled modules for conditional tick execution
+
+    
     
 public:
     // Constructor: Initialize feedback with configuration parameters
@@ -48,7 +54,8 @@ public:
           position(),  // Initialize position integrator with default constructor
           is_updated_(false),  // Initialize update flag to false
           data_(),  // Initialize data copy with default constructor
-          enabled_modules_(0)  // Initialize enabled modules from mandatory fields
+          enabled_modules_(0),  // Initialize enabled modules from mandatory fields
+          power(current.full_scale_max_ma, supply_max_mv)
     {
     }
 

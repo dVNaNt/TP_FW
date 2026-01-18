@@ -8,7 +8,8 @@ typedef enum {
     MotorType_Invalid = 0,
     MotorType_DC = 1,
     MotorType_STEP = 4,
-    MotorType_BLDC = 6
+    MotorType_BLDC = 6,
+    MotorType_Calibration = 7  // Voltage like BLDC, current like Stepper
 } MotorType;
 
 /// PhasePattern enumeration for 3-phase remap (output ordering)

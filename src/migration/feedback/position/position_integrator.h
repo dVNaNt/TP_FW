@@ -1,7 +1,7 @@
 #pragma once  // Ensure this header is included only once during compilation
 
 #include "../../common.h"  // Include common migration definitions and types
-#include "../../math_integer/filters/lpf.h"  // Include low-pass filter for position smoothing
+#include "../../math_integer/filters/filter1st.h"  // Include first-order filter for position smoothing
 
 /// Position integrator manages and calculates the absolute position from incremental encoder readings.
 /// Tracks both angle (0..65535) and full rotations (signed) as a combined 32-bit value.
@@ -18,7 +18,7 @@ private:
     // ---------------------------------------------------------------------------
     
     int32_t position_;  // Combined value: (rotations << 16) | angle
-    FilterLPF filter_;  // Low-pass filter for smoothing angle measurements
+    Filter1st filter_;  // Low-pass filter for smoothing angle measurements
 
     // Main processing function: Update position with new encoder reading
     // input_pos: Current encoder angle (0..65535)
@@ -33,7 +33,7 @@ private:
         position_ = position_ + (int32_t)dif;  // Add difference to maintain continuous position
         
         // Update filtered angle using low-pass filter
-        filter_.tick(input_pos);  // Apply LPF to raw angle for smooth output
+        filter_.tick_lpf(input_pos);  // Apply LPF to raw angle for smooth output
     }
 
     friend struct Feedback;
@@ -43,7 +43,7 @@ public:
     Position() : position_(0), filter_(0, 0) {}  // Constructor: Create with zero position and disabled filter
     
     // Constructor: Initialize position with filter alpha
-    // alpha: Filter coefficient (0..255, where 0=no filtering, 255=max filtering)
+    // alpha: Filter coefficient (0..255, where 0=infinite filtering, 255=no filtering)
     Position(uint8_t alpha) : position_(0), filter_(0, alpha) {}  // Constructor: Create with specified filter alpha
     
     // Get current encoder angle (0..65535)
@@ -81,13 +81,9 @@ public:
     }
     
     // Set filter alpha coefficient
-    // alpha: Filter coefficient (0..255, where 0=no filtering, 255=max filtering)
+    // alpha: Filter coefficient (0..255, where 0=infinite filtering, 255=no filtering)
     inline void set_filter_alpha(uint8_t alpha) {  // Update filter coefficient
         filter_.set_alpha(alpha);  // Set new alpha value
     }
     
-    // Get current filter alpha coefficient
-    inline uint8_t get_filter_alpha() const {  // Get filter coefficient
-        return (uint8_t)filter_.alpha;  // Return current alpha value
-    }
 };  // End of Position structure definition

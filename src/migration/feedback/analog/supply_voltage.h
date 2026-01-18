@@ -9,7 +9,7 @@
 // Uses precomputed scale factor for optimal resolution conversion between normalized and millivolt values.
 
 #include "../../common.h"  // Include common migration definitions and types
-#include "../../math_integer/filters/lpf.h"  // Include low-pass filter for smoothing
+#include "../../math_integer/filters/filter1st.h"  // Include first-order filter for smoothing
 
 // Supply voltage structure with filtering and normalization
 struct SupplyVoltage {  // Define the SupplyVoltage structure for voltage sensing
@@ -18,7 +18,7 @@ private:
     // Private data members
     // ---------------------------------------------------------------------------
     
-    FilterLPF filter_;  // Low-pass filter instance for smoothing ADC readings
+    Filter1st filter_;  // Low-pass filter instance for smoothing ADC readings
     
     const int32_t max_voltage_mv_;  // Maximum voltage in millivolts for scaling (e.g., 24000 for 24V)
     
@@ -27,10 +27,15 @@ private:
     int16_t voltage_norm_;  // Normalized voltage output in Q15 format (-32768..32767)
     int32_t voltage_mv_;    // Voltage in millivolts
 
+    int16_t overvoltage_soft_norm;   // Soft overvoltage limit in Q15 format
+    int16_t overvoltage_hard_norm;   // Hard overvoltage limit in Q15 format
+    int16_t undervoltage_soft_norm;  // Soft undervoltage limit in Q15 format
+    int16_t undervoltage_hard_norm;  // Hard undervoltage limit in Q15 format
+
     // Main processing function: Update filter and calculate normalized/millivolt outputs
     // raw_adc: Raw ADC reading (0..65535, where 65535 represents max_voltage_mv)
     void tick(uint16_t raw_adc) {  // Main processing function called each cycle with new ADC reading
-        filter_.tick(raw_adc);  // Update low-pass filter with new ADC value
+        filter_.tick_lpf(raw_adc);  // Update low-pass filter with new ADC value
         
         uint16_t filtered = filter_.get_output();  // Get filtered ADC value (0..65535)
         
@@ -46,14 +51,18 @@ private:
     
 public:
     // Constructor: Initialize with filter alpha and maximum voltage
-    // alpha: Filter coefficient (0..255, where 0=no filtering, 255=maximum filtering)
+    // alpha: Filter coefficient (0..255, where 0=infinite filtering, 255=no filtering)
     // max_voltage_mv: Maximum expected voltage in millivolts
     SupplyVoltage(uint8_t alpha, int32_t max_voltage_mv)  // Constructor: Create and initialize with filter settings
         : filter_(0, alpha),  // Initialize filter with zero input and specified alpha
           max_voltage_mv_(max_voltage_mv),  // Store maximum voltage for scaling
           scale_(0),  // Initialize scale factor (will be calculated)
           voltage_norm_(0),  // Initialize normalized voltage to zero
-          voltage_mv_(0)  // Initialize millivolt voltage to zero
+          voltage_mv_(0),  // Initialize millivolt voltage to zero
+          overvoltage_soft_norm(INT16_MAX),   // Initialize soft overvoltage limit to maximum
+          overvoltage_hard_norm(INT16_MAX),   // Initialize hard overvoltage limit to maximum
+          undervoltage_soft_norm(INT16_MIN),  // Initialize soft undervoltage limit to minimum
+          undervoltage_hard_norm(INT16_MIN)   // Initialize hard undervoltage limit to minimum
     {
         // Calculate optimal scale factor for norm<->mv conversion
         // scale = (max_voltage_mv << shift) >> 15
@@ -100,10 +109,20 @@ public:
     // target_mv: Target voltage in millivolts
     // Returns: Duty cycle in Q15 format (0..32767, where 32767 = 100%)
     inline int16_t mv2duty(int32_t target_mv) const {  // Convert millivolts to duty cycle
-        if (voltage_mv_ <= 0 or target_mv <= 0) return 0;   // Avoid division by zero or neg duty
+        if (voltage_mv_ <= 0) return 0;   // Avoid division by zero or neg duty
         if (voltage_mv_ <= target_mv) return INT16_MAX; // Clamp to maximum duty (100%)
         int32_t duty = (target_mv << 15) / voltage_mv_;  // Calculate duty: (target / supply) * 32768
         return (int16_t)duty;                         // Return duty cycle in Q15
+    }
+    
+    // Convert normalized voltage to duty cycle (Q15 format)
+    // target_norm: Target voltage in Q15 normalized format (0..32767)
+    // Returns: Duty cycle in Q15 format (0..32767, where 32767 = 100%)
+    inline int16_t norm2duty(int16_t target_norm) const {  // Convert normalized voltage to duty cycle
+        if (voltage_norm_ == 0) return 0;  // Avoid division by zero or negative duty
+        if (voltage_norm_ <= target_norm) return INT16_MAX;  // Clamp to maximum duty (100%)
+        int32_t duty = ((int32_t)target_norm << 15) / voltage_norm_;  // Calculate duty: (target / supply) * 32768
+        return (int16_t)duty;  // Return duty cycle in Q15 format
     }
     
     // Get normalized voltage in Q15 format (0..32767 representing 0..max_voltage_mv)
@@ -132,11 +151,64 @@ public:
         filter_.set_alpha(alpha);  // Update filter alpha value
     }
 
-};  // End of SupplyVoltage structure definition
+    // Set soft overvoltage limit in millivolts
+    void set_overvoltage_soft_mv(int32_t v_lim) {
+        overvoltage_soft_norm = mv2norm(v_lim);
+    }
 
-// Factory function to create SupplyVoltage instance
-// alpha: Filter coefficient (0..255)
-// max_voltage_mv: Maximum voltage in millivolts
-inline SupplyVoltage supply_voltage_new(uint8_t alpha, int32_t max_voltage_mv) {  // Factory function for creating SupplyVoltage
-    return SupplyVoltage(alpha, max_voltage_mv);  // Return new SupplyVoltage instance
-}
+    // Set soft overvoltage limit in normalized Q15 format
+    inline void set_overvoltage_soft_norm(int16_t v_lim) {
+        overvoltage_soft_norm = v_lim;
+    }
+
+    // Set hard overvoltage limit in millivolts
+    void set_overvoltage_hard_mv(int32_t v_lim) {
+        overvoltage_hard_norm = mv2norm(v_lim);
+    }
+
+    // Set hard overvoltage limit in normalized Q15 format
+    inline void set_overvoltage_hard_norm(int16_t v_lim) {
+        overvoltage_hard_norm = v_lim;
+    }
+
+    // Set soft undervoltage limit in millivolts
+    void set_undervoltage_soft_mv(int32_t v_lim) {
+        undervoltage_soft_norm = mv2norm(v_lim);
+    }
+
+    // Set soft undervoltage limit in normalized Q15 format
+    inline void set_undervoltage_soft_norm(int16_t v_lim) {
+        undervoltage_soft_norm = v_lim;
+    }
+
+    // Set hard undervoltage limit in millivolts
+    void set_undervoltage_hard_mv(int32_t v_lim) {
+        undervoltage_hard_norm = mv2norm(v_lim);
+    }
+
+    // Set hard undervoltage limit in normalized Q15 format
+    inline void set_undervoltage_hard_norm(int16_t v_lim) {
+        undervoltage_hard_norm = v_lim;
+    }
+
+    // Check if voltage exceeds soft overvoltage limit
+    inline bool is_overvoltage_soft_norm(int16_t v_norm) const {
+        return v_norm >= overvoltage_soft_norm;
+    }
+
+    // Check if voltage exceeds hard overvoltage limit
+    inline bool is_overvoltage_hard_norm(int16_t v_norm) const {
+        return v_norm >= overvoltage_hard_norm;
+    }
+
+    // Check if voltage is below soft undervoltage limit
+    inline bool is_undervoltage_soft_norm(int16_t v_norm) const {
+        return v_norm <= undervoltage_soft_norm;
+    }
+
+    // Check if voltage is below hard undervoltage limit
+    inline bool is_undervoltage_hard_norm(int16_t v_norm) const {
+        return v_norm <= undervoltage_hard_norm;
+    }
+
+};  // End of SupplyVoltage structure definition

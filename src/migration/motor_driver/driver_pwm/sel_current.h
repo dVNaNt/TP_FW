@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../common.h"
+#include "../../math_integer/filters/filter1st.h"
 #include "../types.h"
 
 // Forward declaration
@@ -28,12 +29,19 @@ private:
     // Configuration
     int32_t epsilon_abs_;  // Absolute balance tolerance in Q15 format
 
+    // LPF filters for phase currents (used for balance validation)
+    Filter1st lpf_a_;  // LPF filter for phase A current
+    Filter1st lpf_b_;  // LPF filter for phase B current
+    Filter1st lpf_c_;  // LPF filter for phase C current
+
     // Output cache
-    Vec3D abc_used_;  // Recombined ABC currents after sensor recombination
     Vec2D ab_out_;    // Output Vec2D: sin=alpha, cos=beta in Q15 format
     
     // State
     uint8_t err_;  // Error flag: 1=error occurred, 0=no error
+
+    // LPF filter alpha constant for all filters
+    static constexpr uint8_t LPF_ALPHA = 200;  // Filter coefficient (0-255)
 
 public:
     /// Constructor: initializes current converter with motor type and balance tolerance
@@ -44,7 +52,11 @@ public:
           ,
           epsilon_abs_(0)  // Will be calculated in set_epsilon()
           ,
-          abc_used_(0, 0, 0)  // Initialize recombined currents to zeros
+          lpf_a_(0, LPF_ALPHA)  // Initialize LPF for phase A
+          ,
+          lpf_b_(0, LPF_ALPHA)  // Initialize LPF for phase B
+          ,
+          lpf_c_(0, LPF_ALPHA)  // Initialize LPF for phase C
           ,
           ab_out_{0, 0}  // Initialize output Vec2D to zeros
           ,
@@ -62,16 +74,12 @@ public:
     /// Main calculation: convert ABC currents to AB with sensor recombination
     /// @param abc ABC currents array [A, B, C] in Q15 format (INT16_MIN = sensor missing)
     /// @param motor_type Motor type (1=DC, 4=Stepper, 6=BLDC)
-    void tick(const int16_t abc[3], uint32_t motor_type) {
+    void tick(Vec3D abc, uint32_t motor_type) {
         const int16_t ia = abc[0];
         const int16_t ib = abc[1];
         const int16_t ic = abc[2];
         err_ = 1u;      // Start with error flag set (pessimistic)
         static const Vec2D err_out = Vec2D(INT16_MIN, INT16_MIN);
-
-        abc_used_.a = 0;  // Clear recombined phase A
-        abc_used_.b = 0;  // Clear recombined phase B
-        abc_used_.c = 0;  // Clear recombined phase C
 
         const uint32_t mt = motor_type;  // Cache motor type for efficiency
         // Validate motor type is supported
@@ -82,11 +90,11 @@ public:
 
         // Build bitmask of present sensors (INT16_MIN = missing)
         uint32_t present = 0u;  // Initialize presence bitmask
-        if (ia != INT16_MIN)
+        if (abc.a != INT16_MIN)
             present |= 1u;  // Bit 0: phase A present
-        if (ib != INT16_MIN)
+        if (abc.b != INT16_MIN)
             present |= 2u;  // Bit 1: phase B present
-        if (ic != INT16_MIN)
+        if (abc.c != INT16_MIN)
             present |= 4u;  // Bit 2: phase C present
 
         // Count number of present sensors
@@ -98,29 +106,25 @@ public:
 
         // Handle DC motor: calculate current from available sensors
         if (mt == MotorType_DC) {
+            int16_t val;
             if (present_cnt == 0u) {  // No sensors available
                 ab_out_ = err_out;
                 return;               // Exit with error flag set
-            }
+            } 
 
-            // Store which sensors are present (keep INT16_MIN for missing)
-            abc_used_.a = (present & 1u) ? ia : INT16_MIN;  // Phase A if present
-            abc_used_.b = (present & 2u) ? ib : INT16_MIN;  // Phase B if present
-            abc_used_.c = (present & 4u) ? ic : INT16_MIN;  // Phase C if present
-
-            int16_t val;
+            
             // If both sensors present, calculate (a - b) / 2 and validate difference
             if ((present & 3u) == 3u) {  // Both A and B present
-                const int32_t diff = - (int32_t)ia + (int32_t)ib;  // Calculate difference
-                const int32_t sum = (int32_t)ia + (int32_t)ib ;   // Calculate sum for validation
-                val = sat_i32_to_i16(diff >> 1);                 // (a - b) / 2
+                const int32_t diff = - (int32_t)abc.a - (int32_t)abc.b;  // Calculate difference
+                const int32_t sum = (int32_t)abc.a + (int32_t)abc.b ;   // Calculate sum for validation
+                val = diff / 2;                 // (a - b) / 2 (cant make overflow)
                 // Check if sensors differ too much: |a - b| > epsilon
                 // if (abs_i32(sum) > epsilon_abs_) {
                 //     return;  // Exit with error flag set
                 // }
             } else {
                 // Single sensor: use it directly (other assumed zero)
-                val = (present & 1u) ? ia : - ib;     // Or B, or C
+                val = (present & 1u) ? abc.a : - abc.b;     // Or B, or C
             }
 
             ab_out_.alpha = val;  // Alpha = calculated current
@@ -135,77 +139,54 @@ public:
             return;              // Exit with error flag set
         }
 
-        // Handle BLDC motor: balance constraint ia + ib + ic == 0
-        if (mt == MotorType_BLDC) {
-            int32_t a = (int32_t)ia;  // Convert phase A to 32-bit
-            int32_t b = (int32_t)ib;  // Convert phase B to 32-bit
-            int32_t c = (int32_t)ic;  // Convert phase C to 32-bit
+        int32_t a = (int32_t)ia;  // Convert phase A to 32-bit
+        int32_t b = (int32_t)ib;  // Convert phase B to 32-bit
+        int32_t c = (int32_t)ic;  // Convert phase C to 32-bit
 
-            // Recombine missing phase using Kirchhoff's Current Law (ia + ib + ic = 0)
-            if (!(present & 1u)) {          // Phase A missing
-                a = -((int32_t)ib + (int32_t)ic);  // ia = -(ib + ic)
-            } else if (!(present & 2u)) {   // Phase B missing
-                b = -((int32_t)ia + (int32_t)ic);  // ib = -(ia + ic)
-            } else if (!(present & 4u)) {   // Phase C missing
-                c = -((int32_t)ia + (int32_t)ib);  // ic = -(ia + ib)
-            }
-
-            // Store recombined values (use measured if present, calculated if missing)
-            abc_used_.a = (present & 1u) ? ia : sat_i32_to_i16(a);  // Phase A
-            abc_used_.b = (present & 2u) ? ib : sat_i32_to_i16(b);  // Phase B
-            abc_used_.c = (present & 4u) ? ic : sat_i32_to_i16(c);  // Phase C
-
-            // Perform Clarke Transform to convert ABC to alpha-beta
-            clarke_transform(abc_used_.a, abc_used_.b, abc_used_.c, &ab_out_.alpha, &ab_out_.beta);
-
-            // Validate balance if all 3 sensors are present
-            if (present_cnt == 3u) {  // All sensors available
-                const int32_t bal = (int32_t)ia + (int32_t)ib + (int32_t)ic;  // Calculate balance
-                if (abs_i32(bal) <= epsilon_abs_) {  // Check if within tolerance
-                    err_ = 0u;                       // Clear error flag if balanced
-                }
-            } else {        // Only 2 sensors (recombined 3rd)
-                err_ = 0u;  // Clear error flag (recombination successful)
-            }
-
-            return;  // Exit after BLDC handling
+        // Recombine missing phase using Kirchhoff's Current Law (ia + ib + ic = 0)
+        if (!(present & 1u)) {          // Phase A missing
+            a = -((int32_t)ib + (int32_t)ic);  // ia = -(ib + ic)
+            a = sat_i32_to_i16(a);
+        } else if (!(present & 2u)) {   // Phase B missing
+            b = -((int32_t)ia + (int32_t)ic);  // ib = -(ia + ic)
+            b = sat_i32_to_i16(b);
+        } else if (!(present & 4u)) {   // Phase C missing
+            c = -((int32_t)ia + (int32_t)ib);  // ic = -(ia + ib)
+            c = sat_i32_to_i16(c);
         }
 
-        // Handle Stepper motor: balance constraint ic == ia + ib
-        if (mt == MotorType_STEP) {
-            int32_t a = (int32_t)ia;  // Convert phase A to 32-bit
-            int32_t b = (int32_t)ib;  // Convert phase B to 32-bit
-            int32_t c = (int32_t)ic;  // Convert phase C to 32-bit
+        // Update LPF filters with recombined values (always tick all 3 filters)
+        lpf_a_.tick_lpf(a);  // Filter phase A current
+        lpf_b_.tick_lpf(b);  // Filter phase B current
+        lpf_c_.tick_lpf(c);  // Filter phase C current
 
-            // Recombine missing phase using stepper balance equation (ic = ia + ib)
-            if (!(present & 4u)) {          // Phase C missing
-                c = (int32_t)ia + (int32_t)ib;  // ic = ia + ib
-            } else if (!(present & 1u)) {   // Phase A missing
-                a = -(int32_t)ic - (int32_t)ib;  // ia = ic - ib
-            } else if (!(present & 2u)) {   // Phase B missing
-                b = -(int32_t)ic - (int32_t)ia;  // ib = ic - ia
-            }
-
-            // Store recombined values (use measured if present, calculated if missing)
-            abc_used_.a = (present & 1u) ? ia : sat_i32_to_i16(a);  // Phase A (coil A)
-            abc_used_.b = (present & 2u) ? ib : sat_i32_to_i16(b);  // Phase B (coil B)
-            abc_used_.c = (present & 4u) ? ic : sat_i32_to_i16(c);  // Phase C (return path)
-
+        // Handle BLDC motor: balance constraint ia + ib + ic == 0
+        if (mt == MotorType_BLDC) {
+            // Perform Clarke Transform to convert ABC to alpha-beta
+            clarke_transform(a, b, c, &ab_out_.alpha, &ab_out_.beta);
+        } 
+        // Handle Stepper motor and Calibration mode: balance constraint ic == ia + ib
+        // Calibration mode uses stepper-style current sensing (direct alpha-beta mapping)
+        else if (mt == MotorType_STEP) {
             // For stepper: coils A and B map directly to alpha and beta
-            ab_out_.alpha = abc_used_.a;  // Alpha = coil A current
-            ab_out_.beta = abc_used_.b;   // Beta = coil B current
+            ab_out_.a = a;  // Alpha = coil A current
+            ab_out_.b = b;  // Beta = coil B current
+        } else if (mt == MotorType_Calibration) {
+            ab_out_.a = lpf_b_.get_output();  // Alpha = coil A current
+            ab_out_.b = lpf_c_.get_output();   // Beta = coil B current
+        }
 
-            // Validate balance if all 3 sensors are present
-            if (present_cnt == 3u) {  // All sensors available
-                const int32_t bal = (int32_t)ic - ((int32_t)ia + (int32_t)ib);  // Calculate balance
-                if (abs_i32(bal) <= epsilon_abs_) {  // Check if within tolerance
-                    err_ = 0u;                       // Clear error flag if balanced
-                }
-            } else {        // Only 2 sensors (recombined 3rd)
-                err_ = 0u;  // Clear error flag (recombination successful)
+        // Validate balance using filtered values if all 3 sensors are present
+        if (present_cnt == 3u) {  // All sensors available
+            // Use filtered values for balance check: ic == ia + ib
+            const int32_t bal = (int32_t)lpf_c_.get_output() + 
+                                (int32_t)lpf_a_.get_output() + (int32_t)lpf_b_.get_output();
+            if (abs_i32(bal) <= epsilon_abs_) {  // Check if within tolerance
+                err_ = 0u;                       // Clear error flag if balanced
             }
-
-            return;  // Exit after stepper handling
+            // else: current leakage detected
+        } else {        // Only 2 sensors (recombined 3rd)
+            err_ = 0u;  // Clear error flag (recombination successful)
         }
 
         // Should never reach here due to motor type validation, but keep safe
@@ -218,6 +199,18 @@ public:
     /// Get AB output as Vec2D (alpha-beta currents)
     /// @return Vec2D with sin=alpha, cos=beta in Q15 format
     inline Vec2D get_ab() const { return ab_out_; }
+
+    /// Get filtered phase A current value
+    /// @return Filtered phase A current in Q15 format
+    inline int16_t get_filtered_a() const { return lpf_a_.get_output(); }
+
+    /// Get filtered phase B current value
+    /// @return Filtered phase B current in Q15 format
+    inline int16_t get_filtered_b() const { return lpf_b_.get_output(); }
+
+    /// Get filtered phase C current value
+    /// @return Filtered phase C current in Q15 format
+    inline int16_t get_filtered_c() const { return lpf_c_.get_output(); }
 
 
 private:
@@ -240,8 +233,8 @@ private:
         return (int16_t)x;     // Safe cast within range
     }
 
-    // sqrt(3)/2 in Q16.16 fixed-point format (floor(0.8660254037844386 * 65536) = 56755)
-    constexpr static int32_t CURRENT_SQRT3DIV2_Q16_16 = 56755;
+    // 1/sqrt(3) in Q16.16 format (floor(0.577350269 * 65536) = 37837)
+    constexpr static int32_t CURRENT_INV_SQRT3_Q16_16 = 37837;
 
     /// Performs Direct Clarke Transform to convert 3-phase (ABC) currents
     /// into 2-phase (alpha-beta) currents for field-oriented control.
@@ -263,7 +256,7 @@ private:
         const int32_t diff = (int32_t)b - (int32_t)c;      // Calculate difference
         const int32_t sign = diff >> 31;                   // Extract sign: 0 if positive, -1 if negative
         const uint32_t diff_abs = (uint32_t)((diff ^ sign) - sign);  // Branchless absolute value
-        const uint32_t mul = diff_abs * (uint32_t)CURRENT_SQRT3DIV2_Q16_16;  // Multiply by sqrt(3)/2
+        const uint32_t mul = diff_abs * (uint32_t)CURRENT_INV_SQRT3_Q16_16;  // Multiply by sqrt(3)/2
         int32_t beta32 = (int32_t)(mul >> 16);  // Shift right to convert from Q16.16 to Q15
         beta32 = (beta32 ^ sign) - sign;        // Restore original sign
 
@@ -272,9 +265,9 @@ private:
 
     /// Check if motor type is one of the supported types
     /// @param mt Motor type to validate
-    /// @return true if valid (DC, BLDC, or Stepper), false otherwise
+    /// @return true if valid (DC, BLDC, Stepper, or Calibration), false otherwise
     static bool is_valid_motor_type(uint32_t mt) {
-        return (mt == MotorType_DC || mt == MotorType_BLDC || mt == MotorType_STEP);  // DC, BLDC, or Stepper
+        return (mt == MotorType_DC || mt == MotorType_BLDC || mt == MotorType_STEP || mt == MotorType_Calibration);
     }
 };
 

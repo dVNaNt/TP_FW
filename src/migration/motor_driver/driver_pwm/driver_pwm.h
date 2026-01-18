@@ -6,7 +6,8 @@
 #include "../../feedback/analog/current_sense.h"
 #include "../../feedback/feedback.h"  // Include unified feedback module
 #include "../../math_integer/controllers/pid.h"
-#include "../../math_integer/filters/lpf.h"
+#include "../../math_integer/filters/filter1st.h"
+#include "../../math_integer/helpers/stability_check.h"  // Stability check for current monitoring
 #include "../../math_integer/normalization.h"
 #include "../../math_integer/trigonometry.h"
 #include "../motor.h"  // Motor parameters structure
@@ -16,7 +17,7 @@
 #include "sel_motor.h"
 #include "speaker.h"  // Motor speaker for audio feedback
 // #include "hfi_calibration.h"  // COMMENTED: Replaced by calibration.h
-#include "calibration.h"  // Phase inductance calibration using HFI
+#include "calibration.h"    // Phase inductance calibration using HFI
 
 // Forward declaration
 struct Feedback;
@@ -38,8 +39,8 @@ private:
     PID_Int pid_q_;
 
     // LPF filters for d and q axis current measurements
-    FilterLPF lpf_id_;
-    FilterLPF lpf_iq_;
+    Filter1st lpf_id_;
+    Filter1st lpf_iq_;
 
     uint32_t calibration_counter_;  // Counter for calibration cycles
 
@@ -65,14 +66,25 @@ private:
     bool calib_measuring_r_;          // true = measuring R, false = measuring L
     static constexpr uint32_t CALIB_PAUSE_CYCLES = 1800;  // 100ms pause @ 18kHz
 
+    // Motor connection calibration ramp variables
+    int16_t conn_calib_voltage_;                        // Current output voltage (Q15 duty)
+    int16_t conn_calib_increment_;                      // Voltage increment per tick (Q15)
+    int16_t conn_calib_voltage_limit_;                  // Maximum voltage limit (Q15)
+    int16_t conn_calib_overcurrent_threshold_;          // Overcurrent detection threshold (Q15)
+    uint32_t conn_calib_timeout_;                       // Timeout counter (cycles)
+    uint32_t conn_calib_timeout_limit_;                 // Timeout limit (cycles)
+    bool conn_calib_timeout_flag_;                      // Timeout occurred flag
+
     int16_t hfi_angle_estimate_;                        // Estimated rotor angle from HFI (output)
     uint32_t hfi_warmup_counter_;                       // Counter for 1 second warmup with DC current
+    StabilityCheck stability_check_;                    // Stability checker for current monitoring
     static constexpr uint32_t HFI_WARMUP_CYCLES = 1;    // 1 second at 18kHz PWM
     static constexpr uint16_t HFI_FREQUENCY = 1000;     // HFI injection frequency in Hz
     static constexpr uint16_t HFI_PERIODS = 10;         // Number of periods per measurement
     static constexpr int32_t HFI_AMPLITUDE_MV = 15000;  // HFI voltage amplitude in mV (5V)
 
     Vec3D output;
+    int32_t power;
 
     // Debug/monitoring
     Vec2D voltage_ab_;  // Last voltage command
@@ -82,12 +94,13 @@ public:
     // Constructor: takes Motor reference from parent (TunePulseHeart owns Motor)
     DriverPWM(Feedback& parent, Motor& motor_ref)
         : motor_(motor_ref),
+        power(0),
           feedback_(parent),
           motor_selector_(parent, MotorType_STEP, PhasePattern_CBA, 995u, 256),
           control_mode_(ControlMode_VoltageAB),
-          pid_d_(pid_int_new(0, 0, 0, 0))  // Default PI gains: kp=10%, ki=5%, kd=0, kff=0
+          pid_d_(0, 0, 0, 0)  // Default PI gains: kp=10%, ki=5%, kd=0, kff=0
           ,
-          pid_q_(pid_int_new(0, 0, 0, 0)),
+          pid_q_(0, 0, 0, 0),
           lpf_id_(0, 220)  // LPF for id with alpha=64 (25% filtering)
           ,
           lpf_iq_(0, 220)  // LPF for iq with alpha=64 (25% filtering)
@@ -110,9 +123,25 @@ public:
           ,
           calib_measuring_r_(false)  // Start with inductance measurement
           ,
+          conn_calib_voltage_(0)  // Initialize ramp voltage
+          ,
+          conn_calib_increment_(2)  // Default increment (user will set)
+          ,
+          conn_calib_voltage_limit_(INT16_MAX / 2)  // Default limit (user will set)
+          ,
+          conn_calib_overcurrent_threshold_(INT16_MAX / 2)  // Default threshold (user will set)
+          ,
+          conn_calib_timeout_(0)  // Initialize timeout counter
+          ,
+          conn_calib_timeout_limit_(18000)  // Default 1 second @ 18kHz (user will set)
+          ,
+          conn_calib_timeout_flag_(false)  // No timeout initially
+          ,
           hfi_angle_estimate_(0)  // Initialize angle estimate to zero
           ,
           hfi_warmup_counter_(0)  // Initialize warmup counter
+          ,
+          stability_check_(50, 180)  // Initialize stability checker: epsilon=50, window=180 cycles
           ,
           voltage_ab_{0, 0},
           output{INT16_MIN, INT16_MIN, INT16_MIN} {
@@ -120,47 +149,14 @@ public:
         parent.current.set_calibration_samples(100);  // Configure calibration samples
     }
 
-    // Constructor with control mode and PI gains
-    DriverPWM(Feedback& parent, Motor& motor_ref, ControlMode control_mode_param, int32_t kp = 1000, int32_t ki = 500)
-        : motor_(motor_ref),
-          feedback_(parent),
-          motor_selector_(parent, (uint32_t)motor_ref.get_motor_type(), motor_ref.get_phase_pattern(), 995u, 256),
-          control_mode_(control_mode_param),
-          pid_d_(pid_int_new(kp, ki, 0, 0))  // PI controller with configurable gains
-          ,
-          pid_q_(pid_int_new(kp, ki, 0, 0)),
-          lpf_id_(0, 220)  // LPF for id with alpha=64 (25% filtering)
-          ,
-          lpf_iq_(0, 220)  // LPF for iq with alpha=64 (25% filtering)
-          ,
-          calibration_counter_(0)
-          // , motor_test_(parent, motor_, motor_selector_)  // COMMENTED: Replaced by hfi_inductance_
-          ,
-          speaker_(20000, 3276)  // Speaker: 20kHz system, ~10% amplitude
-          ,
-          hfi_(18000)  // HFI: 18kHz system frequency
-          // , hfi_cal_(parent, motor_, motor_selector_, hfi_)  // COMMENTED: Replaced by hfi_inductance_
-          ,
-          hfi_inductance_(parent, 18000)  // HFI inductance: Feedback ref + 18kHz
-          ,
-          res_measure_(parent)  // Resistance measurement: Feedback ref
-          ,
-          calib_phase_idx_(0)  // Start with phase 0
-          ,
-          calib_pause_cnt_(0)  // Reset pause counter
-          ,
-          calib_measuring_r_(false)  // Start with inductance measurement
-          ,
-          hfi_angle_estimate_(0)  // Initialize angle estimate to zero
-          ,
-          hfi_warmup_counter_(0)  // Initialize warmup counter
-          ,
-          voltage_ab_{0, 0} {
-        feedback_.current.set_calibration_samples(100);  // Configure calibration samples
-    }
+
 
     // Convenience overload: takes raw id/iq and encoder angle with Feedback reference
     void tick_control_foc(int16_t angle, int16_t target_current, const Feedback& feedback) {
+        // Ensuring that we have full internal control over angle until driver is ready
+        if (motor_.get_status() != DriverStatus_Ready) {
+            angle = 0;
+        }
         // Get current ADC values from feedback data
         const int16_t* currents_abc = feedback.current.norm();  // Access current ADC array from feedback
         int16_t supply_voltage_norm = feedback.supply.get_voltage_norm();
@@ -180,13 +176,15 @@ public:
         Vec2D current_dq_raw = current_ab.rotate(angle_sincos_inv);
 
         // Step 3.5: Apply LPF filtering to measured DQ currents
-        int16_t filtered_id = (int16_t)lpf_id_.tick((uint16_t)(current_dq_raw.flux));
-        int16_t filtered_iq = (int16_t)lpf_iq_.tick((uint16_t)(current_dq_raw.torque));
+        int16_t filtered_id = (int16_t)lpf_id_.tick_lpf((uint16_t)(current_dq_raw.flux));
+        int16_t filtered_iq = (int16_t)lpf_iq_.tick_lpf((uint16_t)(current_dq_raw.torque));
         Vec2D current_dq_filt = Vec2D(filtered_id, filtered_iq);
 
         Vec2D target_dq(0, 0); 
 
         Vec2D voltage_ab(0, 0);
+
+        
 
         switch (motor_.get_status()) {
             ///////////////////////////////////////////////////////////////////////////////
@@ -218,101 +216,83 @@ public:
                 else {
                     // Calibration complete, transition to Inductance Calibration
                     motor_.set_status(DriverStatus_MotorConnectionCalibration);
+                    
 
                     // DC motor type to handle current control
-                    motor_selector_.set_motor_type(MotorType_DC);
+                    motor_selector_.set_motor_type(MotorType_Calibration);
+                    motor_selector_.set_phase_pattern(PhasePattern_CBA);
                     // Start inductance calibration using HFI
-                    start_inductance_calibration();
+                    // start_inductance_calibration();
+
+
+                    stability_check_.setup(50, 100);
+
+                    feedback_.power.set_overpower_soft_mw(2000);  // Set soft power limit to 5W
+                    feedback_.supply.set_overvoltage_soft_norm(feedback_.supply.get_voltage_norm()/2);
+                    feedback_.current.set_overcurrent_soft_norm(INT16_MAX/2);
+
                     voltage_ab = Vec2D(0, 0);
                 }
                 break;
 
             ///////////////////////////////////////////////////////////////////////////////
-            // Inductance and Resistance calibration /////////////////////////////////
+            // Motor calibration /////////////////////////////////
             ///////////////////////////////////////////////////////////////////////////////
             case DriverStatus_MotorConnectionCalibration: {
-                // Handle pause between measurements FIRST
-                if (calib_pause_cnt_ > 0) {
-                    calib_pause_cnt_--;                                  // Decrement pause counter
-                    voltage_ab = Vec2D(0, 0);                            // Zero output during pause
-                    if (calib_pause_cnt_ == 0) {
-                        if (calib_measuring_r_) {
-                            // After R measurement pause, start next phase L
-                            calib_phase_idx_++;
-                            if (calib_phase_idx_ >= 1) {
-                                SerialUSB.println("[CAL] === CYCLE COMPLETE ===");
-                                motor_.print(SerialUSB);
-                                calib_phase_idx_ = 0;                    // Restart from phase 0
-                            }
-                            calib_measuring_r_ = false;                  // Next: measure L
-                            start_phase_measurement(calib_phase_idx_);   // Start L measurement
-                        } else {
-                            // After L measurement pause, start R measurement
-                            start_resistance_measurement();              // Start R measurement
-                        }
-                    }
-                    motor_selector_.tick_voltage(voltage_ab);
-                    const int16_t* voltages = motor_selector_.get_voltages();
-                    output[0] = voltages[0];
-                    output[1] = voltages[1];
-                    output[2] = voltages[2];
-                    return;
+                // Get measured current (use D-axis current from DQ transform)
+                const int16_t curnt_a_abs = abs(motor_selector_.get_filtered_a());
+                const int16_t curnt_b_abs = abs(motor_selector_.get_filtered_b());    
+                const int16_t curnt_c_abs = abs(motor_selector_.get_filtered_c());   
+                int32_t measured_current = (curnt_a_abs + curnt_b_abs + curnt_c_abs) / 2; // Ensure we have valid current independent from anything
+                angle = 0;
+                // Check for overpower using soft limit
+                bool power_lim = feedback_.power.is_overpower_soft_norm(conn_calib_voltage_, measured_current);
+                bool voltg_lim = feedback_.supply.is_overvoltage_soft_norm(conn_calib_voltage_);
+                bool curnt_lim = feedback_.current.is_overcurrent_soft_norm(measured_current);
+
+                power = feedback_.power.norm2mw(measured_current * conn_calib_voltage_);
+
+                // Increment timeout counter
+                conn_calib_timeout_++;                                   // Count cycles
+                
+                // Check timeout
+                if (conn_calib_timeout_ >= conn_calib_timeout_limit_) {  // Timeout reached
+                    conn_calib_timeout_flag_ = true;                     // Set timeout flag
+                    conn_calib_voltage_ = 0;                             // Reset voltage
+                    voltage_ab = Vec2D(0, 0);                            // Zero output
+                    // User handles timeout externally
+                    break;
                 }
 
-                // Measuring inductance or resistance?
-                if (!calib_measuring_r_) {
-                    // === INDUCTANCE MEASUREMENT ===
-                    int16_t voltage_d = hfi_inductance_.tick(current_dq_raw.flux);
-                    voltage_ab = Vec2D(voltage_d, 0);
-
-                    if (hfi_inductance_.is_finished()) {
-                        if (!hfi_inductance_.is_error()) {
-                            int32_t inductance = hfi_inductance_.get_inductance_uh();
-                            motor_.set_phase_inductance(calib_phase_idx_, inductance);
-                            SerialUSB.print("[CAL] Ph");
-                            SerialUSB.print(calib_phase_idx_);
-                            SerialUSB.print(" L=");
-                            SerialUSB.print(inductance);
-                            SerialUSB.println("uH");
-                            
-                            // Pause before R measurement
-                            calib_measuring_r_ = true;
-                            calib_pause_cnt_ = CALIB_PAUSE_CYCLES;
-                        } else {
-                            SerialUSB.println("[CAL] L ERR - retry");
-                            calib_pause_cnt_ = CALIB_PAUSE_CYCLES;
-                        }
-                        voltage_ab = Vec2D(0, 0);
+                // Check for overcurrent - reduce voltage by increment
+                if (power_lim or curnt_lim or voltg_lim) {   // Overpower detected
+                    conn_calib_voltage_ -= conn_calib_increment_;        // Reduce by increment
+                    if (conn_calib_voltage_ < 0) {                       // Clamp to zero
+                        conn_calib_voltage_ = 0;
                     }
                 } else {
-                    // === RESISTANCE MEASUREMENT ===
-                    int16_t voltage_d = res_measure_.tick(current_dq_raw.flux);
-                    voltage_ab = Vec2D(voltage_d, 0);
-
-                    if (res_measure_.is_finished()) {
-                        if (!res_measure_.is_error()) {
-                            int32_t resistance = res_measure_.get_resistance_mohm();
-                            motor_.set_phase_resistance(calib_phase_idx_, resistance);
-                            SerialUSB.print("[CAL] Ph");
-                            SerialUSB.print(calib_phase_idx_);
-                            SerialUSB.print(" R=");
-                            SerialUSB.print(resistance);
-                            SerialUSB.println("mOhm");
-                        } else {
-                            SerialUSB.println("[CAL] R ERR");
-                        }
-                        // Pause before next phase
-                        calib_pause_cnt_ = CALIB_PAUSE_CYCLES;
-                        voltage_ab = Vec2D(0, 0);
+                    // Normal ramp - increase voltage by increment
+                    conn_calib_voltage_ += conn_calib_increment_;        // Increase by increment
+                    if (conn_calib_voltage_ > conn_calib_voltage_limit_) { // Clamp to limit
+                        conn_calib_voltage_ = conn_calib_voltage_limit_;
                     }
                 }
 
-                motor_selector_.tick_voltage(voltage_ab);
-                const int16_t* voltages = motor_selector_.get_voltages();
-                output[0] = voltages[0];
-                output[1] = voltages[1];
-                output[2] = voltages[2];
-                return;
+                // If current stabilized
+                if (stability_check_.tick(measured_current)) {
+                    SerialUSB.println("STABLE");
+                    stability_check_.setup(50, 100);
+                }
+
+                // Output voltage on D-axis
+                target_dq = Vec2D(0, conn_calib_voltage_);              // D-axis voltage only
+                
+                // motor_selector_.tick_voltage(voltage_ab);
+                // const int16_t* voltages = motor_selector_.get_voltages();
+                // output[0] = voltages[0];
+                // output[1] = voltages[1];
+                // output[2] = voltages[2];
+                // return;
             }
 
             case DriverStatus_Ready:
@@ -321,39 +301,12 @@ public:
                 // current
                 break;
 
-            case DriverStatus_PlayingMelody: {
-                // Playing startup melody through motor coils
-                Vec2D melody_output = speaker_.tick();  // Get audio waveform
-
-                // Check if melody finished
-                if (speaker_.is_finished()) {
-                    // Transition to Ready mode after melody
-                    motor_.set_status(DriverStatus_Ready);
-                    voltage_ab = Vec2D(0, 0);
-                } else {
-                    // Output melody waveform to motor (inject into alpha-beta)
-                    voltage_ab = melody_output;
-                }
-                break;
-            }
-
-            case DriverStatus_HFI_Warmup: {
-
-                break;
-            }
-
+            case DriverStatus_PlayingMelody: 
+            case DriverStatus_HFI_Warmup: 
             case DriverStatus_HFI_AmplitudeTuning:
             case DriverStatus_HFI_LdMeasure:
-            case DriverStatus_HFI_LqMeasure: {
-
-                break;
-            }
-
-            case DriverStatus_HFI_Running: {
-
-                break;
-            }
-
+            case DriverStatus_HFI_LqMeasure:
+            case DriverStatus_HFI_Running:
             case DriverStatus_Error:
                 // Output motor data to serial on error
                 motor_.print(SerialUSB);
@@ -370,20 +323,25 @@ public:
                 break;
         }
 
-                // Step 4: Calculate current errors
-        int16_t error_d = target_dq.flux - current_dq_filt.flux;      // d-axis (flux) error
-        int16_t error_q = target_dq.torque - current_dq_filt.torque;  // q-axis (torque) error
+        //         // Step 4: Calculate current errors
+        // int16_t error_d = target_dq.flux - current_dq_filt.flux;      // d-axis (flux) error
+        // int16_t error_q = target_dq.torque - current_dq_filt.torque;  // q-axis (torque) error
 
-        // Step 5: PI controllers for d and q axis (feedforward = 0, limit = INT16_MAX)
-        pid_int_tick(&pid_d_, error_d, 0, INT16_MAX / 2);
-        pid_int_tick(&pid_q_, error_q, 0, INT16_MAX / 2);
+        // // Step 5: PI controllers for d and q axis (feedforward = 0, limit = INT16_MAX)
+        // pid_d_.tick(error_d, 0, INT16_MAX / 2);
+        // pid_q_.tick(error_q, 0, INT16_MAX / 2);
 
-        // Step 6: Get voltage commands from PI controllers
-        Vec2D voltage_dq(pid_int_output(&pid_d_), pid_int_output(&pid_q_));
+        // // Step 6: Get voltage commands from PI controllers
+        // Vec2D voltage_dq(pid_d_.output(), pid_q_.output());
 
         // Step 7: Inverse Park transform - rotate DQ voltages back to AB
-        voltage_ab_ = voltage_dq.rotate(angle_sincos);
 
+        target_dq.sin = feedback_.supply.norm2duty(target_dq.sin);
+        target_dq.cos = feedback_.supply.norm2duty(target_dq.cos);
+
+        // voltage_ab = voltage_dq.rotate(angle_sincos);
+        voltage_ab = target_dq.rotate(angle_sincos);
+        voltage_ab_ = voltage_ab;
 
         // Convert AB voltages to ABC phase voltages with phase remapping
         motor_selector_.tick_voltage(voltage_ab);
@@ -419,8 +377,12 @@ public:
 
     // Configure PI controller gains for current control
     void set_current_pi_gains(int32_t kp, int32_t ki) {
-        pid_d_ = pid_int_new(kp, ki, 0, 0);
-        pid_q_ = pid_int_new(kp, ki, 0, 0);
+        pid_d_.setKp(kp);  // Update proportional gain
+        pid_d_.setKi(ki);  // Update integral gain
+        pid_d_.reset();    // Reset controller state
+        pid_q_.setKp(kp);  // Update proportional gain
+        pid_q_.setKi(ki);  // Update integral gain
+        pid_q_.reset();    // Reset controller state
     }
 
     // Set maximum duty cycle limit
@@ -429,7 +391,7 @@ public:
     // Set current balance tolerance
     void set_current_epsilon(int16_t epsilon) { motor_selector_.set_current_epsilon(epsilon); }
 
-    // Configure LPF filter alpha for current measurements (0-255, where 0=no filtering, 255=max filtering)
+    // Configure LPF filter alpha for current measurements (0-255, where 0=infinite filtering, 255=no filtering)
     void set_current_lpf_alpha(uint8_t alpha) {
         lpf_id_.set_alpha(alpha);
         lpf_iq_.set_alpha(alpha);
@@ -536,6 +498,74 @@ public:
     uint8_t get_calibration_phase() const {
         return calib_phase_idx_;  // Return phase index
     }
+
+    // =========================================================================
+    // CURRENT STABILITY CHECK
+    // =========================================================================
+    
+    /// Check if current is stable using StabilityCheck class
+    /// @param current Measured current (Q15)
+    /// @return true if current stable for configured window cycles
+    bool is_current_stable(int16_t current) {
+        return stability_check_.tick(current);                           // Update and check stability
+    }
+
+    /// Configure stability check parameters
+    /// @param epsilon Max allowed peak-to-peak noise (Q15)
+    /// @param window Required consecutive stable cycles
+    void setup_stability_check(int16_t epsilon, uint16_t window) {
+        stability_check_.setup(epsilon, window);                         // Configure parameters
+    }
+
+    /// Reset stability checker state
+    void reset_stability_check() { 
+        stability_check_.reset();                                        // Reset internal state
+    }
+
+    /// Check if current is currently stable (read-only)
+    bool is_stable() const { 
+        return stability_check_.is_stable();                             // Check stability status
+    }
+
+    /// Get auto-detected reference value from stability checker
+    /// @return Center of noise floor (valid when is_stable() returns true)
+    int16_t get_detected_reference() const {
+        return stability_check_.get_detected_reference();                // Get detected reference
+    }
+
+    // =========================================================================
+    // MOTOR CONNECTION CALIBRATION RAMP CONFIGURATION
+    // =========================================================================
+    
+    /// Setup connection calibration ramp parameters
+    /// @param increment Voltage increment per tick (Q15)
+    /// @param voltage_limit Maximum voltage limit (Q15)
+    /// @param overcurrent_threshold Overcurrent detection threshold (Q15)
+    /// @param timeout_cycles Timeout limit in cycles
+    void setup_conn_calib(int16_t increment, int16_t voltage_limit, 
+                          int16_t overcurrent_threshold, uint32_t timeout_cycles) {
+        conn_calib_increment_ = increment;                               // Set increment
+        conn_calib_voltage_limit_ = voltage_limit;                       // Set voltage limit
+        conn_calib_overcurrent_threshold_ = overcurrent_threshold;       // Set overcurrent threshold
+        conn_calib_timeout_limit_ = timeout_cycles;                      // Set timeout limit
+        reset_conn_calib();                                              // Reset state
+    }
+
+    /// Reset connection calibration state
+    void reset_conn_calib() {
+        conn_calib_voltage_ = 0;                                         // Reset voltage
+        conn_calib_timeout_ = 0;                                         // Reset timeout counter
+        conn_calib_timeout_flag_ = false;                                // Clear timeout flag
+    }
+
+    /// Check if connection calibration timed out
+    bool is_conn_calib_timeout() const { return conn_calib_timeout_flag_; }
+
+    /// Get current connection calibration voltage (Q15)
+    int16_t get_conn_calib_voltage() const { return conn_calib_voltage_; }
+
+    /// Get connection calibration timeout counter
+    uint32_t get_conn_calib_timeout_count() const { return conn_calib_timeout_; }
 
 private:
     /// Start inductance calibration sequence

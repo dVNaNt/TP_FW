@@ -4,7 +4,7 @@
 // Uses motor as a speaker by injecting audio frequency signals
 
 #include "../../common.h"
-#include "frequency_generator.h"
+#include "../../math_integer/helpers/frequency_generator.h"
 
 // Musical note frequencies in Hz (octave 4-5 range, 300-1500Hz)
 namespace Notes {

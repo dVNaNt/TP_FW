@@ -166,7 +166,7 @@ public:
         logical[idx2_] = (abc_voltages_remapped_.c > DUTY_THRESHOLD) ? INT16_MIN : physical[2];
 
         // Convert logical ABC to AB using current converter
-        current_converter_.tick(logical.arr, motor_type_);
+        current_converter_.tick(logical, motor_type_);
         err_current_ = current_converter_.is_err();
         return current_converter_.get_ab();
     }
@@ -190,4 +190,16 @@ public:
     /// Get AB currents as Vec2D (alpha-beta)
     /// @return Vec2D with sin=alpha, cos=beta in Q15 format
     inline Vec2D get_currents() const { return current_converter_.get_ab(); }
+
+    /// Get filtered phase A current value (transit method)
+    /// @return Filtered phase A current in Q15 format
+    inline int16_t get_filtered_a() const { return current_converter_.get_filtered_a(); }
+
+    /// Get filtered phase B current value (transit method)
+    /// @return Filtered phase B current in Q15 format
+    inline int16_t get_filtered_b() const { return current_converter_.get_filtered_b(); }
+
+    /// Get filtered phase C current value (transit method)
+    /// @return Filtered phase C current in Q15 format
+    inline int16_t get_filtered_c() const { return current_converter_.get_filtered_c(); }
 };
