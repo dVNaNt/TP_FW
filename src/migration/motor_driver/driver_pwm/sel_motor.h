@@ -5,6 +5,7 @@
 #include "sel_current.h"
 #include "sel_voltage.h"
 
+
 // Forward declaration
 struct Feedback;
 
@@ -44,7 +45,7 @@ private:
     AB2ABC voltage_converter_;  // Voltage: AB -> ABC
 
     // Configuration
-    uint32_t motor_type_;         // Motor type: 1=DC, 4=Stepper, 6=BLDC
+    MotorType motor_type_;         // Motor type: 1=DC, 4=Stepper, 6=BLDC
     PhasePattern phase_pattern_;  // Phase connection pattern
 
     // Integrated phase remapping indices (precomputed for zero overhead)
@@ -71,7 +72,7 @@ public:
     /// @param duty_permille Maximum duty cycle in permille (0-995 = 0.0%-99.5%)
     /// @param current_epsilon Balance tolerance for current in Q15 format
     MotorSelector(Feedback& parent,
-                  uint32_t motor_type = MotorType_STEP,
+                  MotorType motor_type = MotorType_STEP,
                   PhasePattern phase_pattern = PhasePattern_ABC,
                   uint16_t duty_permille = 995u,
                   int16_t current_epsilon = 256)
@@ -91,13 +92,13 @@ public:
 
     /// Set motor type for both current and voltage converters
     /// @param motor_type Motor type (1=DC, 4=Stepper, 6=BLDC)
-    inline void set_motor_type(uint32_t motor_type) {
+    inline void set_motor_type(MotorType motor_type) {
         motor_type_ = motor_type;
     }
     
     /// Get current motor type
     /// @return Motor type (1=DC, 4=Stepper, 6=BLDC)
-    inline uint32_t get_motor_type() const {
+    inline MotorType get_motor_type() const {
         return motor_type_;
     }
 
@@ -129,6 +130,10 @@ public:
         }
     }
 
+    inline PhasePattern get_phase_pattern() {
+        return phase_pattern_;
+    }
+
     /// Set maximum duty cycle limit for voltage converter
     /// @param duty_permille Duty cycle in permille (0-995 = 0.0%-99.5%)
     inline void set_duty(uint16_t duty_permille) { voltage_converter_.set_duty(duty_permille); }
@@ -139,7 +144,7 @@ public:
 
     /// Process voltage path: AB voltages -> ABC voltages with phase remapping
     /// @param voltage Vec2D voltage (sin=alpha, cos=beta) in Q15 format
-    const int16_t* tick_voltage(Vec2D voltage) {
+    const int16_t* tick_voltage(Vec2D voltage, int16_t sup_norm) {
         // Convert AB to ABC using voltage converter
         voltage_converter_.tick(voltage, motor_type_);
         err_voltage_ = voltage_converter_.is_err();
@@ -168,6 +173,7 @@ public:
         // Convert logical ABC to AB using current converter
         current_converter_.tick(logical, motor_type_);
         err_current_ = current_converter_.is_err();
+
         return current_converter_.get_ab();
     }
 

@@ -27,7 +27,7 @@ private:
     /// @param gain Raw gain value (-10000% to 10000%)
     /// @return Scaled gain for internal calculations
     static inline int32_t scaleGain(int32_t gain) {
-        int32_t clamped = tunepulse_clamp_i32(gain, 10000); // Clamp to valid range
+        int32_t clamped = clamp_i32(gain, 10000); // Clamp to valid range
         if (FAST_MATH) {
             return (clamped << 7) / 100; // Fast bit-shift scaling
         }
@@ -70,7 +70,7 @@ public:
         integral_ += (error_i32 + previous_error_) >> 1;       // Average of current and previous error
 
         // Clamp integral with anti-windup to prevent saturation
-        integral_ = tunepulse_clamp_i32(integral_, limit_i32); // Limit integral accumulation
+        integral_ = clamp_i32(integral_, limit_i32); // Limit integral accumulation
 
         // Calculate integral term
         int32_t i = FAST_MATH 
@@ -104,7 +104,7 @@ public:
         }
 
         // Clamp final output to specified limits
-        output_ = static_cast<int16_t>(tunepulse_clamp_i32(out, limit_i32)); // Store clamped output
+        output_ = static_cast<int16_t>(clamp_i32(out, limit_i32)); // Store clamped output
     }
 
     /// Get the current PID output value

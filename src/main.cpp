@@ -47,11 +47,13 @@ void loop() {
             case DriverStatus_CalibrateCurrent:
                 SerialUSB.println("Calibrating Current Sensors");
                 break;
-            case DriverStatus_MotorConnectionCalibration:
-                SerialUSB.println("Testing Motor Connections");
+            case DriverStatus_CalibratingMotor:
+                SerialUSB.println("Calibrating Motor");
                 break;
             case DriverStatus_Ready:
                 SerialUSB.println("Ready");
+                // Print motor parameters after successful calibration
+                TUNE_HEART.motor_params.print(SerialUSB);
                 break;
             case DriverStatus_Error:
                 SerialUSB.println("Error");

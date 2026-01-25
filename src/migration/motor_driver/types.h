@@ -4,32 +4,22 @@
 
 
 /// MotorType enumeration with predefined motor types
-typedef enum {
+typedef enum : int8_t {
     MotorType_Invalid = 0,
     MotorType_DC = 1,
     MotorType_STEP = 4,
     MotorType_BLDC = 6,
-    MotorType_Calibration = 7  // Voltage like BLDC, current like Stepper
 } MotorType;
 
 /// PhasePattern enumeration for 3-phase remap (output ordering)
 /// PhasePattern_CBA is default for BLDC motors (positive calibration polarity)
 /// Calibration sequence: CBA(0) -> ACB(1) -> ABC(2)
-typedef enum {
-    PhasePattern_CBA = 0, // Default BLDC pattern, positive calibration polarity
-    PhasePattern_ACB = 1, // Negative calibration polarity
-    PhasePattern_ABC = 2, // Negative calibration polarity
+typedef enum : int16_t {
+    PhasePattern_ABC = 0, // Negative calibration polarity
+    PhasePattern_CBA = -16384, // Default BLDC pattern, positive calibration polarity
+    PhasePattern_ACB = 32767, // Negative calibration polarity
 } PhasePattern;
 
-
-
-/// ControlMode enumeration
-typedef enum {
-    /// As Sin and Cos in alpha-beta coordinate system
-    ControlMode_VoltageAB,
-    /// As angle of current + DC current amplitude
-    ControlMode_CurrentAB
-} ControlMode;
 
 /// Represents the motor's overall calibration status.
 typedef enum {
@@ -37,8 +27,8 @@ typedef enum {
     DriverStatus_Calibrating,
     /// Current sensors are being calibrated.
     DriverStatus_CalibrateCurrent,
-    /// Motor connection and parameters are being identified.
-    DriverStatus_MotorConnectionCalibration,
+    /// Motor connection and type calibration (includes warmup, measure, rotation phases).
+    DriverStatus_CalibratingMotor,
     /// Playing startup melody through motor coils.
     DriverStatus_PlayingMelody,
     /// HFI warmup phase: applying DC current to D-axis for 1 second.

@@ -11,6 +11,7 @@
 #include "motor_driver/calibration/angle_calibrator.h"
 #include "motor_driver/motor.h"
 #include "error.h"  // Include error management system
+#include "feedback/feedback.h"
 
 // Forward declaration
 struct TunePulseHeart;
@@ -101,7 +102,7 @@ public:
     // Constructor
     TunePulseHeart(int32_t motor_res_ohm_milli = 2000,
                    MotorType motor_type = MotorType_Invalid,
-                   PhasePattern phase_pattern = PhasePattern_CBA,
+                   PhasePattern phase_pattern = PhasePattern_ABC,
                    uint16_t freq_hz = PWM_TIMER_FREQ_HZ,
                    uint16_t pwm_res = PWM_TIMER_PERIOD,
                    int32_t max_sup_mv = 85000)
@@ -130,10 +131,6 @@ public:
         motor_params.set_motor_type(motor_type);
         motor_params.set_phase_pattern(phase_pattern);
         // Set phase resistances for all phases (same value for initial config)
-        for (uint8_t i = 0; i < 3; i++) {
-            motor_params.set_phase_resistance(i, motor_res_ohm_milli);
-        }
-
         feedback.enable_current();
         feedback.enable_encoder();
         feedback.enable_supply();
@@ -146,7 +143,7 @@ public:
     // ========================================================================
 
     void set_current_target_ma(int32_t value_ma) {
-        current_target_ma_ = tunepulse_clamp_i32(value_ma, INT16_MAX);
+        current_target_ma_ = clamp_i32(value_ma, INT16_MAX);
     }
 
     void on_encoder_raw(uint16_t angle_raw) {
@@ -251,13 +248,6 @@ public:
     // Motor control interface
     // ========================================================================
     
-    void change_motor_mode(MotorType motor_type) {
-        driver_.change_motor_mode(motor_type);
-    }
-    
-    void change_phase_mode(PhasePattern connection) {
-        driver_.change_phase_mode(connection);
-    }
 
 private:
     // ========================================================================

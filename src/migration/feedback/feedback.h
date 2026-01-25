@@ -9,10 +9,13 @@
 // - All getter methods are public for external access
 // - Ensures data consistency by controlling update flow
 
+
+
 #include "inputs_dump.h"  // Include inputs dump for ADC data buffering
 #include "analog/supply_voltage.h"  // Include supply voltage sensing
 #include "analog/current_sense.h"  // Include current sensing
 #include "position/position_integrator.h"  // Include position/encoder tracking
+#include "position/speed_estimator.h"  // Include position/encoder tracking
 #include "analog/power.h"
 
 // Forward declaration to allow friend access

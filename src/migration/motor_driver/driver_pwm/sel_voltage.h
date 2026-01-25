@@ -2,6 +2,7 @@
 
 #include "../../common.h"
 #include "../types.h"
+#include "../../feedback/analog/supply_voltage.h"
 
 // Forward declaration
 struct Feedback;
@@ -25,7 +26,9 @@ private:
     int16_t max_duty_q15_;  // Maximum duty cycle in Q15 format [0..INT16_MAX]
 
     // Output cache
-    Vec3D abc_out_;  // Output: [A, B, C] PWM duty cycles in Q15 format
+    Vec3D abc_duty_;  // Output: [A, B, C] PWM duty cycles in Q15 format
+
+    
 
     // State
     uint8_t err_;  // Error flag: 1=error occurred, 0=no error
@@ -38,7 +41,7 @@ public:
         : feedback_(parent),
           max_duty_q15_(0)  // Will be calculated in set_duty()
           ,
-          abc_out_(0, 0, 0)  // Initialize output to zeros
+          abc_duty_(0, 0, 0)  // Initialize output to zeros
           ,
           err_(0u) {  // Clear error flag
         set_duty(duty_permille);  // Calculate and set max duty in Q15 format
@@ -70,11 +73,11 @@ public:
         }
 
         // Perform AB to ABC conversion with SVPWM algorithm
-        calculate_abc(voltg_alpha, voltg_beta, motor_type, static_cast<int32_t>(max_duty_q15_), &abc_out_.a, &abc_out_.b,
-                      &abc_out_.c);
+        calculate_abc(voltg_alpha, voltg_beta, motor_type, static_cast<int32_t>(max_duty_q15_), &abc_duty_.a, &abc_duty_.b,
+                      &abc_duty_.c);
 
         // Verify that no output channel exceeds the configured duty limit
-        if (!(abc_out_.a > max_duty_q15_ || abc_out_.b > max_duty_q15_ || abc_out_.c > max_duty_q15_)) {
+        if (!(abc_duty_.a > max_duty_q15_ || abc_duty_.b > max_duty_q15_ || abc_duty_.c > max_duty_q15_)) {
             err_ = 0u;  // Set no error flag if everything fine
         }
     }
@@ -85,7 +88,7 @@ public:
 
     /// Get pointer to ABC output array
     /// @return Pointer to 3-element array [A, B, C] in Q15 format
-    const int16_t* get_phase_duty() const { return abc_out_.arr; }
+    const int16_t* get_phase_duty() const { return abc_duty_.arr; }
 
 private:
 
@@ -116,12 +119,12 @@ private:
         if (motor_type == MotorType_DC) {
             int16_t voltg_ref = voltg_alpha;  // Only alpha component used for DC
             // Check for disabled state (INT16_MIN) or brake (0)
-            if (voltg_ref == INT16_MIN || voltg_ref == 0) {
-                *out_a = *out_b = *out_c = voltg_ref;  // Set all outputs to reference
+            if (voltg_alpha == INT16_MIN || voltg_alpha == 0) {
+                *out_a = *out_b = *out_c = voltg_alpha;  // Set all outputs to reference
                 return;                                // Exit early
             }
 
-            int16_t duty = voltg_ref >> 1;                                   // Calculate duty as half of reference
+            int16_t duty = voltg_alpha >> 1;                                   // Calculate duty as half of reference
             const int16_t MIDPOINT = static_cast<int16_t>(max_output >> 1);  // Calculate PWM midpoint
             *out_a = static_cast<int16_t>(MIDPOINT + duty);                  // Phase A: midpoint + duty (forward)
             *out_b = static_cast<int16_t>(MIDPOINT - duty);                  // Phase B: midpoint - duty (reverse)
@@ -130,7 +133,7 @@ private:
         }
         // Handle BLDC motor type (3-phase with Clarke Transform)
         // Handle Calibration mode: voltage commutation like BLDC
-        else if (motor_type == MotorType_BLDC || motor_type == MotorType_Calibration) {
+        else if (motor_type == MotorType_BLDC) {
             int32_t alpha32 = static_cast<int32_t>(voltg_alpha);  // Convert alpha to 32-bit for calculations
             int32_t beta32 = static_cast<int32_t>(voltg_beta);    // Convert beta to 32-bit for calculations
             // Calculate beta * sqrt(3)/2 using Q16.16 fixed-point multiplication
@@ -191,20 +194,19 @@ private:
     }
 
 
-
     /// Set error state and set all outputs to Hi-Z (INT16_MIN)
     void set_error_state() {
         err_ = 1u;                 // Set error flag
-        abc_out_.a = INT16_MIN;    // Set phase A to Hi-Z
-        abc_out_.b = INT16_MIN;    // Set phase B to Hi-Z
-        abc_out_.c = INT16_MIN;    // Set phase C to Hi-Z
+        abc_duty_.a = INT16_MIN;    // Set phase A to Hi-Z
+        abc_duty_.b = INT16_MIN;    // Set phase B to Hi-Z
+        abc_duty_.c = INT16_MIN;    // Set phase C to Hi-Z
     }
 
     /// Check if motor type is one of the supported types
     /// @param mt Motor type to validate
     /// @return true if valid (DC, BLDC, Stepper, or Calibration), false otherwise
     static bool is_valid_motor_type(uint32_t mt) {
-        return (mt == MotorType_DC || mt == MotorType_BLDC || mt == MotorType_STEP || mt == MotorType_Calibration);
+        return (mt == MotorType_DC || mt == MotorType_BLDC || mt == MotorType_STEP);
     }
     
     /// Check if alpha and beta values are within normalized range

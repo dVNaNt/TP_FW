@@ -36,7 +36,6 @@ private:
     int32_t mechanic_angle_;  // Mechanical angle in internal units
 
     // Phase resistance [mOhm]
-    int32_t phase_resistance_mohm_[3];  // Phase resistance in milliohms for each phase
     int32_t total_resistance_mohm_;     // Total motor resistance in milliohms (calculated from phases)
 
     // Phase inductance [uH]
@@ -50,7 +49,7 @@ public:
     // Constructor with default values
     Motor()
         : motor_type_(MotorType_Invalid),
-          phase_pattern_(PhasePattern_CBA),
+          phase_pattern_(PhasePattern_ABC),
           status_(DriverStatus_CalibrateCurrent),
           calib_status_(MotorStatus::CurrentCalibration),
           pole_count_(7),
@@ -62,7 +61,6 @@ public:
           total_resistance_mohm_(0) {
         // Initialize resistance and inductance arrays to zero
         for (uint8_t i = 0; i < 3; i++) {
-            phase_resistance_mohm_[i] = 0;
             phase_inductance_uh_[i] = 0;
         }
     }
@@ -71,6 +69,7 @@ public:
 
     // Set motor type
     inline void set_motor_type(MotorType type) { motor_type_ = type; }
+    inline void set_motor_type(int8_t type) { motor_type_ = (MotorType)type; }
 
     // Set phase pattern
     inline void set_phase_pattern(PhasePattern pattern) { phase_pattern_ = pattern; }
@@ -93,12 +92,6 @@ public:
     // Set mechanical angle
     inline void set_mechanic_angle(int32_t angle) { mechanic_angle_ = angle; }
 
-    // Set phase resistance for specific phase (0-2)
-    void set_phase_resistance(uint8_t phase_idx, int32_t resistance_mohm) {
-        if (phase_idx >= 3)
-            return;                                           // Validate index
-        phase_resistance_mohm_[phase_idx] = resistance_mohm;  // Store resistance
-    }
 
     // Set phase inductance for specific phase (0-2)
     void set_phase_inductance(uint8_t phase_idx, int32_t inductance_uh) {
@@ -139,10 +132,6 @@ public:
     // Get mechanical angle
     inline int32_t get_mechanic_angle() const { return mechanic_angle_; }
 
-    // Get phase resistance for specific phase
-    inline int32_t get_phase_resistance(uint8_t phase_idx) const {
-        return (phase_idx < 3) ? phase_resistance_mohm_[phase_idx] : 0;
-    }
 
     // Get phase inductance for specific phase
     inline int32_t get_phase_inductance(uint8_t phase_idx) const { return (phase_idx < 3) ? phase_inductance_uh_[phase_idx] : 0; }
@@ -156,120 +145,124 @@ public:
     // Get total motor resistance (calculated from phases based on motor type)
     inline int32_t get_total_resistance() const { return total_resistance_mohm_; }
 
-    // Uses statistical analysis (min/max/sum) instead of combinatorial checks
-    // to reduce Flash memory usage significantly on STM32G4.
-    void detect_type() {
-        // 1. Load phase resistances into a local array for indexed access
-        // This allows using loops instead of hardcoded variables, reducing instruction count.
-        const int32_t r[3] = {phase_resistance_mohm_[0], phase_resistance_mohm_[1], phase_resistance_mohm_[2]};
-
-        // 2. Analyze the readings in a single pass
-        // We track validity, short circuits, min/max values, and the index of the maximum value.
-        int32_t r_min = INT32_MAX;
-        int32_t r_max = -1;
-        int32_t r_sum_valid = 0;  // Sum of valid resistances
-        int8_t valid_count = 0;
-        int8_t max_index = 0;       // Index (0,1,2) of the largest resistance
-        int8_t last_valid_idx = 0;  // Helper for DC detection
-        bool short_detected = false;
-
-        // Iterate through all 3 phases
-        for (int i = 0; i < 3; i++) {
-            const int32_t val = r[i];
-
-            // Check for immediate short circuit (0 Ohm)
-            if (val == 0) {
-                short_detected = true;
-            }
-
-            // Validate resistance range (50 mOhm to 100 Ohm)
-            if (val >= 50 && val <= 100000) {
-                valid_count++;
-                last_valid_idx = i;  // Store index for DC motor pattern logic
-                r_sum_valid += val;  // Accumulate sum for Stepper check later
-
-                // Update Min/Max statistics
-                if (val < r_min)
-                    r_min = val;
-                if (val > r_max) {
-                    r_max = val;
-                    max_index = i;
-                }
-            }
-        }
-
-        // 3. Check for invalid states (Short circuits or ambiguous open phases)
-        // Conditions: Any short detected OR invalid count is 0 (all open) OR 2 (ambiguous).
-        if (short_detected || valid_count == 0 || valid_count == 2) {
-            motor_type_ = MotorType_Invalid;
-            phase_pattern_ = PhasePattern_CBA;  // Default safe pattern (CBA for BLDC)
-            total_resistance_mohm_ = 0;  // Invalid motor - no resistance calculation
-            return;
-        }
-
-        // 4. DC Motor Detection
-        // Condition: Exactly one phase pair has valid resistance (others are open).
-        if (valid_count == 1) {
-            // motor_type_ = MotorType_DC;
-            motor_type_ = MotorType_Invalid; // TODO: Fix
-            // Map the single valid index to the pattern (0->ABC, 1->BCA, 2->CAB)
-            phase_pattern_ = static_cast<PhasePattern>(last_valid_idx);
-            // DC motor: total resistance equals the single valid phase resistance
-            total_resistance_mohm_ = r[last_valid_idx];
-            return;
-        }
-
-        // --- At this point, valid_count is guaranteed to be 3 ---
-
-        // 5. BLDC Motor Detection
-        // Logic: All phases are roughly equal. Deviation between Min and Max is small.
-        // Calculate deviation percentage: ((Max - Min) / Max) * 100
-        // Using integer math; multiply by 100 first to preserve precision.
-        const int32_t deviation = (r_max > 0) ? ((r_max - r_min) * 100) / r_max : 100;
-
-        if (deviation <= 25) {  // Threshold: 25%
-            motor_type_ = MotorType_BLDC;
-            phase_pattern_ = PhasePattern_CBA;  // Default BLDC pattern (CBA)
-            // BLDC: R = (AB + BC + AC) / 6 = (r[0] + r[1] + r[2]) / 6
-            // Each phase measurement is line-to-line, so total = sum / 6
-            total_resistance_mohm_ = r_sum_valid / 6;
-            return;
-        }
-
-        // 6. Stepper Motor Detection2
-        // Logic: A Stepper (measured as 3-phase) typically shows two smaller coils and one larger sum.
-        // Pattern: Two phases are roughly equal (Min ≈ Mid), and the third is their sum (Max ≈ Min + Mid).
-
-        // Calculate the 'Middle' resistance value derived from the sum
-        // Sum = Min + Mid + Max  =>  Mid = Sum - Min - Max
-        const int32_t r_mid = r_sum_valid - r_min - r_max;
-
-        // Threshold for stepper symmetry checks (20% of the maximum value)
-        const int32_t threshold = (r_max * 20) / 100;
-
-        // Check 1: Is the largest value roughly equal to the sum of the other two?
-        // |(Min + Mid) - Max| <= Threshold
-        const bool sum_match = std::abs((r_min + r_mid) - r_max) <= threshold;
-
-        // Check 2: Are the two smaller values roughly equal to each other?
-        // |Mid - Min| <= Threshold
-        const bool symmetry_match = (r_mid - r_min) <= threshold;
-
-        if (sum_match && symmetry_match) {
-            motor_type_ = MotorType_STEP;
-            // The phase pattern is determined by WHICH phase had the maximum resistance.
-            // Index of Max: 0->ABC, 1->BCA, 2->CAB
-            phase_pattern_ = static_cast<PhasePattern>(max_index);
-            // Stepper: R = (A + B) / 2, where A and B are the two smaller coil resistances
-            // r_min and r_mid are the two coil resistances
-            total_resistance_mohm_ = (r_min + r_mid) >> 1;
-            return;
-        }
-
-        // 7. Fallback if no known pattern matches
-        motor_type_ = MotorType_Invalid;
-        total_resistance_mohm_ = 0;  // Invalid motor - no resistance calculation
+    inline void set_total_resistance(int32_t res) {
+        total_resistance_mohm_ = res;
     }
+
+    // // Uses statistical analysis (min/max/sum) instead of combinatorial checks
+    // // to reduce Flash memory usage significantly on STM32G4.
+    // void detect_type() {
+    //     // 1. Load phase resistances into a local array for indexed access
+    //     // This allows using loops instead of hardcoded variables, reducing instruction count.
+    //     const int32_t r[3] = {phase_resistance_mohm_[0], phase_resistance_mohm_[1], phase_resistance_mohm_[2]};
+
+    //     // 2. Analyze the readings in a single pass
+    //     // We track validity, short circuits, min/max values, and the index of the maximum value.
+    //     int32_t r_min = INT32_MAX;
+    //     int32_t r_max = -1;
+    //     int32_t r_sum_valid = 0;  // Sum of valid resistances
+    //     int8_t valid_count = 0;
+    //     int8_t max_index = 0;       // Index (0,1,2) of the largest resistance
+    //     int8_t last_valid_idx = 0;  // Helper for DC detection
+    //     bool short_detected = false;
+
+    //     // Iterate through all 3 phases
+    //     for (int i = 0; i < 3; i++) {
+    //         const int32_t val = r[i];
+
+    //         // Check for immediate short circuit (0 Ohm)
+    //         if (val == 0) {
+    //             short_detected = true;
+    //         }
+
+    //         // Validate resistance range (50 mOhm to 100 Ohm)
+    //         if (val >= 50 && val <= 100000) {
+    //             valid_count++;
+    //             last_valid_idx = i;  // Store index for DC motor pattern logic
+    //             r_sum_valid += val;  // Accumulate sum for Stepper check later
+
+    //             // Update Min/Max statistics
+    //             if (val < r_min)
+    //                 r_min = val;
+    //             if (val > r_max) {
+    //                 r_max = val;
+    //                 max_index = i;
+    //             }
+    //         }
+    //     }
+
+    //     // 3. Check for invalid states (Short circuits or ambiguous open phases)
+    //     // Conditions: Any short detected OR invalid count is 0 (all open) OR 2 (ambiguous).
+    //     if (short_detected || valid_count == 0 || valid_count == 2) {
+    //         motor_type_ = MotorType_Invalid;
+    //         phase_pattern_ = PhasePattern_CBA;  // Default safe pattern (CBA for BLDC)
+    //         total_resistance_mohm_ = 0;  // Invalid motor - no resistance calculation
+    //         return;
+    //     }
+
+    //     // 4. DC Motor Detection
+    //     // Condition: Exactly one phase pair has valid resistance (others are open).
+    //     if (valid_count == 1) {
+    //         // motor_type_ = MotorType_DC;
+    //         motor_type_ = MotorType_Invalid; // TODO: Fix
+    //         // Map the single valid index to the pattern (0->ABC, 1->BCA, 2->CAB)
+    //         phase_pattern_ = static_cast<PhasePattern>(last_valid_idx);
+    //         // DC motor: total resistance equals the single valid phase resistance
+    //         total_resistance_mohm_ = r[last_valid_idx];
+    //         return;
+    //     }
+
+    //     // --- At this point, valid_count is guaranteed to be 3 ---
+
+    //     // 5. BLDC Motor Detection
+    //     // Logic: All phases are roughly equal. Deviation between Min and Max is small.
+    //     // Calculate deviation percentage: ((Max - Min) / Max) * 100
+    //     // Using integer math; multiply by 100 first to preserve precision.
+    //     const int32_t deviation = (r_max > 0) ? ((r_max - r_min) * 100) / r_max : 100;
+
+    //     if (deviation <= 25) {  // Threshold: 25%
+    //         motor_type_ = MotorType_BLDC;
+    //         phase_pattern_ = PhasePattern_CBA;  // Default BLDC pattern (CBA)
+    //         // BLDC: R = (AB + BC + AC) / 6 = (r[0] + r[1] + r[2]) / 6
+    //         // Each phase measurement is line-to-line, so total = sum / 6
+    //         total_resistance_mohm_ = r_sum_valid / 6;
+    //         return;
+    //     }
+
+    //     // 6. Stepper Motor Detection2
+    //     // Logic: A Stepper (measured as 3-phase) typically shows two smaller coils and one larger sum.
+    //     // Pattern: Two phases are roughly equal (Min ≈ Mid), and the third is their sum (Max ≈ Min + Mid).
+
+    //     // Calculate the 'Middle' resistance value derived from the sum
+    //     // Sum = Min + Mid + Max  =>  Mid = Sum - Min - Max
+    //     const int32_t r_mid = r_sum_valid - r_min - r_max;
+
+    //     // Threshold for stepper symmetry checks (20% of the maximum value)
+    //     const int32_t threshold = (r_max * 20) / 100;
+
+    //     // Check 1: Is the largest value roughly equal to the sum of the other two?
+    //     // |(Min + Mid) - Max| <= Threshold
+    //     const bool sum_match = std::abs((r_min + r_mid) - r_max) <= threshold;
+
+    //     // Check 2: Are the two smaller values roughly equal to each other?
+    //     // |Mid - Min| <= Threshold
+    //     const bool symmetry_match = (r_mid - r_min) <= threshold;
+
+    //     if (sum_match && symmetry_match) {
+    //         motor_type_ = MotorType_STEP;
+    //         // The phase pattern is determined by WHICH phase had the maximum resistance.
+    //         // Index of Max: 0->ABC, 1->BCA, 2->CAB
+    //         phase_pattern_ = static_cast<PhasePattern>(max_index);
+    //         // Stepper: R = (A + B) / 2, where A and B are the two smaller coil resistances
+    //         // r_min and r_mid are the two coil resistances
+    //         total_resistance_mohm_ = (r_min + r_mid) >> 1;
+    //         return;
+    //     }
+
+    //     // 7. Fallback if no known pattern matches
+    //     motor_type_ = MotorType_Invalid;
+    //     total_resistance_mohm_ = 0;  // Invalid motor - no resistance calculation
+    // }
 
 
     // Print parameters to serial
@@ -364,13 +357,8 @@ public:
         serial.println(mechanic_angle_);
 
         // Phase resistances
-        serial.println("Resistances [mOhm]:");
-        for (uint8_t i = 0; i < 3; i++) {
-            serial.print("  ");
-            serial.print((char)('A' + i));
-            serial.print(": ");
-            serial.println(phase_resistance_mohm_[i]);
-        }
+        serial.print("Resistances [mOhm]:");
+        serial.println(total_resistance_mohm_);
 
         // Operating limits
         serial.print("I_lim: ");

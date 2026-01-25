@@ -122,6 +122,10 @@ public:
         return power_norm(v_norm, i_norm) >= overpower_soft_norm;
     }
 
+    inline bool is_overpower_soft_norm(int32_t p_norm) const {
+        return p_norm >= overpower_soft_norm;
+    }
+
     // Check if power from voltage and current exceeds hard limit
     inline bool is_overpower_hard_norm(int16_t v_norm, int16_t i_norm) const {
         return power_norm(v_norm, i_norm) >= overpower_hard_norm;
