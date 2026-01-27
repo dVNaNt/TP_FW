@@ -5,7 +5,6 @@
 #include "config.h"
 #include "stm32g4xx_hal.h"
 #include "stm32g4xx_ll_gpio.h"
-#include "target/radix/target.h"
 
 // Глобальные параметры таймера ШИМ
 constexpr uint16_t PWM_TIMER_PERIOD = 4722;      // Период таймера (ARR)

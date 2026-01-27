@@ -524,6 +524,7 @@ public:
 
                                         // Rotate angle by 30° slowly to verify
                                         motor_calib_.start_slow_rotation(16384, power);  // Target: current + 30°
+                                        set_calibration_success(); // TODO: REMOVE
                                     }  // Check if angle is around 90° (angle woks on second pass for BLDC and stepper in correct
                                        // phase)
                                     else {
@@ -602,21 +603,21 @@ public:
                         Vec2D hfi_signal = hfi_generator_.tick();  // Get sine and cosine from generator
 
                         // Apply HFI voltage to D-axis (cosine component for voltage injection)
-                        int16_t hfi_voltage = (motor_calib_.get_voltage() * hfi_signal.cos) >> 15;  // Scale by cosine (Q15)
+                        int16_t hfi_voltage = (motor_calib_.get_voltage() * hfi_signal.cos * 25) >> 15;  // Scale by cosine (Q15)
                         voltage_dq = Vec2D(hfi_voltage + motor_calib_.get_voltage(), 0);  // Inject HFI voltage into D-axis only
 
-                        // Get current measurements from motor selector (already filtered)
+                        // Get current measurements from motor selector
                         const int32_t curnt_a = motor_selector_.get_currents().alpha;  // Phase A current
                         const int32_t curnt_b = motor_selector_.get_currents().beta;   // Phase B current
 
                         // Demodulate HFI response using sine component (90° phase shift for inductive response)
-                        hfi_sense_a_.tick((int16_t)curnt_a, hfi_signal.sin);  // Demodulate phase A with sine reference
-                        hfi_sense_b_.tick((int16_t)curnt_b, hfi_signal.sin);  // Demodulate phase B with sine reference
+                        hfi_sense_a_.tick((int16_t)curnt_a, hfi_signal.cos);  // Demodulate phase A with sine reference
+                        hfi_sense_b_.tick((int16_t)curnt_b, hfi_signal.cos);  // Demodulate phase B with sine reference
 
                         // Accumulate demodulated HFI responses for averaging
                         int16_t hfi_response_a = hfi_sense_a_.get_output();                  // Get demodulated signal A
                         int16_t hfi_response_b = hfi_sense_b_.get_output();                  // Get demodulated signal B
-                        motor_calib_.accumulate_inductance(hfi_response_a, hfi_response_b);  // Accumulate for averaging
+                        // motor_calib_.accumulate_inductance(hfi_response_a, hfi_response_b);  // Accumulate for averaging
 
                         // Check if measurement complete (1800 cycles = 100 periods @ 1kHz)
                         if (timeout.tick() == 0) {  // Counter reached 0 - measurement done
@@ -639,10 +640,10 @@ public:
                             CALIB_LOG_VAL2("  Stored inductance A/B (uH): ", inductance_a, inductance_b);
                             CALIB_LOG("[CALIB] Motor calibration complete - transitioning to Ready");
 
-                            // Inductance measurement complete - transition to Ready state
-                            switch_status(DriverStatus_Ready);  // Calibration complete
-                            motor_calib_.reset_voltage();       // Reset voltage to zero
-                            voltage_ab = Vec2D(0, 0);           // Zero output voltage
+                            // // Inductance measurement complete - transition to Ready state
+                            // switch_status(DriverStatus_Ready);  // Calibration complete
+                            // motor_calib_.reset_voltage();       // Reset voltage to zero
+                            // voltage_ab = Vec2D(0, 0);           // Zero output voltage
                         }
                         break;
                     }
@@ -728,18 +729,18 @@ public:
         motor_.set_phase_pattern(motor_selector_.get_phase_pattern());  // Save phase pattern
 
         // Transition to inductance measurement phase
-        // motor_calib_.set_status(MotorCalibration::Status_InductanceMeasure);  // Start inductance measurement
-        // timeout.set_timeout(INDUCTANCE_MEASURE_CYCLES);                       // Set timeout to 1800 cycles (100 periods @ 1kHz)
-        // motor_calib_.reset_inductance_accumulators();                         // Reset inductance accumulators
+        motor_calib_.set_status(MotorCalibration::Status_InductanceMeasure);  // Start inductance measurement
+        timeout.set_timeout(INDUCTANCE_MEASURE_CYCLES);                       // Set timeout to 1800 cycles (100 periods @ 1kHz)
+        motor_calib_.reset_inductance_accumulators();                         // Reset inductance accumulators
 
-        // // Configure HFI generator for 1 kHz injection
-        // hfi_generator_.set_frequency_target(1000);    // Set 1 kHz carrier frequency
-        // hfi_generator_.set_amplitude(INT16_MAX / 2);  // Set amplitude to 25% of maximum
-        // hfi_generator_.reset();                       // Reset generator phase to zero
+        // Configure HFI generator for 1 kHz injection
+        hfi_generator_.set_frequency_target(1000);    // Set 1 kHz carrier frequency
+        hfi_generator_.set_amplitude(motor_calib_.get_voltage());  // Set amplitude to 25% of maximum
+        hfi_generator_.reset();                       // Reset generator phase to zero
 
-        // // Reset HFI sense filters
-        // hfi_sense_a_.reset();  // Reset phase A HFI demodulator
-        // hfi_sense_b_.reset();  // Reset phase B HFI demodulator
+        // Reset HFI sense filters
+        hfi_sense_a_.reset();  // Reset phase A HFI demodulator
+        hfi_sense_b_.reset();  // Reset phase B HFI demodulator
 
         // angle_ = 0;  // Set angle to 0° for D-axis injection
     }

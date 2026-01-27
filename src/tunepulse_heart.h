@@ -2,7 +2,6 @@
 #define TUNEPULSE_HEART_H
 
 #include <Arduino.h>
-#include "setup/timer_pwm_setup.h"
 
 // Rename migration types to avoid collisions with legacy block classes
 #define SupplyVoltage MigrationSupplyVoltage
