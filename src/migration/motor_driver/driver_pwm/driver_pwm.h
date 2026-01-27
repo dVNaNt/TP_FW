@@ -360,7 +360,7 @@ public:
                             // Configure soft limits for calibration
                             feedback_.power.set_overpower_soft_mw(test_pwr);  // Set soft power limit to 2W
                             feedback_.supply.set_overvoltage_soft_norm(feedback_.supply.get_voltage_norm() / 2);
-                            feedback_.current.set_overcurrent_soft_norm(INT16_MAX / 2);
+                            feedback_.current.set_overcurrent_soft_norm(INT16_MAX / 4);
                             motor_selector_.set_motor_type(MotorType_STEP);
                             motor_selector_.set_phase_pattern(PhasePattern_ABC);
                             motor_calib_.reset_voltage();
@@ -524,7 +524,7 @@ public:
 
                                         // Rotate angle by 30° slowly to verify
                                         motor_calib_.start_slow_rotation(16384, power);  // Target: current + 30°
-                                        set_calibration_success(); // TODO: REMOVE
+                                        // set_calibration_success(); // TODO: REMOVE
                                     }  // Check if angle is around 90° (angle woks on second pass for BLDC and stepper in correct
                                        // phase)
                                     else {
@@ -728,19 +728,19 @@ public:
         motor_.set_motor_type(motor_selector_.get_motor_type());        // Save detected motor type
         motor_.set_phase_pattern(motor_selector_.get_phase_pattern());  // Save phase pattern
 
-        // Transition to inductance measurement phase
-        motor_calib_.set_status(MotorCalibration::Status_InductanceMeasure);  // Start inductance measurement
-        timeout.set_timeout(INDUCTANCE_MEASURE_CYCLES);                       // Set timeout to 1800 cycles (100 periods @ 1kHz)
-        motor_calib_.reset_inductance_accumulators();                         // Reset inductance accumulators
+        // // Transition to inductance measurement phase
+        // motor_calib_.set_status(MotorCalibration::Status_InductanceMeasure);  // Start inductance measurement
+        // timeout.set_timeout(INDUCTANCE_MEASURE_CYCLES);                       // Set timeout to 1800 cycles (100 periods @ 1kHz)
+        // motor_calib_.reset_inductance_accumulators();                         // Reset inductance accumulators
 
-        // Configure HFI generator for 1 kHz injection
-        hfi_generator_.set_frequency_target(1000);    // Set 1 kHz carrier frequency
-        hfi_generator_.set_amplitude(motor_calib_.get_voltage());  // Set amplitude to 25% of maximum
-        hfi_generator_.reset();                       // Reset generator phase to zero
+        // // Configure HFI generator for 1 kHz injection
+        // hfi_generator_.set_frequency_target(1000);    // Set 1 kHz carrier frequency
+        // hfi_generator_.set_amplitude(motor_calib_.get_voltage());  // Set amplitude to 25% of maximum
+        // hfi_generator_.reset();                       // Reset generator phase to zero
 
-        // Reset HFI sense filters
-        hfi_sense_a_.reset();  // Reset phase A HFI demodulator
-        hfi_sense_b_.reset();  // Reset phase B HFI demodulator
+        // // Reset HFI sense filters
+        // hfi_sense_a_.reset();  // Reset phase A HFI demodulator
+        // hfi_sense_b_.reset();  // Reset phase B HFI demodulator
 
         // angle_ = 0;  // Set angle to 0° for D-axis injection
     }

@@ -141,43 +141,66 @@ void MX_TIM1_Start() {
 
 /**
  * @brief Set PWM duty cycle values for 3 phases
- * @param pwmValues Array of 3 duty cycle values (0 to PWM_TIMER_PERIOD)
- *                  INT16_MIN = disable phase (Hi-Z)
+ * @param pwmValues Array of 3 duty cycle values (-PWM_TIMER_PERIOD to +PWM_TIMER_PERIOD)
+ *                  Positive: normal PWM mode (high-side switching)
+ *                  Negative: braking mode (low-side switching, high-side OFF)
+ *                  INT16_MIN = disable phase (all outputs LOW)
  */
 void TIM1_Set_PWM_Values(const int16_t pwmValues[3]) {
-    // Phase A (CH1)
-    if (pwmValues[0] == INT16_MIN) {
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);  // 0% duty
-        // Disable outputs via DRV_EN if needed
-    } else {
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (pwmValues[0] < 0) ? 0 : pwmValues[0]);
+    // Process each phase
+    for (uint8_t phase = 0; phase < 3; phase++) {
+        uint32_t channel;  // TIM channel identifier
+        
+        // Map phase index to TIM channel
+        if (phase == 0) channel = TIM_CHANNEL_1;       // Phase A
+        else if (phase == 1) channel = TIM_CHANNEL_2;  // Phase B
+        else channel = TIM_CHANNEL_3;                  // Phase C
+        
+        int16_t duty = pwmValues[phase];  // Get duty cycle value
+        
+        if (duty == INT16_MIN) {
+            // Timer inactive mode: all FETs OFF (both high-side and low-side disabled)
+            __HAL_TIM_SET_COMPARE(&htim1, channel, 0);  // Set compare to 0
+            TIM1->CCER &= ~(0x5 << (phase * 4));        // Disable both CHx and CHxN outputs (all FETs OFF)
+        } 
+        else if (duty < 0) {
+            // Braking mode: high-side OFF, low-side PWM with corrected duty
+            int16_t abs_duty = -duty;  // Convert to positive value
+            if (abs_duty > PWM_TIMER_PERIOD) abs_duty = PWM_TIMER_PERIOD;  // Clamp to max
+            
+            __HAL_TIM_SET_COMPARE(&htim1, channel, abs_duty);  // Set PWM duty cycle
+            
+            // Configure outputs: CHx=OFF (high-side), CHxN=ON (low-side)
+            uint32_t ccer_mask = (0x5 << (phase * 4));  // Mask for CHxE and CHxNE bits
+            TIM1->CCER &= ~ccer_mask;                   // Clear both enable bits
+            TIM1->CCER |= (0x4 << (phase * 4));         // Enable only CHxN (low-side)
+        } 
+        else {
+            // Normal PWM mode: complementary outputs active
+            if (duty > PWM_TIMER_PERIOD) duty = PWM_TIMER_PERIOD;  // Clamp to max
+            
+            __HAL_TIM_SET_COMPARE(&htim1, channel, duty);  // Set PWM duty cycle
+            
+            // Enable both CHx (high-side) and CHxN (low-side) outputs
+            TIM1->CCER |= (0x5 << (phase * 4));  // Set CHxE and CHxNE bits
+        }
     }
     
-    // Phase B (CH2)
-    if (pwmValues[1] == INT16_MIN) {
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);  // 0% duty
-    } else {
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (pwmValues[1] < 0) ? 0 : pwmValues[1]);
+    // Find maximum absolute PWM value for ADC trigger calculation
+    int16_t max_pwm = 0;  // Initialize to zero
+    for (uint8_t i = 0; i < 3; i++) {
+        int16_t abs_val = (pwmValues[i] < 0) ? -pwmValues[i] : pwmValues[i];  // Get absolute value
+        if (abs_val != INT16_MIN && abs_val > max_pwm) {  // Update max if valid and larger
+            max_pwm = abs_val;
+        }
     }
     
-    // Phase C (CH3)
-    if (pwmValues[2] == INT16_MIN) {
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0);  // 0% duty
-    } else {
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (pwmValues[2] < 0) ? 0 : pwmValues[2]);
-    }
-    
-    // Find maximum PWM value for ADC trigger calculation
-    int16_t max_pwm = pwmValues[0];
-    if (pwmValues[1] > max_pwm) max_pwm = pwmValues[1];
-    if (pwmValues[2] > max_pwm) max_pwm = pwmValues[2];
-
-    if (max_pwm == INT16_MIN) max_pwm = PWM_TIMER_PERIOD;
+    if (max_pwm == 0) max_pwm = PWM_TIMER_PERIOD;  // Default to full period if all disabled
     
     // Calculate ADC trigger point: max PWM + delay
     int16_t adc_trigger = max_pwm + ADC_DELAY_TICKS;
     
-    // Clamp to valid range
+    // Clamp to valid range [0, PWM_TIMER_PERIOD-1]
     if (adc_trigger < 0) adc_trigger = 0;
     if (adc_trigger > PWM_TIMER_PERIOD) adc_trigger = PWM_TIMER_PERIOD - 1;
 

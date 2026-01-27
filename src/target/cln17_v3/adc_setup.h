@@ -33,7 +33,7 @@ void MX_ADC1_Init() {
     LL_ADC_Init(ADC1, &ADC_InitStruct);
 
     // Configure ADC1 regular group (3 channels: I_A, I_B, I_C)
-    ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_3RANKS;  // 3 channels
+    ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_2RANKS;  // 3 channels
     ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;             // Software trigger
     ADC_REG_InitStruct.SequencerDiscont = LL_ADC_REG_SEQ_DISCONT_DISABLE;    // No discontinuous
     ADC_REG_InitStruct.ContinuousMode = LL_ADC_REG_CONV_SINGLE;              // Single conversion
@@ -65,13 +65,8 @@ void MX_ADC1_Init() {
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_4, LL_ADC_SAMPLINGTIME_2CYCLES_5);
     LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_4, LL_ADC_SINGLE_ENDED);
 
-    // Rank 2: PA1 (I_B) -> ADC1_IN2
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_2);
-    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_2, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_2, LL_ADC_SINGLE_ENDED);
-
     // Rank 3: PB0 (I_C) -> ADC1_IN15
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_3, LL_ADC_CHANNEL_15);
+    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_15);
     LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_15, LL_ADC_SAMPLINGTIME_2CYCLES_5);
     LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_15, LL_ADC_SINGLE_ENDED);
 }
@@ -131,17 +126,18 @@ void MX_ADC2_Init() {
     while (wait_loop_index != 0) {
         wait_loop_index--;
     }
+    // Rank 2: PA1 (I_B) -> ADC2_IN2
+    LL_ADC_REG_SetSequencerRanks(ADC2, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_2);
+    LL_ADC_SetChannelSamplingTime(ADC2, LL_ADC_CHANNEL_2, LL_ADC_SAMPLINGTIME_2CYCLES_5);
+    LL_ADC_SetChannelSingleDiff(ADC2, LL_ADC_CHANNEL_2, LL_ADC_SINGLE_ENDED);
 
     // Configure ADC2 channels
     // Rank 1: PA0 (VSENS) -> ADC2_IN1
-    LL_ADC_REG_SetSequencerRanks(ADC2, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_1);
+    LL_ADC_REG_SetSequencerRanks(ADC2, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_1);
     LL_ADC_SetChannelSamplingTime(ADC2, LL_ADC_CHANNEL_1, LL_ADC_SAMPLINGTIME_2CYCLES_5);
     LL_ADC_SetChannelSingleDiff(ADC2, LL_ADC_CHANNEL_1, LL_ADC_SINGLE_ENDED);
 
-    // Rank 2: PA1 (I_B) -> ADC2_IN2
-    LL_ADC_REG_SetSequencerRanks(ADC2, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_2);
-    LL_ADC_SetChannelSamplingTime(ADC2, LL_ADC_CHANNEL_2, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC2, LL_ADC_CHANNEL_2, LL_ADC_SINGLE_ENDED);
+
 }
 
 // Function to start DMA conversion for ADC2
@@ -172,9 +168,9 @@ void ADC_get_values(uint16_t& current_a,
                     uint16_t& voltage_vref,
                     uint16_t& voltage_temp) {
     current_a = dma_buffer_adc1[0];       // I_A (PA3 - ADC1_IN4)
-    current_b = dma_buffer_adc1[1];       // I_B (PA1 - ADC1_IN2)
-    current_c = dma_buffer_adc1[2];       // I_C (PB0 - ADC1_IN15)
-    voltage_supply = dma_buffer_adc2[0];  // VSENS (PA0 - ADC2_IN1)
+    current_b = dma_buffer_adc2[0];       // I_B (PA1 - ADC1_IN2)
+    current_c = dma_buffer_adc1[1];       // I_C (PB0 - ADC1_IN15)
+    voltage_supply = dma_buffer_adc2[1];  // VSENS (PA0 - ADC2_IN1)
     voltage_vref = 0;                     // Not used
     voltage_temp = 0;                     // Not used
 }

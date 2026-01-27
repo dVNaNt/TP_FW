@@ -40,7 +40,7 @@ private:
     
 public:
     // Constructor: Initialize position to zero with default filter (no filtering)
-    Position() : position_(0), filter_(0, 0) {}  // Constructor: Create with zero position and disabled filter
+    Position() : position_(0), filter_(0, 255) {}  // Constructor: Create with zero position and disabled filter
     
     // Constructor: Initialize position with filter alpha
     // alpha: Filter coefficient (0..255, where 0=infinite filtering, 255=no filtering)

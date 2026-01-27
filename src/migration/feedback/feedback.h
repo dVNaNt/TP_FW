@@ -50,7 +50,7 @@ public:
     // current_ch1_fs_ma: Full-scale current for channel 1 in milliamps
     // current_ch2_fs_ma: Full-scale current for channel 2 in milliamps
     // current_ch3_fs_ma: Full-scale current for channel 3 in milliamps
-    Feedback(int32_t supply_max_mv = 24000, int16_t current_ch1_fs_ma = 1000, int16_t current_ch2_fs_ma = 1000, int16_t current_ch3_fs_ma = 1000)  // Constructor: Create and initialize feedback system
+    Feedback(int32_t supply_max_mv, int16_t current_ch1_fs_ma, int16_t current_ch2_fs_ma, int16_t current_ch3_fs_ma)  // Constructor: Create and initialize feedback system
         : inputs(0),  // Initialize inputs dump with mandatory fields using constructor
           supply(200, supply_max_mv),  // Initialize supply voltage sensor
           current(current_ch1_fs_ma, current_ch2_fs_ma, current_ch3_fs_ma),  // Initialize current sensors
