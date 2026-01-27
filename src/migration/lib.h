@@ -4,14 +4,14 @@
 // Integrated with TunePulseHeart for complete motor control system.
 
 #include "common.h"
+#include "error.h"              // Include error management system
 #include "feedback/feedback.h"  // Include unified feedback module
-#include "math_integer/filters/filter1st.h"
-#include "motor_driver/types.h"
-#include "motor_driver/driver_pwm/driver_pwm.h"
-#include "motor_driver/calibration/angle_calibrator.h"
-#include "motor_driver/motor.h"
-#include "error.h"  // Include error management system
 #include "feedback/feedback.h"
+#include "math_integer/filters/filter1st.h"
+#include "motor_driver/calibration/angle_calibrator.h"
+#include "motor_driver/driver_pwm/driver_pwm.h"
+#include "motor_driver/motor.h"
+#include "motor_driver/types.h"
 
 // Forward declaration
 struct TunePulseHeart;
@@ -38,28 +38,27 @@ public:
     // Marked volatile so it is always written (useful for MCUView / debugger watches).
     volatile uint16_t i_ch2;
 
-
     // ========================================================================
     // Clock and timing
     // ========================================================================
     Frequency clock_;
-    
+
     // ========================================================================
     // Unified feedback system (inputs, supply, current, position)
     // ========================================================================
     Feedback feedback;
-    
+
     // ========================================================================
     // Error management system (public member)
     // ========================================================================
     ErrorManager error;
-    
+
 public:
     // ========================================================================
     // Motor parameters (owned here, passed by reference to driver)
     // ========================================================================
     Motor motor_params;
-    
+
     // ========================================================================
     // Motor control components
     // ========================================================================
@@ -90,7 +89,7 @@ public:
     // User settings
     // ========================================================================
     int32_t current_target_ma_;
-    
+
     // ========================================================================
     // Internal state
     // ========================================================================
@@ -100,15 +99,12 @@ public:
 
 public:
     // Constructor
-    TunePulseHeart(int32_t motor_res_ohm_milli = 2000,
-                   MotorType motor_type = MotorType_Invalid,
-                   PhasePattern phase_pattern = PhasePattern_ABC,
-                   uint16_t freq_hz = PWM_TIMER_FREQ_HZ,
-                   uint16_t pwm_res = PWM_TIMER_PERIOD,
-                   int32_t max_sup_mv = 85000)
+    TunePulseHeart(uint16_t freq_hz,
+                   uint16_t pwm_res,
+                   int32_t max_sup_mv, int32_t iA_fs, int32_t iB_fs, int32_t iC_fs )
         : i_ch2(0)
         , clock_(170000000, freq_hz)
-        , feedback(max_sup_mv, 18700, 18700, 18700)  // Initialize unified feedback with all modules enabled
+        , feedback(max_sup_mv, iA_fs, iB_fs, iC_fs)  // Initialize unified feedback with all modules enabled
         , motor_params()  // Initialize Motor with default constructor
         , driver_(feedback, motor_params)  // Pass feedback and motor reference
         , angle_calibrator_(angle_calibrator_new(freq_hz))
@@ -128,51 +124,44 @@ public:
         , last_supply_norm_(0)
     {
         // Set motor type and connection using setters
-        motor_params.set_motor_type(motor_type);
-        motor_params.set_phase_pattern(phase_pattern);
         // Set phase resistances for all phases (same value for initial config)
+
         feedback.enable_current();
         feedback.enable_encoder();
         feedback.enable_supply();
         
         reset_buffers();
     }
-
     // ========================================================================
     // Public API - Hardware callbacks
     // ========================================================================
 
-    void set_current_target_ma(int32_t value_ma) {
-        current_target_ma_ = clamp_i32(value_ma, INT16_MAX);
-    }
+    void set_current_target_ma(int32_t value_ma) { current_target_ma_ = clamp_i32(value_ma, INT16_MAX); }
 
     void on_encoder_raw(uint16_t angle_raw) {
         feedback.inputs.set_angle_raw(angle_raw);  // Use Feedback method without underscore
     }
 
     void on_adc_values(const uint16_t currents[3], uint16_t supply_adc, uint16_t temp_adc) {
-        feedback.inputs.set_current_adc(currents);  // Use Feedback method without underscore
+        feedback.inputs.set_current_adc(currents);   // Use Feedback method without underscore
         feedback.inputs.set_supply_adc(supply_adc);  // Use Feedback method without underscore
-        feedback.inputs.set_temper_adc(temp_adc);  // Use Feedback method without underscore
+        feedback.inputs.set_temper_adc(temp_adc);    // Use Feedback method without underscore
     }
 
     void tick() {
         // Update error manager (auto-clear expired errors)
         error.tick();
-        
+
         // Update all feedback sensors (supply, current, position)
         feedback.tick();  // Process all feedback data
-        
-        if (! feedback.is_updated()) {
+
+        if (!feedback.is_updated()) {
             return;
         } else {
-            
         }
 
-
-
         // Motor controller tick logic
-        amplitude_ = (int16_t)current_target_ma_; // ma
+        amplitude_ = (int16_t)current_target_ma_;  // ma
 
         switch (driver_status_) {
             case DriverStatus_Ready: {
@@ -189,7 +178,8 @@ public:
                     sup_check_ -= 1;
                     if (sup_check_ == 0) {
                         if (feedback.supply.get_voltage_mv() < 8000) {  // Use Feedback accessor without underscore
-                            TUNEPULSE_LOG_WARN("SUPPLY is not enough: %dmV while at least 8000mV is needed", feedback.supply.get_voltage_mv());
+                            TUNEPULSE_LOG_WARN("SUPPLY is not enough: %dmV while at least 8000mV is needed",
+                                               feedback.supply.get_voltage_mv());
                         } else {
                             TUNEPULSE_LOG_INFO("SUPPLY is OK: %dmV", feedback.supply.get_voltage_mv());
                         }
@@ -217,43 +207,31 @@ public:
         update_pwm_duty();
     }
 
-    const int16_t* pwm_duty_values() const {
-        return pwm_duty_;
-    }
-    
+    const int16_t* pwm_duty_values() const { return pwm_duty_; }
+
     // ========================================================================
     // Clock interface
     // ========================================================================
-    
-    const Frequency& get_clock() const {
-        return clock_;
-    }
-    
-    Frequency& get_clock() {
-        return clock_;
-    }
-    
+
+    const Frequency& get_clock() const { return clock_; }
+
+    Frequency& get_clock() { return clock_; }
 
     // ========================================================================
     // Motor test interface
     // ========================================================================
-    
 
-    
-    DriverStatus get_driver_status() const {
-        return driver_.get_status();
-    }
+    DriverStatus get_driver_status() const { return driver_.get_status(); }
 
     // ========================================================================
     // Motor control interface
     // ========================================================================
-    
 
 private:
     // ========================================================================
     // Private methods
     // ========================================================================
-    
+
     void reset_buffers() {
         i_ch2 = 0;
         for (size_t i = 0; i < 3; ++i) {
@@ -272,10 +250,11 @@ private:
             }
             // Same scaling as Rust duty2period: (duty * period) >> 15
             int32_t duty = (value * period) >> 15;
-            if (duty < 0) duty = 0;
-            if (duty > period) duty = period;
+            if (duty < 0)
+                duty = 0;
+            if (duty > period)
+                duty = period;
             pwm_duty_[i] = (int16_t)duty;
         }
     }
 };
-

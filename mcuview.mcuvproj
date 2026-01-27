@@ -1,5 +1,5 @@
 [elf]
-file_path = .pio\build\radix_release\firmware.elf
+file_path = .pio\build\cln17_v3_release\firmware.elf
 relative_path = true
 
 [general]
@@ -45,7 +45,7 @@ log_directory =
 [var0]
 name = ADC_DELAY_TICKS
 tracked_name = ADC_DELAY_TICKS
-address = 536871384
+address = 536871354
 type = 4
 color = 1552524401
 should_update_from_elf = true
@@ -58,7 +58,7 @@ do_not_interpret_as_enum = false
 [var1]
 name = POSITION_ENCODER
 tracked_name = POSITION_ENCODER
-address = 536876348
+address = 536876292
 type = 3
 color = 1147271206
 should_update_from_elf = true
@@ -71,7 +71,7 @@ do_not_interpret_as_enum = false
 [var2]
 name = SystemCoreClock
 tracked_name = SystemCoreClock
-address = 536871376
+address = 536871348
 type = 5
 color = 2734004090
 should_update_from_elf = true
@@ -84,7 +84,7 @@ do_not_interpret_as_enum = false
 [var3]
 name = TUNE_HEART.current_target_ma_
 tracked_name = TUNE_HEART.current_target_ma_
-address = 536875928
+address = 536875892
 type = 6
 color = 3012792362
 should_update_from_elf = true
@@ -97,7 +97,7 @@ do_not_interpret_as_enum = false
 [var4]
 name = TUNE_HEART.driver_.angle_
 tracked_name = TUNE_HEART.driver_.angle_
-address = 536875300
+address = 536875264
 type = 4
 color = 2141708102
 should_update_from_elf = true
@@ -110,7 +110,7 @@ do_not_interpret_as_enum = false
 [var5]
 name = TUNE_HEART.driver_.current_dq.cos
 tracked_name = TUNE_HEART.driver_.current_dq.cos
-address = 536875388
+address = 536875352
 type = 4
 color = 491470293
 should_update_from_elf = true
@@ -123,7 +123,7 @@ do_not_interpret_as_enum = false
 [var6]
 name = TUNE_HEART.driver_.current_dq.sin
 tracked_name = TUNE_HEART.driver_.current_dq.sin
-address = 536875390
+address = 536875354
 type = 4
 color = 4183998272
 should_update_from_elf = true
@@ -136,7 +136,7 @@ do_not_interpret_as_enum = false
 [var7]
 name = TUNE_HEART.driver_.hfi_sense_a_.demod_lpf_.output_
 tracked_name = TUNE_HEART.driver_.hfi_sense_a_.demod_lpf_.output_
-address = 536875340
+address = 536875304
 type = 4
 color = 3339443072
 should_update_from_elf = true
@@ -149,7 +149,7 @@ do_not_interpret_as_enum = false
 [var8]
 name = TUNE_HEART.driver_.hfi_sense_a_.input_hpf_.output_
 tracked_name = TUNE_HEART.driver_.hfi_sense_a_.input_hpf_.output_
-address = 536875332
+address = 536875296
 type = 4
 color = 605178794
 should_update_from_elf = true
@@ -162,7 +162,7 @@ do_not_interpret_as_enum = false
 [var9]
 name = TUNE_HEART.driver_.hfi_sense_b_.demod_lpf_.output_
 tracked_name = TUNE_HEART.driver_.hfi_sense_b_.demod_lpf_.output_
-address = 536875364
+address = 536875328
 type = 4
 color = 1902683607
 should_update_from_elf = true
@@ -175,7 +175,7 @@ do_not_interpret_as_enum = false
 [var10]
 name = TUNE_HEART.driver_.hfi_sense_b_.input_hpf_.output_
 tracked_name = TUNE_HEART.driver_.hfi_sense_b_.input_hpf_.output_
-address = 536875356
+address = 536875320
 type = 4
 color = 3284462521
 should_update_from_elf = true
@@ -188,7 +188,7 @@ do_not_interpret_as_enum = false
 [var11]
 name = TUNE_HEART.driver_.motor_calib_.measure_current_a_sum_
 tracked_name = TUNE_HEART.driver_.motor_calib_.measure_current_a_sum_
-address = 536875260
+address = 536875224
 type = 6
 color = 798039757
 should_update_from_elf = true
@@ -201,7 +201,7 @@ do_not_interpret_as_enum = false
 [var12]
 name = TUNE_HEART.driver_.motor_selector_.current_converter_.ab_out_.cos
 tracked_name = TUNE_HEART.driver_.motor_selector_.current_converter_.ab_out_.cos
-address = 536875092
+address = 536875056
 type = 4
 color = 2351484672
 should_update_from_elf = true
@@ -214,7 +214,7 @@ do_not_interpret_as_enum = false
 [var13]
 name = TUNE_HEART.driver_.motor_selector_.current_converter_.ab_out_.sin
 tracked_name = TUNE_HEART.driver_.motor_selector_.current_converter_.ab_out_.sin
-address = 536875094
+address = 536875058
 type = 4
 color = 1277999086
 should_update_from_elf = true
@@ -227,7 +227,7 @@ do_not_interpret_as_enum = false
 [var14]
 name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_a_.output_
 tracked_name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_a_.output_
-address = 536875100
+address = 536875064
 type = 4
 color = 1526250083
 should_update_from_elf = true
@@ -240,7 +240,7 @@ do_not_interpret_as_enum = false
 [var15]
 name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_b_.output_
 tracked_name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_b_.output_
-address = 536875108
+address = 536875072
 type = 4
 color = 2681943357
 should_update_from_elf = true
@@ -253,7 +253,7 @@ do_not_interpret_as_enum = false
 [var16]
 name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_c_.output_
 tracked_name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_c_.output_
-address = 536875116
+address = 536875080
 type = 4
 color = 1118372411
 should_update_from_elf = true
@@ -266,7 +266,7 @@ do_not_interpret_as_enum = false
 [var17]
 name = TUNE_HEART.driver_.output.a
 tracked_name = TUNE_HEART.driver_.output.a
-address = 536875376
+address = 536875340
 type = 4
 color = 3813089830
 should_update_from_elf = true
@@ -279,7 +279,7 @@ do_not_interpret_as_enum = false
 [var18]
 name = TUNE_HEART.driver_.output.b
 tracked_name = TUNE_HEART.driver_.output.b
-address = 536875378
+address = 536875342
 type = 4
 color = 1226056100
 should_update_from_elf = true
@@ -292,7 +292,7 @@ do_not_interpret_as_enum = false
 [var19]
 name = TUNE_HEART.driver_.output.c
 tracked_name = TUNE_HEART.driver_.output.c
-address = 536875380
+address = 536875344
 type = 4
 color = 871135861
 should_update_from_elf = true
@@ -305,7 +305,7 @@ do_not_interpret_as_enum = false
 [var20]
 name = TUNE_HEART.driver_.power
 tracked_name = TUNE_HEART.driver_.power
-address = 536875384
+address = 536875348
 type = 6
 color = 2871952208
 should_update_from_elf = true
@@ -318,7 +318,7 @@ do_not_interpret_as_enum = false
 [var21]
 name = TUNE_HEART.driver_.timeout.counter
 tracked_name = TUNE_HEART.driver_.timeout.counter
-address = 536875312
+address = 536875276
 type = 6
 color = 1188219891
 should_update_from_elf = true
@@ -331,7 +331,7 @@ do_not_interpret_as_enum = false
 [var22]
 name = TUNE_HEART.feedback.current.out_norm_.arr[0]
 tracked_name = TUNE_HEART.feedback.current.out_norm_.arr[0]
-address = 536874934
+address = 536874898
 type = 4
 color = 3405052854
 should_update_from_elf = true
@@ -344,7 +344,7 @@ do_not_interpret_as_enum = false
 [var23]
 name = TUNE_HEART.feedback.current.out_norm_.arr[1]
 tracked_name = TUNE_HEART.feedback.current.out_norm_.arr[1]
-address = 536874936
+address = 536874900
 type = 4
 color = 2235436891
 should_update_from_elf = true
@@ -357,7 +357,7 @@ do_not_interpret_as_enum = false
 [var24]
 name = TUNE_HEART.feedback.current.out_norm_.arr[2]
 tracked_name = TUNE_HEART.feedback.current.out_norm_.arr[2]
-address = 536874938
+address = 536874902
 type = 4
 color = 3661053083
 should_update_from_elf = true
@@ -370,7 +370,7 @@ do_not_interpret_as_enum = false
 [var25]
 name = TUNE_HEART.feedback.data_.currnt_adc[0]
 tracked_name = TUNE_HEART.feedback.data_.currnt_adc[0]
-address = 536874994
+address = 536874958
 type = 3
 color = 594270759
 should_update_from_elf = true
@@ -383,7 +383,7 @@ do_not_interpret_as_enum = false
 [var26]
 name = TUNE_HEART.feedback.supply.voltage_mv_
 tracked_name = TUNE_HEART.feedback.supply.voltage_mv_
-address = 536874812
+address = 536874776
 type = 6
 color = 498605618
 should_update_from_elf = true
@@ -396,7 +396,7 @@ do_not_interpret_as_enum = false
 [var27]
 name = TUNE_HEART.motor_params.motor_type_
 tracked_name = TUNE_HEART.motor_params.motor_type_
-address = 536875032
+address = 536874996
 type = 2
 color = 2050525292
 should_update_from_elf = true
@@ -409,7 +409,7 @@ do_not_interpret_as_enum = false
 [var28]
 name = TUNE_HEART.motor_params.phase_inductance_uh_[0]
 tracked_name = TUNE_HEART.motor_params.phase_inductance_uh_[0]
-address = 536875060
+address = 536875024
 type = 6
 color = 3547289017
 should_update_from_elf = true
@@ -422,7 +422,7 @@ do_not_interpret_as_enum = false
 [var29]
 name = TUNE_HEART.motor_params.phase_inductance_uh_[1]
 tracked_name = TUNE_HEART.motor_params.phase_inductance_uh_[1]
-address = 536875064
+address = 536875028
 type = 6
 color = 1220911589
 should_update_from_elf = true
@@ -435,7 +435,7 @@ do_not_interpret_as_enum = false
 [var30]
 name = TUNE_HEART.motor_params.phase_inductance_uh_[2]
 tracked_name = TUNE_HEART.motor_params.phase_inductance_uh_[2]
-address = 536875068
+address = 536875032
 type = 6
 color = 2406430088
 should_update_from_elf = true
@@ -448,7 +448,7 @@ do_not_interpret_as_enum = false
 [var31]
 name = TUNE_HEART.motor_params.phase_pattern_
 tracked_name = TUNE_HEART.motor_params.phase_pattern_
-address = 536875034
+address = 536874998
 type = 4
 color = 1813216506
 should_update_from_elf = true
@@ -500,7 +500,7 @@ do_not_interpret_as_enum = false
 [var35]
 name = TUNE_HEART.motor_params.total_resistance_mohm_
 tracked_name = TUNE_HEART.motor_params.total_resistance_mohm_
-address = 536875056
+address = 536875020
 type = 6
 color = 957263685
 should_update_from_elf = true
@@ -513,7 +513,7 @@ do_not_interpret_as_enum = false
 [var36]
 name = TUNE_HEART.pwm_duty_[0]
 tracked_name = TUNE_HEART.pwm_duty_[0]
-address = 536875918
+address = 536875882
 type = 4
 color = 1307903999
 should_update_from_elf = true
@@ -526,7 +526,7 @@ do_not_interpret_as_enum = false
 [var37]
 name = TUNE_HEART.pwm_duty_[1]
 tracked_name = TUNE_HEART.pwm_duty_[1]
-address = 536875920
+address = 536875884
 type = 4
 color = 2416290913
 should_update_from_elf = true
@@ -539,7 +539,7 @@ do_not_interpret_as_enum = false
 [var38]
 name = TUNE_HEART.pwm_duty_[2]
 tracked_name = TUNE_HEART.pwm_duty_[2]
-address = 536875922
+address = 536875886
 type = 4
 color = 1962903296
 should_update_from_elf = true
@@ -611,7 +611,7 @@ format = DEC
 [group0-plot1]
 name = POS
 type = 0
-visibility = true
+visibility = false
 
 [group0-plot1-series0]
 name = POSITION_ENCODER
@@ -729,46 +729,51 @@ type = 0
 visibility = true
 
 [group0-plot4-series0]
+name = POSITION_ENCODER
+visibility = true
+format = DEC
+
+[group0-plot4-series1]
 name = TUNE_HEART.driver_.motor_calib_.measure_current_a_sum_
 visibility = false
 format = DEC
 
-[group0-plot4-series1]
+[group0-plot4-series2]
 name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_a_.output_
 visibility = false
 format = DEC
 
-[group0-plot4-series2]
+[group0-plot4-series3]
 name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_b_.output_
 visibility = false
 format = DEC
 
-[group0-plot4-series3]
+[group0-plot4-series4]
 name = TUNE_HEART.driver_.motor_selector_.current_converter_.lpf_c_.output_
 visibility = false
 format = DEC
 
-[group0-plot4-series4]
-name = TUNE_HEART.feedback.current.out_norm_.arr[0]
-visibility = true
-format = DEC
-
 [group0-plot4-series5]
-name = TUNE_HEART.feedback.current.out_norm_.arr[1]
+name = TUNE_HEART.feedback.current.out_norm_.arr[0]
 visibility = false
 format = DEC
 
 [group0-plot4-series6]
-name = TUNE_HEART.feedback.current.out_norm_.arr[2]
+name = TUNE_HEART.feedback.current.out_norm_.arr[1]
 visibility = false
 format = DEC
 
 [group0-plot4-series7]
-name = TUNE_HEART.feedback.data_.currnt_adc[0]
+name = TUNE_HEART.feedback.current.out_norm_.arr[2]
 visibility = false
 format = DEC
 
 [group0-plot4-series8]
+name = TUNE_HEART.feedback.data_.currnt_adc[0]
+visibility = false
+format = DEC
+
+[group0-plot4-series9]
 name = TUNE_HEART.feedback.supply.voltage_mv_
 visibility = false
 format = DEC

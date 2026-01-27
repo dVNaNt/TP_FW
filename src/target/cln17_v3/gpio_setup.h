@@ -41,8 +41,14 @@ void IO_Init() {
     GPIO_InitStruct.Pin = LL_GPIO_PIN_8 | LL_GPIO_PIN_9 | LL_GPIO_PIN_10;
     LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // PB13 (PWM1L - TIM1_CH1N), PB14 (PWM2L - TIM1_CH2N), PB15 (PWM3L - TIM1_CH3N)
-    GPIO_InitStruct.Pin = LL_GPIO_PIN_13 | LL_GPIO_PIN_14 | LL_GPIO_PIN_15;
+    // PB13 (PWM1L - TIM1_CH1N), PB14 (PWM2L - TIM1_CH2N) - AF6
+    GPIO_InitStruct.Alternate = LL_GPIO_AF_6;            // AF6 = TIM1
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_13 | LL_GPIO_PIN_14;
+    LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    
+    // PB15 (PWM3L - TIM1_CH3N) - AF4 (different from PB13/PB14!)
+    GPIO_InitStruct.Alternate = LL_GPIO_AF_4;            // AF4 = TIM1_CH3N for PB15
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_15;
     LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     /////////////////////////////////// SPI1 (Encoder) ////////////////////////

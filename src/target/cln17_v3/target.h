@@ -57,3 +57,10 @@ constexpr PinName SW1 = PC_6;       // Switch/Button
 constexpr PinName IO_SWDIO = PA_13;  // SWD Data
 constexpr PinName IO_SWCLK = PA_14;  // SWD Clock
 }  // namespace PINOUT
+
+namespace SYS_PARAMS {
+    constexpr int32_t MAX_SUPPLY_FS = 102300;
+    constexpr int32_t IA_MAX_CURRENT_FS = 11000;
+    constexpr int32_t IB_MAX_CURRENT_FS = 11000;
+    constexpr int32_t IC_MAX_CURRENT_FS = 16500;
+}

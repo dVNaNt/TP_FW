@@ -25,8 +25,6 @@ volatile uint32_t g_fault_timestamp = 0;       // When fault occurred
 volatile bool g_fault_active = false;          // Fault lockout active
 
 // Forward declarations
-struct TunePulseHeart;
-extern TunePulseHeart* g_heart_ptr;
 void PWM_Emergency_Disable(uint8_t fault_source);
 void COMP_Update_Fault_State(void);
 
@@ -241,18 +239,8 @@ inline void PWM_Emergency_Disable(uint8_t fault_source) {
     g_fault_timestamp = millis();   // Record timestamp
     g_fault_active = true;          // Set fault active flag
     
-    // Set error flags in TunePulseHeart
-    if (g_heart_ptr != nullptr) {
-        if (fault_source & FAULT_COMP2) {
-            g_heart_ptr->error.set_fatal_phase1_oc();  // Phase A overcurrent
-        }
-        if (fault_source & FAULT_COMP1) {
-            g_heart_ptr->error.set_fatal_phase2_oc();  // Phase B overcurrent
-        }
-        if (fault_source & FAULT_COMP4) {
-            g_heart_ptr->error.set_fatal_phase3_oc();  // Phase C overcurrent
-        }
-    }
+    // TODO: Log fault to error manager when integrated
+    // For now, just disable driver and PWM
     
     // Disable DRV8323H driver
     LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_11);  // DRV_EN = 0

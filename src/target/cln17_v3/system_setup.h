@@ -1,8 +1,6 @@
 #ifndef SYSTEM_SETUP_CLN17V3_H
 #define SYSTEM_SETUP_CLN17V3_H
 
-#include "tunepulse_heart.h"
-
 #include "adc_setup.h"
 #include "clock_setup.h"
 #include "comp_setup.h"
@@ -10,14 +8,13 @@
 #include "gpio_setup.h"
 #include "spi_setup.h"
 #include "timer_pwm_setup.h"
-
-extern TunePulseHeart TUNE_HEART;
+#include "interrupt_setup.h"
 
 /**
  * @brief PWM callback - called on timer update
  */
 inline void PWM_Callback() {
-    TIM1_Set_PWM_Values(TUNE_HEART.pwm_duty_values());  // Update PWM duty cycles
+    // TODO: Implement PWM callback for motor control
 }
 
 /**
@@ -38,26 +35,14 @@ inline void ADC_START_Callback() {
  * @brief ADC ready callback - called when DMA transfer complete
  */
 inline void ADC_READY_Callback() {
-    uint16_t current_a, current_b, current_c, voltage_supply, voltage_vref, temperature_adc;
-    
-    // Get ADC values from DMA buffers
-    ADC_get_values(current_a, current_b, current_c, voltage_supply, voltage_vref, temperature_adc);
-
-    // Pack current values into array
-    uint16_t current_values[3] = {current_a, current_b, current_c};
-    
-    // Store phase B current for debugging
-    TUNE_HEART.i_ch2 = current_b;
-    
-    // Call TunePulseHeart ADC callback
-    TUNE_HEART.on_adc_values(current_values, voltage_supply, temperature_adc);
+    // TODO: Process ADC values for current sensing and voltage monitoring
 }
 
 /**
  * @brief Position callback - called when encoder data ready
  */
 inline void POSITION_Callback() {
-    TUNE_HEART.on_encoder_raw(SPI1_GetAngle());  // Update encoder position
+    // TODO: Process encoder position data
 }
 
 #endif  // SYSTEM_SETUP_CLN17V3_H

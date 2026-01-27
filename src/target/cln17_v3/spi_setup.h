@@ -9,8 +9,8 @@
 extern void POSITION_Callback();  // Forward declaration
 
 // MT6835 transaction: 5 bytes write, 5 bytes read
-static uint8_t SPI1_TX_BUF[5] = {0b00110000, 0b00000011, 0xFF, 0xFF, 0xFF};
-static uint8_t SPI1_RX_BUF[5] = {0};
+static uint8_t SPI1_TX_BUF[4] = {0x80, 0x20, 0xFF, 0xFF};
+static uint8_t SPI1_RX_BUF[4] = {0};
 static volatile uint16_t POSITION_ENCODER = 0;
 
 static SPI_HandleTypeDef hspi1;
@@ -78,7 +78,7 @@ static inline void SPI1_Init() {
     hspi1.Init.Mode = SPI_MODE_MASTER;
     hspi1.Init.Direction = SPI_DIRECTION_2LINES;
     hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-    hspi1.Init.CLKPolarity = SPI_POLARITY_HIGH;  // Mode 3
+    hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;  // Mode 3
     hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;       // Mode 3
     hspi1.Init.NSS = SPI_NSS_SOFT;
     hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
@@ -123,7 +123,7 @@ static inline uint16_t SPI1_GetAngle() {
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef* hspi) {
     if (hspi->Instance == SPI1) {
         // Extract angle from bytes 2 and 3
-        POSITION_ENCODER = ((uint16_t)SPI1_RX_BUF[2] << 8) | SPI1_RX_BUF[3];
+        POSITION_ENCODER = ((uint16_t)SPI1_RX_BUF[2] << 9) | (SPI1_RX_BUF[3] << 1) ;
         SPI1_ChipSelect(false);  // CS idle high
         POSITION_Callback();  // Call position callback
     }
