@@ -1,10 +1,6 @@
 #pragma once
 
-// Allow selecting target either via build flag (-D TARGET_CLN17V3)
-// or by including this header in standalone bring-up code.
-#ifndef TARGET_CLN17V3
 #define TARGET_CLN17V3
-#endif
 
 #include "Arduino.h"
 

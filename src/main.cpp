@@ -1,11 +1,7 @@
 #include <Arduino.h>
 
-// NOTE:
-// - For CLN17_V3 "release" we want the normal motor firmware path.
-// - The bring-up / hello-world test is gated by CLN17V3_BRINGUP to avoid
-//   "hang" on SerialUSB when no host is connected.
-#if defined(TARGET_CLN17V3) && defined(CLN17V3_BRINGUP)
-// CLN17V3 Bring-up Test Code - Hello World with LED blink and analog reading
+#ifdef TARGET_CLN17V3
+// CLN17V3 Test Code - Hello World with LED blink and analog reading
 
 #include "target.h"  // Pin definitions for CLN17V3
 #include "stm32g4xx_ll_bus.h"   // Bus peripheral library for clock enable
@@ -167,11 +163,8 @@ void setup() {
     // Wait for USB connection
     delay(2000);
     
-    // Avoid "hang" if USB host is not connected/enumerated yet
-    if (SerialUSB) {
-        SerialUSB.println("=== Motor Test Starting ===");
-        SerialUSB.println("Waiting for calibration...");
-    }
+    SerialUSB.println("=== Motor Test Starting ===");
+    SerialUSB.println("Waiting for calibration...");
 
 }
 
@@ -186,10 +179,7 @@ void loop() {
     MigrationDriverStatus current_status = TUNE_HEART.get_driver_status();
     if (current_status != last_status) {
         last_status = current_status;
-
-        // Avoid blocking prints when USB is not connected
-        if (!SerialUSB) return;
-
+        
         SerialUSB.print("Driver status: ");
         switch (current_status) {
             case DriverStatus_Calibrating:
