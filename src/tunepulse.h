@@ -1,11 +1,11 @@
 #ifndef TUNEPULSE_H
 #define TUNEPULSE_H
 
-#include "setup/interrupt_setup.h"
 
 #if defined(TARGET_RADIX)
     #include "target/radix/dac_setup.h"
     #include "target/radix/comp_setup.h"
+    #include "target/radix/interrupt_setup.h"
 
     inline void tunepulse_init() {
         SystemClock_Config();         // Configure system clock to 170 MHz
@@ -24,6 +24,7 @@
     }
 #elif defined(TARGET_CLN17V3)
     #include "target/cln17_v3/comp_setup.h"
+    #include "target/cln17_v3/interrupt_setup.h"
 
     inline void tunepulse_init() {
         SerialUSB.println("0. SystemClock_Config...");

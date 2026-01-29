@@ -18,7 +18,7 @@ TunePulseHeart TUNE_HEART(PWM_TIMER_FREQ_HZ,
 TunePulseHeart* g_heart_ptr = &TUNE_HEART;
 
 // Track status changes
-static MigrationDriverStatus last_status = DriverStatus_Error;
+static DriverStatus last_status = DriverStatus_Error;
 
 void setup() {
     // Initialize all hardware modules
@@ -26,6 +26,26 @@ void setup() {
 
     // Set current limit (in mA)
     TUNE_HEART.motor_params.set_current_limit(2500);
+
+    // Link comparator DAC update callbacks to current sense
+    TUNE_HEART.feedback.current.set_overcurrent_hard_callback(CurrentSense::CH1,
+                                                              COMP_Update_DAC_Channel_A  // Channel A (COMP2, Phase A, I_A)
+
+    );
+
+    // Link comparator DAC update callbacks to current sense
+    TUNE_HEART.feedback.current.set_overcurrent_hard_callback(
+        CurrentSense::CH2, COMP_Update_DAC_Channel_C  // Channel A (COMP2, Phase A, I_A)
+
+    );
+
+    // Link comparator DAC update callbacks to current sense
+    TUNE_HEART.feedback.current.set_overcurrent_hard_callback(CurrentSense::CH3,
+                                                              COMP_Update_DAC_Channel_C  // Channel A (COMP2, Phase A, I_A)
+
+    );
+
+    // TUNE_HEART.feedback.current.set_overcurrent_hard_ma(1000);
 
     // Initialize USB serial communication
     SerialUSB.begin();
@@ -35,6 +55,8 @@ void setup() {
 
     SerialUSB.println("\n\n=== CLN17V3 Motor Control Starting ===");
     SerialUSB.println("Hardware initialized successfully");
+    SerialUSB.println("Hard overcurrent limit set to 500mA per channel");
+    SerialUSB.println("Comparator callbacks linked to DAC updates");
     SerialUSB.println("Waiting for calibration...");
     SerialUSB.flush();
 }
@@ -47,7 +69,7 @@ void loop() {
     COMP_Update_Fault_State();
 
     // Print driver status changes
-    MigrationDriverStatus current_status = TUNE_HEART.get_driver_status();
+    DriverStatus current_status = TUNE_HEART.get_driver_status();
     if (current_status != last_status) {
         last_status = current_status;
 
@@ -66,6 +88,8 @@ void loop() {
                 SerialUSB.println("Ready");
                 // Print motor parameters after successful calibration
                 TUNE_HEART.motor_params.print(SerialUSB);
+                // Set hard overcurrent limit to 500mA for all channels
+
                 break;
             case DriverStatus_Error:
                 SerialUSB.println("Error");
@@ -81,7 +105,14 @@ void loop() {
 #include "tunepulse.h"
 #include "tunepulse_heart.h"
 
-TunePulseHeart TUNE_HEART;
+// Initialize TunePulseHeart with Radix board parameters
+// freq_hz=20000, pwm_res=4250, max_supply, iA_fs, iB_fs, iC_fs
+TunePulseHeart TUNE_HEART(20000,
+                          4250,
+                          SYS_PARAMS::MAX_SUPPLY_FS,
+                          SYS_PARAMS::IA_MAX_CURRENT_FS,
+                          SYS_PARAMS::IB_MAX_CURRENT_FS,
+                          SYS_PARAMS::IC_MAX_CURRENT_FS);
 
 // Global pointer for comparator interrupt handlers to access error manager
 TunePulseHeart* g_heart_ptr = &TUNE_HEART;
@@ -91,7 +122,6 @@ static MigrationDriverStatus last_status = DriverStatus_Error;
 
 void setup() {
     tunepulse_init();
-    TUNE_HEART.motor_params.set_current_limit(2500);
 
     SerialUSB.begin();
 

@@ -17,6 +17,7 @@
 #include "position/position_integrator.h"  // Include position/encoder tracking
 #include "position/speed_estimator.h"  // Include position/encoder tracking
 #include "analog/power.h"
+#include "error.h"
 
 // Forward declaration to allow friend access
 struct Feedback;
@@ -29,6 +30,7 @@ public:
     CurrentSense current;  // 3-channel current sensing with calibration
     Position position;  // Encoder position tracking and integration
     PowerMonitor power;
+    ErrorManager error;
     
 private:
     // Make tick() methods of internal structures accessible only to Feedback

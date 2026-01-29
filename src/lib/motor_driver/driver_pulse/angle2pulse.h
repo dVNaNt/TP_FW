@@ -4,7 +4,7 @@
 // managing motor direction, microstepping, and error correction for precise stepper motor control.
 //
 // Licensed under the Apache License, Version 2.0
-// Copyright 2024 Anton Khrustalev, creapunk.com
+// Copyright 2026, creapunk.com
 
 #include "../../common.h"
 

@@ -13,3 +13,5 @@ private/
 .idea/modules.xml
 .idea/TunePulse.iml
 .idea/vcs.xml
+
+.kiro/

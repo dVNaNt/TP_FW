@@ -331,7 +331,7 @@ public:
                     // Calibration complete, transition to motor calibration phase
                     switch_status(DriverStatus_CalibratingMotor);                   // Transition to motor calibration
                     motor_calib_.set_status(MotorCalibration::Status_CheckWarmup);  // Set calibration status
-
+                    feedback_.current.set_overcurrent_hard_ma(2000);
                     timeout.set_timeout(WARMUP_TIMEOUT);
                     voltage_ab = Vec2D(0, 0);
                 }
@@ -360,7 +360,7 @@ public:
                             // Configure soft limits for calibration
                             feedback_.power.set_overpower_soft_mw(test_pwr);  // Set soft power limit to 2W
                             feedback_.supply.set_overvoltage_soft_norm(feedback_.supply.get_voltage_norm() / 2);
-                            feedback_.current.set_overcurrent_soft_norm(INT16_MAX / 4);
+                            // feedback_.current.set_overcurrent_soft_norm(INT16_MAX / 4);
                             motor_selector_.set_motor_type(MotorType_STEP);
                             motor_selector_.set_phase_pattern(PhasePattern_ABC);
                             motor_calib_.reset_voltage();
@@ -372,7 +372,8 @@ public:
                         // Check for overpower using soft limit
                         bool power_lim = feedback_.power.is_overpower_soft_norm(power_norm);
                         bool voltg_lim = feedback_.supply.is_overvoltage_soft_norm(motor_calib_.get_voltage());
-                        bool curnt_lim = feedback_.current.is_overcurrent_soft_norm(measured_current);
+                        // bool curnt_lim = feedback_.current.is_overcurrent_soft_norm(measured_current);
+                        bool curnt_lim = false;
 
                         // If current stable or timeout - transition to settle before measure1
                         if ((stability_check_.tick(measured_current) and CAL_UNDERPOWER_LIM_NORM < power_norm) or

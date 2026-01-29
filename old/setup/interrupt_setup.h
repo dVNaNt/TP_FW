@@ -3,7 +3,7 @@
 
 // Include target-specific interrupt setup
 #if defined(TARGET_CLN17V3)
-    #include "target/cln17_v3/interrupt_setup.h"
+    #include 
 #elif defined(TARGET_RADIX)
     #include "target/radix/interrupt_setup.h"
 #else

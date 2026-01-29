@@ -85,7 +85,7 @@ void IO_Init() {
     LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_11);  // Default disabled
     LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    // DRV_ERR (PB10) - Driver error input (with pull-up)
+    // DRV_FAULT (PB10) - Driver fault input with pull-up (active low)
     GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
     GPIO_InitStruct.Pin = LL_GPIO_PIN_10;

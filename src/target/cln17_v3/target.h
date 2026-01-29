@@ -13,17 +13,17 @@ constexpr PinName PWM1L = PB_13;  // TIM1_CH1N - Low-side Gate 1
 constexpr PinName PWM2L = PB_14;  // TIM1_CH2N - Low-side Gate 2
 constexpr PinName PWM3L = PB_15;  // TIM1_CH3N - Low-side Gate 3
 
-constexpr PinName DRV_EN = PB_11;   // Driver Enable
-constexpr PinName DRV_ERR = PB_10;  // Driver Error Fault
+constexpr PinName DRV_EN = PB_11;     // Driver Enable
+constexpr PinName DRV_FAULT = PB_10;  // Driver Fault Input (active low)
 
 // Current sensing (ADC)
-constexpr PinName I_A = PA_3;   // ADC1_IN4 - Current Sense Phase A
-constexpr PinName I_B = PA_1;   // ADC1_IN2 / ADC2_IN2 - Current Sense Phase B
-constexpr PinName I_C = PB_0;   // ADC1_IN15 - Current Sense Phase C
+constexpr PinName I_A = PA_3;   // ADC1_IN4 - Current Sense Phase A, COMP2 + DAC1.2
+constexpr PinName I_B = PA_1;   // ADC2_IN2 - Current Sense Phase B, COMP1 + DAC1.1
+constexpr PinName I_C = PB_0;   // ADC1_IN15 - Current Sense Phase C, COMP4 + DAC3.2
 constexpr PinName I_CAL = PB_12;  // Current Calibration/Offset
 
 // Voltage sensing
-constexpr PinName VSENS = PA_0;  // ADC2_IN1 - Bus Voltage Sense
+constexpr PinName VSENS = PA_0;  // ADC2_IN1 - Bus Voltage Sense, COMP3 + DAC3.1
 constexpr PinName PWR_V = PA_2;  // Power Voltage Sense
 
 
@@ -60,7 +60,7 @@ constexpr PinName IO_SWCLK = PA_14;  // SWD Clock
 
 namespace SYS_PARAMS {
     constexpr int32_t MAX_SUPPLY_FS = 102300;
-    constexpr int32_t IA_MAX_CURRENT_FS = 11000;
-    constexpr int32_t IB_MAX_CURRENT_FS = 11000;
-    constexpr int32_t IC_MAX_CURRENT_FS = 16500;
+    constexpr int32_t IA_MAX_CURRENT_FS = -11000;
+    constexpr int32_t IB_MAX_CURRENT_FS = -11000;
+    constexpr int32_t IC_MAX_CURRENT_FS = -16500;
 }

@@ -4,8 +4,6 @@
 // Integrated with TunePulseHeart for complete motor control system.
 
 #include "common.h"
-#include "error.h"              // Include error management system
-#include "feedback/feedback.h"  // Include unified feedback module
 #include "feedback/feedback.h"
 #include "math_integer/filters/filter1st.h"
 #include "motor_driver/calibration/angle_calibrator.h"

@@ -2,9 +2,7 @@
 
 // Error management system for motor control
 // Tracks Fatal, Alert, and Warning level errors with automatic recovery
-
-#include <stdint.h>
-#include "common.h"
+#include "../common.h"  // Include common migration definitions and types
 
 // Error severity levels
 enum ErrorLevel {
