@@ -6,16 +6,21 @@
 #include "stm32g4xx_hal.h"
 #include "stm32g4xx_ll_gpio.h"
 
-// Глобальные параметры таймера ШИМ
-constexpr uint16_t PWM_TIMER_PERIOD = 4722;      // Период таймера (ARR)
-constexpr uint16_t PWM_TIMER_FREQ_HZ = 18000;    // Частота ШИМ в Гц
+// PWM timer parameters (use guards to avoid redefinition from lib.h)
+#ifndef PWM_TIMER_PERIOD
+constexpr uint16_t PWM_TIMER_PERIOD = 4250;      // Timer period (ARR)
+#endif
 
-// Частота системной шины (170 МГц для STM32G431)
+#ifndef PWM_TIMER_FREQ_HZ
+constexpr uint16_t PWM_TIMER_FREQ_HZ = 20000;    // PWM frequency in Hz
+#endif
+
+// System bus frequency (170 MHz for STM32G431)
 constexpr int32_t TIMER_CLOCK_HZ = 170UL;
 
 
 // ADC trigger delay in timer ticks (positive value, default 220 ticks)
-volatile int16_t ADC_DELAY_TICKS = 220;           // ADC delay in timer ticks
+volatile int16_t ADC_DELAY_TICKS = 260;           // ADC delay in timer ticks
 volatile int16_t ADC_TRIGGER_POINT = 0;           // ADC trigger point (calculated from max PWM + delay)
 
 TIM_HandleTypeDef htim2;

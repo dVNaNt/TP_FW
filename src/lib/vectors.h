@@ -29,8 +29,8 @@ struct Vec2D {
         int32_t sc = (int32_t)scale_factor;
         
         return Vec2D(
-            (int16_t)((s * sc) >> 15),
-            (int16_t)((c * sc) >> 15)
+            (int16_t)((c * sc) >> 15),
+            (int16_t)((s * sc) >> 15)
         );
     }
 
@@ -121,10 +121,10 @@ struct Pol2D {
         angle2sincos(angle, &s, &c);
         
         // Scale the sin/cos by amplitude
-        int32_t sin_scaled = ((int32_t)s * (int32_t)amplitude) >> 15;
         int32_t cos_scaled = ((int32_t)c * (int32_t)amplitude) >> 15;
+        int32_t sin_scaled = ((int32_t)s * (int32_t)amplitude) >> 15;
         
-        return Vec2D((int16_t)sin_scaled, (int16_t)cos_scaled);
+        return Vec2D((int16_t)cos_scaled, (int16_t)sin_scaled);
     }
 };
 

@@ -9,6 +9,7 @@
 struct FrequencyGenerator {
 private:
     Pol2D vector_pol_;           // Current polar vector (angle, amplitude)
+    Vec2D out_;
     int16_t angle_increment_;    // Angle increment per tick (calculated from target frequency)
     uint16_t frequency_system_;  // System frequency in Hz (sampling rate, max 65000 Hz)
     uint16_t frequency_target_;  // Target output frequency in Hz (max 2000 Hz)
@@ -20,7 +21,8 @@ public:
         : vector_pol_(0, INT16_MAX)
         , angle_increment_(0)
         , frequency_system_(freq_system)
-        , frequency_target_(0)
+        , frequency_target_(0),
+        out_(0, 0)
     {
         // No calculation needed at initialization
     }
@@ -87,9 +89,14 @@ public:
         vector_pol_ = vector_pol_.rotate(angle_increment_);
         
         // Convert polar coordinates to Cartesian (Vec2D) and return
-        return vector_pol_.convert();
+        out_ = vector_pol_.convert();
+
+        return out_;
     }
     
+    Vec2D get_output() {
+        return out_;
+    }
 private:
     /// Calculate angle increment per tick based on target and system frequencies
     /// Simplified formula for freq_target < 2000 Hz and freq_system < 65000 Hz:

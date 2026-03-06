@@ -81,8 +81,7 @@ static inline bool calibration_table_fill_first(CalibrationTable* self, size_t i
         }
         return true; // Indicate successful storage
     }
-    // Log a warning if the index is out of bounds or not sequential
-    TUNEPULSE_LOG_WARN("CAL TABLE: fill_first: Index got error %zu", idx);
+
     return false; // Indicate failure
 }
 
@@ -119,8 +118,6 @@ static inline bool calibration_table_fill_second(CalibrationTable* self, size_t 
             return true;
         }
     }
-    // Log a warning if the index is out of bounds
-    TUNEPULSE_LOG_WARN("CAL TABLE: fill_second: Index got error %zu", idx);
     return false; // Indicate failure
 }
 
@@ -176,18 +173,10 @@ static inline bool calibration_table_check(CalibrationTable* self) {
 
         // Check if the deviation exceeds the average step size
         if (deviation >= avg_step) {
-            TUNEPULSE_LOG_ERROR("Step deviation too high [Avg step: %u; Max deviation: %u]", avg_step, self->max_deviation);
             return false; // Indicate validation failure
         }
     }
 
-    // Log successful calibration validation
-    TUNEPULSE_LOG_INFO(
-        "CAL TABLE: Success! Offset val: %u; Offset idx: %zu, Max deviation: %u;",
-        self->offst_val,
-        self->offst_idx,
-        self->max_deviation
-    );
     return true; // Indicate validation success
 }
 

@@ -1,7 +1,7 @@
 #pragma once  // Ensure this header is included only once during compilation
 
 #include "../../common.h"  // Include common migration definitions and types
-#include "../../math_integer/filters/filter1st.h"  // Include first-order filter for position smoothing
+#include "../../math_integer/filters/ema.h"  // Include first-order filter for position smoothing
 
 /// Position integrator manages and calculates the absolute position from incremental encoder readings.
 /// Tracks both angle (0..65535) and full rotations (signed) as a combined 32-bit value.
@@ -18,7 +18,7 @@ private:
     // ---------------------------------------------------------------------------
     
     int32_t position_;  // Combined value: (rotations << 16) | angle
-    Filter1st filter_;  // Low-pass filter for smoothing angle measurements
+    FilterEMA filter_;  // Low-pass filter for smoothing angle measurements
 
     // Main processing function: Update position with new encoder reading
     // input_pos: Current encoder angle (0..65535)

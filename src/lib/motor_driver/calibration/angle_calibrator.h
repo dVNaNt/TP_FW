@@ -200,7 +200,7 @@ static inline uint16_t angle_calibrator_tick(AngleCalibrator* self, int32_t enco
                     self->ang_el_step = (uint16_t)(UINT16_MAX / ANGLE_CAL_CAL_FIRST_STEP_USTEPS);
                     self->cal_idx = ANGLE_CAL_CAL_FIRST_STEP_USTEPS;
                     self->calibration_stage = CalStage_Pass0;
-                    TUNEPULSE_LOG_INFO("CALIBRATION: Test single pole motion");
+                    TP_LOG("CALIBRATION: Test single pole motion");
                 }
                 break;
 
@@ -220,19 +220,18 @@ static inline uint16_t angle_calibrator_tick(AngleCalibrator* self, int32_t enco
                     int32_t deviation = self->dif_max - self->dif_min;
 
                     if (avg_step < deviation) {
-                        TUNEPULSE_LOG_ERROR("CALIBRATION: Too much deviation while moving");
                         self->calibration_stage = CalStage_Error;
                         return self->angle_el;
                     }
 
-                    TUNEPULSE_LOG_INFO("CALIBRATION: Detected motion direction: %ld", (long)self->direction);
+                    TP_LOG_VAL("CALIBRATION: Detected motion direction: ", (long)self->direction);
                     self->calibration_stage = CalStage_Pass1;
                     self->ang_el_step = (uint16_t)(UINT16_MAX / ANGLE_CAL_CAL_POINTS_PER_360EL);
                     self->speed = (int32_t)(-self->speed * self->direction);
                     self->cal_idx = 0;
                     self->init_pos = stable_pos;
                     calibration_table_reset(&self->cal_table, ANGLE_CAL_CAL_POINTS_PER_360EL);
-                    TUNEPULSE_LOG_INFO("CALIBRATION: Full rotation in positive direction with sampling");
+                    TP_LOG("CALIBRATION: Full rotation in positive direction with sampling");
                 }
                 break;
             }
@@ -241,7 +240,7 @@ static inline uint16_t angle_calibrator_tick(AngleCalibrator* self, int32_t enco
                 int32_t avg_step = (stable_pos - self->init_pos) / (int32_t)(self->cal_idx + 1);
                 if (stable_pos - self->init_pos > (int32_t)UINT16_MAX + (avg_step / 3)) {
                     self->calibration_stage = CalStage_Pass2;
-                    TUNEPULSE_LOG_INFO("CALIBRATION: Full rotation in negative direction with sampling");
+                    TP_LOG("CALIBRATION: Full rotation in negative direction with sampling");
                     self->speed = -self->speed;
                     return self->angle_el;
                 }
@@ -258,7 +257,7 @@ static inline uint16_t angle_calibrator_tick(AngleCalibrator* self, int32_t enco
 
                 if (self->cal_idx == 0) {
                     self->calibration_stage = CalStage_Check;
-                    TUNEPULSE_LOG_INFO("CALIBRATION: Finished. Next => NORMAL RUN");
+                    TP_LOG("CALIBRATION: Finished. Next => NORMAL RUN");
                     self->angle_el = 0;
                 }
                 break;

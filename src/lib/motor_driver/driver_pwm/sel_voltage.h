@@ -144,7 +144,7 @@ private:
             voltg_c = -(alpha32 >> 1) - beta_sqrt3_div2;  // Phase C = -V_alpha/2 - V_beta*sqrt(3)/2
         }
         // Handle Stepper motor type (direct 2-phase mapping)
-        else if (motor_type == 4U) {
+        else if (motor_type == MotorType_STEP) {
             voltg_a = (int32_t)voltg_alpha;  // Phase A = alpha input (coil A)
             voltg_b = (int32_t)voltg_beta;   // Phase B = beta input (coil B)
             voltg_c = 0;                     // Phase C: unused for stepper
@@ -180,12 +180,11 @@ private:
             voltg_offset = (max_output - voltg_max - voltg_min) >> 1;  // Center the voltage vector
         }
 
-        // Apply offset if non-zero voltage is requested (not brake mode)
-        if (voltg_full_scale != 0) {
-            voltg_a += voltg_offset;  // Apply offset to phase A
-            voltg_b += voltg_offset;  // Apply offset to phase B
-            voltg_c += voltg_offset;  // Apply offset to phase C
-        }
+
+        voltg_a += voltg_offset;  // Apply offset to phase A
+        voltg_b += voltg_offset;  // Apply offset to phase B
+        voltg_c += voltg_offset;  // Apply offset to phase C
+  
 
         // Convert 32-bit results back to 16-bit outputs
         *out_a = static_cast<int16_t>(voltg_a);  // Store phase A result

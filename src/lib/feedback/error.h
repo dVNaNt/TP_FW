@@ -20,7 +20,7 @@ enum FatalError {
     Fatal_Phase1_OC = (1 << 2),         // Phase 1 overcurrent
     Fatal_Phase2_OC = (1 << 3),         // Phase 2 overcurrent
     Fatal_Phase3_OC = (1 << 4),         // Phase 3 overcurrent
-    Fatal_OC = (1 << 5),                // General overcurrent
+    Fatal_OC = (0b1111 << 2),                // General overcurrent
     Fatal_CurrentLeakage = (1 << 6),    // Current leakage detected
     Fatal_Overheat = (1 << 7),          // Overtemperature
     Fatal_NoLoad = (1 << 8),            // No load detected
@@ -51,101 +51,126 @@ private:
     uint32_t fatal_flags_;      // Fatal error bitmask
     uint32_t alert_flags_;      // Alert error bitmask
     uint32_t warning_flags_;    // Warning error bitmask
-    
-    uint32_t fatal_timestamp_;  // Timestamp when fatal error occurred (ms)
-    uint32_t alert_timestamp_;  // Timestamp when alert error occurred (ms)
-    
-    bool fatal_active_;         // Fatal error active flag
-    bool alert_active_;         // Alert error active flag
-    
-    static constexpr uint32_t ERROR_CLEAR_TIMEOUT_MS = 1000;  // Auto-clear after 1 second
 
 public:
+
+    uint8_t oc_error_soft = 0;  // Soft overcurrent error flags (bitmask for 3 channels)
+    uint8_t oc_error_hard = 0;  // Hard overcurrent error flags (bitmask for 3 channels)
+    
     // Constructor - initialize all error flags to zero
     ErrorManager() 
         : fatal_flags_(0)
         , alert_flags_(0)
         , warning_flags_(0)
-        , fatal_timestamp_(0)
-        , alert_timestamp_(0)
-        , fatal_active_(false)
-        , alert_active_(false)
     {}
+
+    
+    inline void set_overcurrent_hard_fault(Channel ch) { oc_error_hard |= 1 << ch; }
+
+    inline void reset_overcurrent_hard_fault(Channel ch) { oc_error_hard &= ~(1UL << ch); }
+
+    // Check if any channel exceeds hard overcurrent limit
+    inline bool is_overcurrent_hard() const { return oc_error_hard; }
+
     
     // ========================================================================
     // Fatal error setters (inline)
     // ========================================================================
     
     inline void set_fatal_dc_ovlo() {
-        fatal_flags_ |= Fatal_DC_OVLO;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_DC_OVLO;  // Set overvoltage flag
+    }
+
+    inline void reset_fatal_dc_ovlo() {
+        fatal_flags_ &= ~Fatal_DC_OVLO;  // Clear overvoltage flag
+    }
+
+    inline void set_fatal_dc_uvlo() {
+        fatal_flags_ |= Fatal_DC_UVLO;  // Set undervoltage flag
     }
     
-    inline void set_fatal_dc_uvlo() {
-        fatal_flags_ |= Fatal_DC_UVLO;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+    inline void reset_fatal_dc_uvlo() {
+        fatal_flags_ &= ~Fatal_DC_UVLO;  // Clear undervoltage flag
     }
     
     inline void set_fatal_phase1_oc() {
-        fatal_flags_ |= Fatal_Phase1_OC;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_Phase1_OC;  // Set phase 1 overcurrent flag
+    }
+    
+    inline void reset_fatal_phase1_oc() {
+        fatal_flags_ &= ~Fatal_Phase1_OC;  // Clear phase 1 overcurrent flag
     }
     
     inline void set_fatal_phase2_oc() {
-        fatal_flags_ |= Fatal_Phase2_OC;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_Phase2_OC;  // Set phase 2 overcurrent flag
+    }
+    
+    inline void reset_fatal_phase2_oc() {
+        fatal_flags_ &= ~Fatal_Phase2_OC;  // Clear phase 2 overcurrent flag
     }
     
     inline void set_fatal_phase3_oc() {
-        fatal_flags_ |= Fatal_Phase3_OC;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_Phase3_OC;  // Set phase 3 overcurrent flag
+    }
+    
+    inline void reset_fatal_phase3_oc() {
+        fatal_flags_ &= ~Fatal_Phase3_OC;  // Clear phase 3 overcurrent flag
     }
     
     inline void set_fatal_oc() {
-        fatal_flags_ |= Fatal_OC;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_OC;  // Set general overcurrent flag
+    }
+    
+    inline void reset_fatal_oc() {
+        fatal_flags_ &= ~Fatal_OC;  // Clear general overcurrent flag
     }
     
     inline void set_fatal_current_leakage() {
-        fatal_flags_ |= Fatal_CurrentLeakage;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_CurrentLeakage;  // Set current leakage flag
+    }
+    
+    inline void reset_fatal_current_leakage() {
+        fatal_flags_ &= ~Fatal_CurrentLeakage;  // Clear current leakage flag
     }
     
     inline void set_fatal_overheat() {
-        fatal_flags_ |= Fatal_Overheat;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_Overheat;  // Set overtemperature flag
+    }
+    
+    inline void reset_fatal_overheat() {
+        fatal_flags_ &= ~Fatal_Overheat;  // Clear overtemperature flag
     }
     
     inline void set_fatal_no_load() {
-        fatal_flags_ |= Fatal_NoLoad;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_NoLoad;  // Set no load flag
+    }
+    
+    inline void reset_fatal_no_load() {
+        fatal_flags_ &= ~Fatal_NoLoad;  // Clear no load flag
     }
     
     inline void set_fatal_no_current_feedback() {
-        fatal_flags_ |= Fatal_NoCurrentFeedback;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_NoCurrentFeedback;  // Set current sensor failure flag
+    }
+    
+    inline void reset_fatal_no_current_feedback() {
+        fatal_flags_ &= ~Fatal_NoCurrentFeedback;  // Clear current sensor failure flag
     }
     
     inline void set_fatal_emergency_stop() {
-        fatal_flags_ |= Fatal_EmergencyStop;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_EmergencyStop;  // Set emergency stop flag
+    }
+    
+    inline void reset_fatal_emergency_stop() {
+        fatal_flags_ &= ~Fatal_EmergencyStop;  // Clear emergency stop flag
     }
     
     inline void set_fatal_motor_error() {
-        fatal_flags_ |= Fatal_MotorError;
-        fatal_timestamp_ = millis();
-        fatal_active_ = true;
+        fatal_flags_ |= Fatal_MotorError;  // Set motor configuration error flag
+    }
+    
+    inline void reset_fatal_motor_error() {
+        fatal_flags_ &= ~Fatal_MotorError;  // Clear motor configuration error flag
     }
     
     // ========================================================================
@@ -153,33 +178,43 @@ public:
     // ========================================================================
     
     inline void set_alert_dc_ovlo_soft() {
-        alert_flags_ |= Alert_DC_OVLO_Soft;
-        alert_timestamp_ = millis();
-        alert_active_ = true;
+        alert_flags_ |= Alert_DC_OVLO_Soft;  // Set soft overvoltage alert
+    }
+    
+    inline void reset_alert_dc_ovlo_soft() {
+        alert_flags_ &= ~Alert_DC_OVLO_Soft;  // Clear soft overvoltage alert
     }
     
     inline void set_alert_dc_uvlo_soft() {
-        alert_flags_ |= Alert_DC_UVLO_Soft;
-        alert_timestamp_ = millis();
-        alert_active_ = true;
+        alert_flags_ |= Alert_DC_UVLO_Soft;  // Set soft undervoltage alert
+    }
+    
+    inline void reset_alert_dc_uvlo_soft() {
+        alert_flags_ &= ~Alert_DC_UVLO_Soft;  // Clear soft undervoltage alert
     }
     
     inline void set_alert_oc_soft() {
-        alert_flags_ |= Alert_OC_Soft;
-        alert_timestamp_ = millis();
-        alert_active_ = true;
+        alert_flags_ |= Alert_OC_Soft;  // Set soft overcurrent alert
+    }
+    
+    inline void reset_alert_oc_soft() {
+        alert_flags_ &= ~Alert_OC_Soft;  // Clear soft overcurrent alert
     }
     
     inline void set_alert_overheat_soft() {
-        alert_flags_ |= Alert_Overheat_Soft;
-        alert_timestamp_ = millis();
-        alert_active_ = true;
+        alert_flags_ |= Alert_Overheat_Soft;  // Set soft overtemperature alert
+    }
+    
+    inline void reset_alert_overheat_soft() {
+        alert_flags_ &= ~Alert_Overheat_Soft;  // Clear soft overtemperature alert
     }
     
     inline void set_alert_stall() {
-        alert_flags_ |= Alert_Stall;
-        alert_timestamp_ = millis();
-        alert_active_ = true;
+        alert_flags_ |= Alert_Stall;  // Set motor stall alert
+    }
+    
+    inline void reset_alert_stall() {
+        alert_flags_ &= ~Alert_Stall;  // Clear motor stall alert
     }
     
     // ========================================================================
@@ -213,20 +248,20 @@ public:
     // General error status getters (inline)
     // ========================================================================
     
-    inline bool has_fatal() const { return fatal_active_; }
-    inline bool has_alert() const { return alert_active_; }
-    inline bool has_warning() const { return warning_flags_ != 0; }
-    inline bool has_any_error() const { return fatal_active_ || alert_active_ || (warning_flags_ != 0); }
+    inline bool has_fatal() const { return fatal_flags_ != 0; }  // Check if any fatal flag is set
+    inline bool has_alert() const { return alert_flags_ != 0; }  // Check if any alert flag is set
+    inline bool has_warning() const { return warning_flags_ != 0; }  // Check if any warning flag is set
+    inline bool has_any_error() const { return (fatal_flags_ != 0) || (alert_flags_ != 0) || (warning_flags_ != 0); }  // Check if any error exists
     
-    inline uint32_t get_fatal_flags() const { return fatal_flags_; }
-    inline uint32_t get_alert_flags() const { return alert_flags_; }
-    inline uint32_t get_warning_flags() const { return warning_flags_; }
+    inline uint32_t get_fatal_flags() const { return fatal_flags_; }  // Get fatal error bitmask
+    inline uint32_t get_alert_flags() const { return alert_flags_; }  // Get alert error bitmask
+    inline uint32_t get_warning_flags() const { return warning_flags_; }  // Get warning error bitmask
     
     inline ErrorLevel get_error_level() const {
-        if (fatal_active_) return ErrorLevel_Fatal;
-        if (alert_active_) return ErrorLevel_Alert;
-        if (warning_flags_ != 0) return ErrorLevel_Warning;
-        return ErrorLevel_None;
+        if (fatal_flags_ != 0) return ErrorLevel_Fatal;  // Fatal errors have highest priority
+        if (alert_flags_ != 0) return ErrorLevel_Alert;  // Alert errors have medium priority
+        if (warning_flags_ != 0) return ErrorLevel_Warning;  // Warning errors have lowest priority
+        return ErrorLevel_None;  // No errors
     }
     
     // ========================================================================
@@ -234,40 +269,20 @@ public:
     // ========================================================================
     
     inline void clear_fatal() {
-        fatal_flags_ = 0;
-        fatal_active_ = false;
+        fatal_flags_ = 0;  // Clear all fatal error flags
     }
-    
+
     inline void clear_alert() {
-        alert_flags_ = 0;
-        alert_active_ = false;
+        alert_flags_ = 0;  // Clear all alert error flags
     }
     
     inline void clear_warning() {
-        warning_flags_ = 0;
+        warning_flags_ = 0;  // Clear all warning error flags
     }
     
     inline void clear_all() {
-        clear_fatal();
-        clear_alert();
-        clear_warning();
-    }
-    
-    // ========================================================================
-    // Automatic error timeout handling
-    // ========================================================================
-    
-    inline void tick() {
-        uint32_t current_time = millis();
-        
-        // Auto-clear fatal errors after timeout
-        if (fatal_active_ && (current_time - fatal_timestamp_ >= ERROR_CLEAR_TIMEOUT_MS)) {
-            clear_fatal();
-        }
-        
-        // Auto-clear alert errors after timeout
-        if (alert_active_ && (current_time - alert_timestamp_ >= ERROR_CLEAR_TIMEOUT_MS)) {
-            clear_alert();
-        }
+        clear_fatal();  // Clear all fatal errors
+        clear_alert();  // Clear all alert errors
+        clear_warning();  // Clear all warning errors
     }
 };

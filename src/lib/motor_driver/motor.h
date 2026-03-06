@@ -3,19 +3,17 @@
 #include "../common.h"
 #include "types.h"
 
-// Motor calibration status namespace
-// Tracks the current stage of motor calibration process
-namespace MotorStatus {
-enum Type : uint8_t {
-    CurrentCalibration = 0,  // Calibrating current sensors
-    ResistanceCalibration,   // Measuring phase resistances
-    InductanceCalibration,   // Measuring phase inductances
-    MotionCalibration,       // Calibrating motion parameters
-    PositionCalibration,     // Calibrating position sensors
-    Ready,                   // Calibration complete, ready for operation
-    Error                    // Calibration error occurred
+// Motor calibration status enum - accessible as SetupStatus::MotorCalibrationStatus
+enum class MotorStatus : uint8_t {
+    Success = 0,            // Not calibrating
+    SoftWarmup = 1,         // Checking motor warmup and connection
+    Settle = 2,             // Settling phase before measurement (900 ticks)
+    SlowRotation = 3,       // Slow rotation for motor type detection
+    ResistanceMeasure = 4,  // Measuring resistance
+    InductanceMeasure = 5,  // Measuring inductance using HFI
+    CalibError = 6,         // Calibration error
+    NotCalibrated = 0xFF
 };
-}
 
 // Motor and driver system parameters structure
 // Contains electrical and mechanical constants for motor control
@@ -24,8 +22,7 @@ private:
     // Motor type and configuration
     MotorType motor_type_;            // Type of motor (DC, STEP, BLDC, Invalid)
     PhasePattern phase_pattern_;      // Phase connection pattern (ABC, BCA, CAB)
-    DriverStatus status_;             // Current driver status
-    MotorStatus::Type calib_status_;  // Motor calibration status
+    MotorStatus status_;             // Current driver status
 
     // Motor mechanical parameters
     int32_t pole_count_;  // Number of pole pairs
@@ -38,27 +35,33 @@ private:
     // Phase resistance [mOhm]
     int32_t total_resistance_mohm_;     // Total motor resistance in milliohms (calculated from phases)
 
+    
+
     // Phase inductance [uH]
     int32_t phase_inductance_uh_[3];  // Phase inductance in microhenries
+    
+    // Default inductance value [uH] - used when inductance is not measured
+    int32_t default_inductance_uh_;  // Default inductance in microhenries (3000 uH = 3 mH)
 
     // Operating limits
     int32_t current_limit_ma_;  // Current limit for calibration in milliamps
     int32_t max_voltage_mv_;    // Maximum voltage in millivolts
 
 public:
+int32_t phase_resistance_mohm[3] = {0,0,0};
     // Constructor with default values
     Motor()
         : motor_type_(MotorType_Invalid),
           phase_pattern_(PhasePattern_ABC),
-          status_(DriverStatus_CalibrateCurrent),
-          calib_status_(MotorStatus::CurrentCalibration),
+          status_(MotorStatus::NotCalibrated),
           pole_count_(7),
           direction_(1),
           electric_angle_(0),
           mechanic_angle_(0),
           current_limit_ma_(600),
           max_voltage_mv_(24000),
-          total_resistance_mohm_(0) {
+          total_resistance_mohm_(0),
+          default_inductance_uh_(3000) {  // Default 3 mH inductance
         // Initialize resistance and inductance arrays to zero
         for (uint8_t i = 0; i < 3; i++) {
             phase_inductance_uh_[i] = 0;
@@ -75,10 +78,7 @@ public:
     inline void set_phase_pattern(PhasePattern pattern) { phase_pattern_ = pattern; }
 
     // Set driver status
-    inline void set_status(DriverStatus status) { status_ = status; }
-
-    // Set motor calibration status
-    inline void set_calib_status(MotorStatus::Type status) { calib_status_ = status; }
+    inline void set_status(MotorStatus status) { status_ = status; }
 
     // Set pole count
     inline void set_pole_count(int32_t poles) { pole_count_ = poles; }
@@ -115,10 +115,7 @@ public:
     inline PhasePattern get_phase_pattern() const { return phase_pattern_; }
 
     // Get driver status
-    inline DriverStatus get_status() const { return status_; }
-
-    // Get motor calibration status
-    inline MotorStatus::Type get_calib_status() const { return calib_status_; }
+    inline MotorStatus get_status() const { return status_; }
 
     // Get pole count
     inline int32_t get_pole_count() const { return pole_count_; }
@@ -135,6 +132,19 @@ public:
 
     // Get phase inductance for specific phase
     inline int32_t get_phase_inductance(uint8_t phase_idx) const { return (phase_idx < 3) ? phase_inductance_uh_[phase_idx] : 0; }
+    
+    // Get effective inductance (measured or default)
+    // Returns measured inductance if available, otherwise returns default value
+    inline int32_t get_effective_inductance() const {
+        // Check if any phase has measured inductance
+        if (phase_inductance_uh_[0] > 0) {
+            return phase_inductance_uh_[0];  // Return measured value
+        }
+        return default_inductance_uh_;  // Return default 3 mH
+    }
+    
+    // Set default inductance value
+    inline void set_default_inductance(int32_t inductance_uh) { default_inductance_uh_ = inductance_uh; }
 
     // Get current limit for calibration
     inline int32_t get_current_limit() const { return current_limit_ma_; }
@@ -304,43 +314,32 @@ public:
         // Driver status
         serial.print("Status: ");
         switch (status_) {
-            case DriverStatus_Ready:
-                serial.println("Ready");
+            case MotorStatus::Success:
+                serial.println("Success");
                 break;
-            case DriverStatus_Error:
-                serial.println("Error");
+            case MotorStatus::SoftWarmup:
+                serial.println("SoftWarmup");
                 break;
-            case DriverStatus_Calibrating:
-                serial.println("Calibrating");
+            case MotorStatus::Settle:
+                serial.println("Settle");
+                break;
+            case MotorStatus::SlowRotation:
+                serial.println("SlowRotation");
+                break;
+            case MotorStatus::ResistanceMeasure:
+                serial.println("ResistanceMeasure");
+                break;
+            case MotorStatus::InductanceMeasure:
+                serial.println("InductanceMeasure");
+                break;
+            case MotorStatus::CalibError:
+                serial.println("CalibError");
+                break;
+            case MotorStatus::NotCalibrated:
+                serial.println("NotCalibrated");
                 break;
             default:
-                serial.println("...");
-                break;
-        }
-
-        // Calibration status
-        serial.print("Calib: ");
-        switch (calib_status_) {
-            case MotorStatus::CurrentCalibration:
-                serial.println("Current");
-                break;
-            case MotorStatus::ResistanceCalibration:
-                serial.println("Resistance");
-                break;
-            case MotorStatus::InductanceCalibration:
-                serial.println("Inductance");
-                break;
-            case MotorStatus::MotionCalibration:
-                serial.println("Motion");
-                break;
-            case MotorStatus::PositionCalibration:
-                serial.println("Position");
-                break;
-            case MotorStatus::Ready:
-                serial.println("Ready");
-                break;
-            case MotorStatus::Error:
-                serial.println("Error");
+                serial.println("Unknown");
                 break;
         }
 

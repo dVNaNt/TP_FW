@@ -7,16 +7,25 @@
 #include "stm32g4xx_ll_gpio.h"
 #include "target.h"
 
-// PWM timer parameters
-constexpr uint16_t PWM_TIMER_PERIOD = 4722;      // Timer period (ARR)
-constexpr uint16_t PWM_TIMER_FREQ_HZ = 18000;    // PWM frequency in Hz
+// PWM timer parameters (use guards to avoid redefinition from lib.h)
+#ifndef PWM_TIMER_PERIOD
+constexpr uint16_t PWM_TIMER_PERIOD = 4250;      // Timer period (ARR)
+#endif
+
+#ifndef PWM_TIMER_FREQ_HZ
+constexpr uint16_t PWM_TIMER_FREQ_HZ = 20000;    // PWM frequency in Hz
+#endif
+
 constexpr int32_t TIMER_CLOCK_HZ = 170UL;        // System clock 170 MHz
 
 // Dead time configuration (in timer ticks)
-constexpr uint8_t PWM_DEADTIME_TICKS = 34;  // ~200ns at 170MHz
+constexpr uint8_t PWM_DEADTIME_TICKS = SYS_PARAMS::DEADTIME_TICKS_CONST;
+
+// Runtime dead time control (volatile for dynamic adjustment)
+volatile uint8_t PWM_DEADTIME_RUNTIME = PWM_DEADTIME_TICKS;  // Current dead time value in timer ticks
 
 // ADC trigger delay in timer ticks
-volatile int16_t ADC_DELAY_TICKS = 220;
+volatile int16_t ADC_DELAY_TICKS = SYS_PARAMS::ADC_DELAY_TICKS_CONST;
 volatile int16_t ADC_TRIGGER_POINT = 0;
 
 TIM_HandleTypeDef htim1;
@@ -139,15 +148,50 @@ void MX_TIM1_Start() {
     __HAL_TIM_MOE_ENABLE(&htim1);
 }
 
+// Forward declarations for protection state checking from TunePulseHeart
+extern TunePulseHeart* volatile g_heart_ptr;
+
 /**
- * @brief Set PWM duty cycle values for 3 phases
+ * @brief Set PWM duty cycle values for 3 phases with overcurrent/overvoltage protection
  * @param pwmValues Array of 3 duty cycle values (-PWM_TIMER_PERIOD to +PWM_TIMER_PERIOD)
  *                  Positive: normal PWM mode (high-side switching)
  *                  Negative: braking mode (low-side switching, high-side OFF)
  *                  INT16_MIN = disable phase (all outputs LOW)
+ * 
+ * PROTECTION LOGIC:
+ * - If overcurrent (OC) error: Force all phases to INT16_MIN (Hi-Z, all FETs OFF)
+ * - If overvoltage (OV) error: Force all phases to 0 (regenerative braking, low-side ON)
+ * - If both OV and OC: Overvoltage has priority (regenerative braking)
+ * - Protection state overrides software PWM values
  */
 void TIM1_Set_PWM_Values(const int16_t pwmValues[3]) {
-    // Process each phase
+    // Check for protection errors (OV has higher priority than OC)
+    bool ov_error = (g_heart_ptr != nullptr) && g_heart_ptr->feedback.error.get_fatal_dc_ovlo();  // Check overvoltage
+    bool oc_error = (g_heart_ptr != nullptr) && g_heart_ptr->feedback.error.get_fatal_oc();  // Check overcurrent
+    
+    // Determine protection PWM values based on error state
+    int16_t protected_pwm[3];  // Array to hold protected PWM values
+    
+    if (ov_error) {
+        // Overvoltage: Enable regenerative braking (low-side ON, high-side OFF)
+        // Set all phases to 0 (negative duty = low-side active)
+        protected_pwm[0] = 0;  // Phase A: low-side ON
+        protected_pwm[1] = 0;  // Phase B: low-side ON
+        protected_pwm[2] = 0;  // Phase C: low-side ON
+    } else if (oc_error) {
+        // Overcurrent: Disable all outputs (Hi-Z state)
+        // Set all phases to INT16_MIN (all FETs OFF)
+        protected_pwm[0] = INT16_MIN;  // Phase A: all FETs OFF
+        protected_pwm[1] = INT16_MIN;  // Phase B: all FETs OFF
+        protected_pwm[2] = INT16_MIN;  // Phase C: all FETs OFF
+    } else {
+        // No error: Use software-provided PWM values
+        protected_pwm[0] = pwmValues[0];  // Phase A: normal operation
+        protected_pwm[1] = pwmValues[1];  // Phase B: normal operation
+        protected_pwm[2] = pwmValues[2];  // Phase C: normal operation
+    }
+    
+    // Process each phase with protected PWM values
     for (uint8_t phase = 0; phase < 3; phase++) {
         uint32_t channel;  // TIM channel identifier
         
@@ -156,7 +200,7 @@ void TIM1_Set_PWM_Values(const int16_t pwmValues[3]) {
         else if (phase == 1) channel = TIM_CHANNEL_2;  // Phase B
         else channel = TIM_CHANNEL_3;                  // Phase C
         
-        int16_t duty = pwmValues[phase];  // Get duty cycle value
+        int16_t duty = protected_pwm[phase];  // Get protected duty cycle value (may be overridden by error state)
         
         if (duty == INT16_MIN) {
             // Timer inactive mode: all FETs OFF (both high-side and low-side disabled)
@@ -206,6 +250,13 @@ void TIM1_Set_PWM_Values(const int16_t pwmValues[3]) {
 
     // Set ADC trigger on channel 4
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, (uint16_t)adc_trigger);
+    
+    // Update dead time configuration dynamically
+    // Access BDTR register to update dead time (DTG field: bits 0-7)
+    uint32_t bdtr = TIM1->BDTR;  // Read current BDTR register value
+    bdtr &= ~TIM_BDTR_DTG;       // Clear DTG field (dead time generator bits)
+    bdtr |= (PWM_DEADTIME_RUNTIME & 0xFF);  // Set new dead time value (8-bit field)
+    TIM1->BDTR = bdtr;           // Write back to BDTR register
 }
 
 /**

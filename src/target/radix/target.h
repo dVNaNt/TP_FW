@@ -76,7 +76,7 @@ constexpr PinName LED_RED = PC_15;
 
 namespace SYS_PARAMS {
     constexpr int32_t MAX_SUPPLY_FS = 69000;
-    constexpr int32_t IA_MAX_CURRENT_FS = 18700;
-    constexpr int32_t IB_MAX_CURRENT_FS = 18700;
-    constexpr int32_t IC_MAX_CURRENT_FS = 18700;
+    constexpr int32_t IA_MAX_CURRENT_FS = -18700;
+    constexpr int32_t IB_MAX_CURRENT_FS = -18700;
+    constexpr int32_t IC_MAX_CURRENT_FS = -18700;
 }

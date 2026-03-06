@@ -31,8 +31,8 @@ constexpr PinName CAN_RX = PB_8;   // CAN Receive (also BOOT0)
 constexpr PinName CAN_TX = PB_9;   // CAN Transmit
 constexpr PinName CAN_SD = PC_14;  // CAN Shutdown/Silent
 
-constexpr PinName EXP_TX = PC_10;  // Expansion UART TX
-constexpr PinName EXP_RX = PC_11;  // Expansion UART RX
+constexpr PinName EXP_TX = PC_10;  // Expansion UART TX (USART3)
+constexpr PinName EXP_RX = PC_11;  // Expansion UART RX (USART3)
 
 // Encoder SPI
 constexpr PinName ENC_SCK = PA_5;   // Encoder SPI Clock
@@ -60,7 +60,9 @@ constexpr PinName IO_SWCLK = PA_14;  // SWD Clock
 
 namespace SYS_PARAMS {
     constexpr int32_t MAX_SUPPLY_FS = 102300;
-    constexpr int32_t IA_MAX_CURRENT_FS = -11000;
-    constexpr int32_t IB_MAX_CURRENT_FS = -11000;
-    constexpr int32_t IC_MAX_CURRENT_FS = -16500;
+    constexpr int32_t IA_MAX_CURRENT_FS = 11000;
+    constexpr int32_t IB_MAX_CURRENT_FS = 11000;
+    constexpr int32_t IC_MAX_CURRENT_FS = 16500;
+    constexpr int32_t ADC_DELAY_TICKS_CONST = 350;
+    constexpr int32_t DEADTIME_TICKS_CONST = 20;
 }

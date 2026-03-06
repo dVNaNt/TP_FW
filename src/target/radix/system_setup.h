@@ -1,8 +1,6 @@
 #ifndef SYSTEM_SETUP_RADIX_H
 #define SYSTEM_SETUP_RADIX_H
 
-#include "tunepulse_heart.h"
-
 #include "adc_setup.h"
 #include "clock_setup.h"
 #include "dma_setup.h"
@@ -10,6 +8,8 @@
 #include "spi_setup.h"
 #include "timer_pwm_setup.h"
 
+// Forward declaration (TunePulseHeart defined in lib.h)
+struct TunePulseHeart;
 extern TunePulseHeart TUNE_HEART;
 
 inline void PWM_Callback() {

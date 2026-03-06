@@ -1,8 +1,6 @@
 #pragma once
 
 #include "../../common.h"
-#include "../../math_integer/filters/filter1st.h"
-#include "../types.h"
 
 // Forward declaration
 struct Feedback;
@@ -27,9 +25,9 @@ private:
     Vec2D ab_out_;  // Output Vec2D: sin=alpha, cos=beta in Q15 format
 
     // LPF filters for phase currents (used for balance validation)
-    Filter1st lpf_a_;  // LPF filter for phase A current
-    Filter1st lpf_b_;  // LPF filter for phase B current
-    Filter1st lpf_c_;  // LPF filter for phase C current
+    FilterEMA lpf_a_;  // LPF filter for phase A current
+    FilterEMA lpf_b_;  // LPF filter for phase B current
+    FilterEMA lpf_c_;  // LPF filter for phase C current
 
     // Reference to parent Feedback
     Feedback& feedback_;

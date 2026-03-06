@@ -12,30 +12,13 @@
 #include "hfi_sense.h"                                       // HFI sense for inductance measurement
 #include "sel_motor.h"
 
+volatile int16_t dead_time_duty = 1310;
+volatile int16_t dead_time_duty_sincos = 0;
+volatile int16_t deadzone = 1;
+volatile int16_t deadzone_sincos = 1;
+
 // Motor test power should be between 10% to 40% of total motor power
 static constexpr int32_t test_pwr = 3000;
-
-// Calibration logging macro (uses SerialUSB if available)
-#ifdef ARDUINO
-#include <Arduino.h>
-#define CALIB_LOG(msg) SerialUSB.println(msg)
-#define CALIB_LOG_VAL(msg, val) \
-    do {                        \
-        SerialUSB.print(msg);   \
-        SerialUSB.println(val); \
-    } while (0)
-#define CALIB_LOG_VAL2(msg, val1, val2) \
-    do {                                \
-        SerialUSB.print(msg);           \
-        SerialUSB.print(val1);          \
-        SerialUSB.print(", ");          \
-        SerialUSB.println(val2);        \
-    } while (0)
-#else
-#define CALIB_LOG(msg)
-#define CALIB_LOG_VAL(msg, val)
-#define CALIB_LOG_VAL2(msg, val1, val2)
-#endif
 
 // Forward declaration
 struct Feedback;
@@ -52,22 +35,7 @@ static constexpr int16_t ROTATION_TIMEOUT = 1800;
 
 // Motor calibration structure with all calibration-related variables and states
 struct MotorCalibration {
-public:
-    // Calibration status enum - accessible as MotorCalibration::Status
-    enum Status : uint8_t {
-        Status_Idle,              // Not calibrating
-        Status_CheckWarmup,       // Checking motor warmup and connection
-        Status_Settle,            // Settling phase before measurement (900 ticks)
-        Status_SlowRotation,      // Slow rotation for motor type detection
-        Status_Complete,          // Calibration complete
-        Status_Error,             // Calibration error
-        Status_Measure,           // Measuring resistance
-        Status_InductanceMeasure  // Measuring inductance using HFI
-    };
-
 private:
-    Status status_;  // Current calibration status
-
     // Connection calibration ramp variables
     int16_t voltage_;                // Current output voltage (Q15 duty)
     int16_t voltage_increment_;      // Voltage increment per tick (Q15)
@@ -89,8 +57,7 @@ private:
 public:
     // Constructor - initialize all calibration variables
     MotorCalibration()
-        : status_(Status_Idle),
-          voltage_(0),
+        : voltage_(0),
           voltage_increment_(2),
           voltage_limit_(INT16_MAX / 2),
           overcurrent_threshold_(INT16_MAX / 2),
@@ -101,17 +68,10 @@ public:
           inductance_a_sum_(0),
           inductance_b_sum_(0) {}
 
-    // Get current calibration status
-    Status get_status() const { return status_; }
-
-    // Set calibration status
-    void set_status(Status new_status) { status_ = new_status; }
-
     // Start slow rotation phase
     void start_slow_rotation(int16_t target_angle, int32_t power_limit) {
         slow_rotation_angle_target_ = target_angle;  // Set target angle directly
         slow_rotation_power_limit_ = power_limit;    // Save power limit
-        set_status(Status_SlowRotation);             // Transition to rotation
     }
 
     // Getters for calibration variables
@@ -173,111 +133,212 @@ public:
 struct DriverPWM {
 public:
     // Motor configuration reference (owned by TunePulseHeart)
-    Motor& motor_;
+    Motor& motor;
+
+    // Setup status structure for driver readiness tracking
+    // Optimized for single-instruction zero-check: status_byte == 0 means fully ready
+    DriverStatus setup_status;
+
+    // Motor calibration status tracking (separate from driver status)
+    MotorStatus motor_calib_status;
+
+    // Constructor: takes Motor reference from parent (TunePulseHeart owns Motor)
+    DriverPWM(Feedback& parent, Motor& motor_ref)
+        : motor(motor_ref),
+          feedback(parent),
+          motor_selector(parent, MotorType_STEP, PhasePattern_ABC, 995u, 256),
+          stability_check(50, 240),                       // Initialize stability checker: epsilon=50, window=180 cycles
+          timeout(CALIB_PAUSE_CYCLES),                    // Initialize timeout timer to 100ms @ 18kHz
+          hfi_generator_(20000),                          // Initialize HFI generator at 18 kHz system frequency
+          motor_calib_status(MotorStatus::NotCalibrated)  // Initialize motor calibration status
+    {
+        // Set calibration samples to 100 for feedback current sensor
+        parent.current.set_calibration_samples(CAL_OVERSAMPLING_POW2);  // Configure calibration samples
+    }
+
+    void tick_control_foc(int16_t angle, Vec2D target_current, Feedback& feedback) {
+        tick_control_foc_(angle, target_current, feedback);
+    }
+
+    // Set maximum duty cycle limit
+    void set_duty(uint16_t duty_permille) { motor_selector.set_duty(duty_permille); }
+
+    // Set current balance tolerance
+    void set_current_epsilon(int16_t epsilon) { motor_selector.set_current_epsilon(epsilon); }
+
+    // Check if current sensors are calibrated in feedback
+    bool is_current_calibrated() const {
+        return setup_status.current_not_calibrated == 0;  // Check bitfield flag (0 = calibrated)
+    }
+
+    // Get current motor calibration status
+    MotorStatus get_motor_status() const { return motor.get_status(); }
+
+    OperationStatus get_driver_status() const { return setup_status.get_driver_status(); }
+
+    // Manually start current calibration in feedback
+    void start_current_offset_calibration() {
+        motor.set_status(MotorStatus::NotCalibrated);                        // Update motor status
+        timeout.set_timeout(CALIBRATION_ZERO_CYCLES);                        // Set timeout for zero cycles
+        feedback.current.calibrate();                                        // Start calibration through friend access
+        setup_status.current_not_calibrated = 1;                             // Set flag (calibration in progress)
+        setup_status.set_driver_status(OperationStatus::DriverCalibration);  // Set driver status to DriverCalibration
+    }
+
+    // Configure number of calibration samples in feedback
+    void set_current_calibration_samples(int32_t n) {
+        feedback.current.set_calibration_samples(n);  // Configure samples through friend access
+    }
+
+    /// Get current rotor angle (Q15 format, -32768 to 32767 = -π to π)
+    int16_t get_angle() const { return angle_; }
+
+    /// Start motor calibration sequence
+    /// This method initiates the motor calibration process which includes:
+    /// 1. Soft warmup - gradually increase voltage to check motor connection
+    /// 2. Resistance measurement - measure phase resistances
+    /// 3. Motor type detection - identify motor type (BLDC, Stepper, DC)
+    /// 4. Phase pattern detection - determine correct phase wiring
+    /// Prerequisites: Current sensors must be calibrated first (setup_status.current_not_calibrated == 0)
+    void start_motor_calibration() {
+        // Check if driver is ready for motor calibration
+        if (setup_status.get_driver_status() != OperationStatus::Ready) {
+            return;  // Driver not ready - current sensors must be calibrated first
+        }
+
+        // Initialize motor calibration state
+        motor_calib_status = MotorStatus::SoftWarmup;  // Start with soft warmup phase
+        motor.set_status(MotorStatus::SoftWarmup);     // Update motor status
+
+        // Reset calibration variables
+        motor_calib.reset_voltage();  // Reset voltage to zero
+        stability_check.reset();      // Reset stability checker
+
+        // Configure soft limits for calibration
+        feedback.power.set_overpower_soft_mw(test_pwr);                                     // Set soft power limit
+        feedback.supply.set_overvoltage_soft_norm(feedback.supply.get_voltage_norm() / 2);  // Set soft voltage limit
+
+        // Configure motor selector for initial calibration attempt (Stepper, ABC pattern)
+        motor_selector.set_motor_type(MotorType_STEP);       // Start with stepper motor assumption
+        motor_selector.set_phase_pattern(PhasePattern_ABC);  // Start with ABC phase pattern
+
+        // Set initial angle for calibration (-45 degrees)
+        angle_ = CAL_ANGLE_45D;
+
+        // Set warmup timeout
+        timeout.set_timeout(WARMUP_TIMEOUT);
+
+        // Log calibration start
+        TP_LOG("[CALIB] Motor calibration started");
+    }
+
+    // Get motor calibration status
+    MotorStatus get_motor_calibration_status() const {
+        return motor_calib_status;  // Return current motor calibration status
+    }
+
+    Vec3D get_output() const { return output; }
 
 private:
     // Reference to parent Feedback
-    Feedback& feedback_;
+    Feedback& feedback;
 
-    MotorSelector motor_selector_;  // Unified motor selector (voltage + current + phase)
+    MotorSelector motor_selector;  // Unified motor selector (voltage + current + phase)
+    int16_t i_deadband = 10;
+    int16_t i_deadband_sincos = 10;
+
+    ///////////////////////////////////////////////////////////////////////////////
+    // CURRENT DIGITAL SIGNAL PROCESSING          /////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////////
+    // Median filter to cut random ADC deviations caused by noise. MED3 have small delay so its fine
+    FilterMED3 med3_id_;
+    FilterMED3 med3_iq_;
+
+    // LPF filter to make signal smoother. May cause phase delay
+    FilterEMA lpf_id_;
+    FilterEMA lpf_iq_;
+
+    // Adaptive low-pass filter for current measurement from 100hz to 3500hz spin frequency with 20khz base rate
+    // Main goal is to adjust Fc to reduce phase delay on high frequency signals. At low speeds it will ensure high filtration to
+    // reduce audiable noise caused by current regulators
+    FilterAdaptiveAlphaEMA lpf_adaptive_alpha_ = FilterAdaptiveAlphaEMA(20000, 100, 3500);
 
     // PI controllers for d and q axis current control
-    PID_Int pid_d_;
-    PID_Int pid_q_;
+    PID_Int pid_d_ = PID_Int(0, 0, 0, 0);
+    PID_Int pid_q_ = PID_Int(0, 0, 0, 0);
 
-    // LPF filters for d and q axis current measurements
-    Filter1st lpf_id_;
-    Filter1st lpf_iq_;
+    FocPI pi_d_;
+    FocPI pi_q_;
 
     // Used to charge mosfet driver before going high on all channels
     static constexpr uint32_t CALIBRATION_ZERO_CYCLES = 50;  // Cycles with zero PWM
 
     // Motor calibration structure with all calibration-related variables
-    MotorCalibration motor_calib_;
-
-    // Motor speaker for audio feedback after calibration
-    MotorSpeaker speaker_;
+    MotorCalibration motor_calib;
 
     static constexpr uint32_t CALIB_PAUSE_CYCLES = 1800;         // 100ms pause @ 18kHz
     static constexpr uint32_t INDUCTANCE_MEASURE_CYCLES = 1800;  // 100 periods @ 1kHz (18kHz / 1kHz * 100)
 
-    int16_t angle_;                   // Current rotor angle (Q15, -32768 to 32767 = -π to π)
-    StabilityCheck stability_check_;  // Stability checker for current monitoring
-    timeout_timer timeout;            // Timeout timer for general purpose countdown operations
+    int16_t angle_ = 0;              // Current rotor angle (Q15, -32768 to 32767 = -π to π)
+    int16_t angle_prev_ = 0;         // Previous rotor angle for velocity calculation (Q15)
+    StabilityCheck stability_check;  // Stability checker for current monitoring
+    timeout_timer timeout;           // Timeout timer for general purpose countdown operations
 
-    // HFI components for inductance measurement
+    // HFI components for inductance measurement and sensorless control
     FrequencyGenerator hfi_generator_;  // 1 kHz frequency generator for HFI injection
-    HFISense hfi_sense_a_;              // HFI demodulator for phase A
-    HFISense hfi_sense_b_;              // HFI demodulator for phase B
+    HfiSdft hfi_sdft_;                  // HFI Sliding DFT position estimator for sensorless control
+    bool hfi_enabled_ = false;          // Flag to enable/disable HFI sensorless control
 
-    Vec3D output;
-    int32_t power;
+    Vec3D output = {INT16_MIN, INT16_MIN, INT16_MIN};  // HiZ default
 
-    Vec2D current_dq;
+    int32_t power = 0;
+
+    Vec2D current_dq = {0, 0};
 
     // Debug/monitoring
-    Vec2D voltage_ab_;  // Last voltage command
-    Vec2D voltage_dq_;  // Last voltage command
+    Vec2D voltage_ab_ = {0, 0};  // Last voltage command
+    Vec2D voltage_dq_ = {0, 0};  // Last voltage command
 
-public:
-    // Constructor: takes Motor reference from parent (TunePulseHeart owns Motor)
-    DriverPWM(Feedback& parent, Motor& motor_ref)
-        : motor_(motor_ref),
-          power(0),
-          feedback_(parent),
-          motor_selector_(parent, MotorType_STEP, PhasePattern_ABC, 995u, 256),
+    // TEMPORARY/TODO
+    int8_t compensation_current = 0;
+    int16_t test_state = 0;
+    int16_t test_comp_val = 0;
 
-          pid_d_(0, 0, 0, 0)  // Default PI gains: kp=10%, ki=5%, kd=0, kff=0
-          ,
-          pid_q_(0, 0, 0, 0),
-          lpf_id_(0, 220)  // LPF for id with alpha=64 (25% filtering)
-          ,
-          lpf_iq_(0, 220)  // LPF for iq with alpha=64 (25% filtering)
-          ,
-          motor_calib_(),        // Initialize motor calibration structure
-          speaker_(18000, 3276)  // Speaker: 20kHz system, ~10% amplitude
-          ,
-          angle_(0)  // Initialize angle to zero
-          ,
-          stability_check_(50, 240)  // Initialize stability checker: epsilon=50, window=180 cycles
-          ,
-          timeout(CALIB_PAUSE_CYCLES)  // Initialize timeout timer to 100ms @ 18kHz
-          ,
-          hfi_generator_(18000)  // Initialize HFI generator at 18 kHz system frequency
-          ,
-          hfi_sense_a_(1000, 18000)  // Initialize HFI sense A: 1 kHz carrier, 18 kHz system
-          ,
-          hfi_sense_b_(1000, 18000)  // Initialize HFI sense B: 1 kHz carrier, 18 kHz system
-          ,
-          voltage_ab_{0, 0},
-          voltage_dq_{0, 0},
-          current_dq{0, 0},
-          output{INT16_MIN, INT16_MIN, INT16_MIN} {
-        // Set calibration samples to 100 for feedback current sensor
-        parent.current.set_calibration_samples(CAL_OVERSAMPLING_POW2);  // Configure calibration samples
-    }
+    // ========================================================================
+    // HFI Test Variables (Public for monitoring)
+    // ========================================================================
+    int16_t hfi_estimated_angle = 0;      // HFI estimated electrical angle (0-65535 = 0-360°)
+    int32_t hfi_estimated_velocity = 0;   // HFI estimated angular velocity (internal units)
+    int16_t hfi_injection_voltage = 0;    // Current HFI injection voltage (Q15)
+    int16_t hfi_measured_iq = 0;          // Measured Q-axis current for HFI (Q15)
+    Vec2D hfi_generator_signal = {0, 0};  // HFI generator sin/cos output (Q15)
+    bool hfi_active = false;              // Flag indicating HFI is running
 
-    // Convenience overload: takes raw id/iq and encoder angle with Feedback reference
-    void tick_control_foc(int16_t angle, int16_t target_current, const Feedback& feedback) {
-        // Store angle in class member for global access
-        // Save input angle
-
+    inline void tick_control_foc_(int16_t angle, Vec2D target_current, Feedback& feedback) {
         // Ensuring that we have full internal control over angle until driver is ready
-        if (motor_.get_status() == DriverStatus_Ready) {
+        if (motor.get_status() == MotorStatus::Success) {
             angle_ = angle;  // Override to zero
         }
-        // Get current ADC values from feedback data
-        const int16_t* currents_abc = feedback.current.norm();  // Access current ADC array from feedback
-        int16_t supply_voltage_norm = feedback.supply.get_voltage_norm();
+
+        // Some helper math
+        int16_t angular_speed = angle_ - angle_prev_;  // Calculate angle change (wraps automatically)
+        angle_prev_ = angle_;                          // Store current angle for next iteration
 
         // Step 1: Convert encoder angle to rotation vector (sin/cos)
         Pol2D angle_polar = Pol2D(angle_, INT16_MAX);  // Use class member
         Vec2D angle_sincos = angle_polar.convert();
 
+        // ========================================================================
+        // I. Processing current
+        // ========================================================================
+
+        // Step 1: Get current ADC values from feedback data
+        const int16_t* currents_abc = feedback.current.norm();  // Access current ADC array from feedback
+
         // Step 2: Get calibrated normalized currents from feedback and convert to AB using motor selector
-        const int16_t* normalized_currents = feedback_.current.norm();  // Use feedback current sensor
-        motor_selector_.tick_current(normalized_currents);
-        Vec2D current_ab = motor_selector_.get_currents();
+        const int16_t* normalized_currents = feedback.current.norm();  // Use feedback current sensor
+        motor_selector.tick_current(normalized_currents);
+        Vec2D current_ab = motor_selector.get_currents();
 
         // Step 3: Park transform - rotate AB currents by -encoder angle to get DQ
         // Inverse rotation: negate sin component for reverse rotation (cos, -sin)
@@ -285,367 +346,279 @@ public:
         Vec2D current_dq_raw = current_ab.rotate(angle_sincos_inv);
         current_dq = current_dq_raw;
 
-        // Step 3.5: Apply LPF filtering to measured DQ currents
-        int16_t filtered_id = (int16_t)lpf_id_.tick_lpf((uint16_t)(current_dq_raw.flux));
-        int16_t filtered_iq = (int16_t)lpf_iq_.tick_lpf((uint16_t)(current_dq_raw.torque));
+        // Step 4: Dynamic scale of filtration to make currents more stable at low speeds
+        uint8_t alpha = lpf_adaptive_alpha_.tick(angular_speed);
+        lpf_id_.set_alpha(alpha);
+        lpf_iq_.set_alpha(alpha);
+
+        // Step 5: Apply LPF filtering to measured DQ currents
+        int16_t filtered_id = (int16_t)lpf_id_.tick_lpf(med3_id_.tick(current_dq_raw.flux));
+        int16_t filtered_iq = (int16_t)lpf_iq_.tick_lpf(med3_iq_.tick(current_dq_raw.torque));
         Vec2D current_dq_filt = Vec2D(filtered_id, filtered_iq);
 
+        // ========================================================================
+        // II. Voltage preparation
+        // ========================================================================
+
+        int16_t supply_voltage_norm = feedback.supply.get_voltage_norm();
         Vec2D voltage_dq(0, 0);
 
         Vec2D voltage_ab(0, 0);
 
-        int32_t power_d = feedback_.power.power_norm(filtered_id, voltage_dq_.d);
-        int32_t power_q = feedback_.power.power_norm(filtered_iq, voltage_dq_.q);
+        // ========================================================================
+        // III. Processing power control
+        // ========================================================================
+
+        int32_t power_d = feedback.power.power_norm(filtered_id, voltage_dq_.d);
+        int32_t power_q = feedback.power.power_norm(filtered_iq, voltage_dq_.q);
 
         int32_t power_norm = abs(power_d) + abs(power_q);
-        power = feedback_.power.norm2mw(power_norm);
+        power = feedback.power.norm2mw(power_norm);
 
-        switch (motor_.get_status()) {
-            ///////////////////////////////////////////////////////////////////////////////
-            // CURRENT SENSOR OFFSET CALIBRATION SEQUENCE /////////////////////////////////
-            ///////////////////////////////////////////////////////////////////////////////
-            case DriverStatus_CalibrateCurrent:
-                // During calibration: first 50 cycles with zero PWM to ensure charge of bootstrap circuit
-                if (timeout.tick() > 0) {
-                    // Phase 1: Zero PWM for 50 cycles
-                    output.ch1 = 0;
-                    output.ch2 = 0;
-                    output.ch3 = 0;
-                    return;
-                }  // When charging complete - making all outputs high to ensure 0 current flow through low side sense
-                else if (timeout.get_timeout() == 0) {
-                    // Start calibration for all channels using feedback current sensor
-                    // Set calibration samples to 100 for feedback current sensor
-                    feedback_.current.calibrate();  // Start calibration through friend access
-                    timeout.tick();
-                    // Phase 2: Max PWM during current sensor sampling
-                    output.ch1 = INT16_MAX;
-                    output.ch2 = INT16_MAX;
-                    output.ch3 = INT16_MAX;
-                    return;
-                }  // If calibration is not complete skip this turn
-                else if (!feedback_.current.is_calibrated()) {
-                    return;
-                }  // If calibration complete switching to next step
-                else {
-                    // Calibration complete, transition to motor calibration phase
-                    switch_status(DriverStatus_CalibratingMotor);                   // Transition to motor calibration
-                    motor_calib_.set_status(MotorCalibration::Status_CheckWarmup);  // Set calibration status
-                    feedback_.current.set_overcurrent_hard_ma(2000);
-                    timeout.set_timeout(WARMUP_TIMEOUT);
-                    voltage_ab = Vec2D(0, 0);
+        switch (setup_status.get_driver_status()) {
+            case OperationStatus::Ready: {
+                if (motor_calib_status == MotorStatus::Success) {  // Check if motor calibration is complete
+
+                    // ========================================================================
+                    // IV. Processing main FOC loop execution
+                    // ========================================================================
+
+                    // System timing parameters
+                    const float TS = 1.0f / 20000.0f;  // Sampling period: 50 us (20 kHz PWM frequency)
+
+                    // Voltage limit (half of supply voltage for safety margin)
+                    int16_t v_limit = ((int32_t)feedback.supply.get_voltage_norm() * 3) / 5;  // Q15 normalized voltage limit
+
+                    // ================================================================
+                    // Calculate Electrical Angular Velocity (ωe)
+                    // ================================================================
+                    // ωe = Δθ / Δt, where Δθ is change in electrical angle
+                    // Angle is in Q15 format: -32768 to 32767 = -π to π radians
+                    // Angular velocity in rad/s = (angular_speed / 32768) * π / TS
+
+                    // Convert angle delta to electrical angular velocity in rad/s
+                    // ωe [rad/s] = (angular_speed / 32768) * π / TS
+                    // Simplified: ωe = angular_speed * (π / (32768 * TS))
+                    // For TS = 50us: ωe = angular_speed * (3.14159 / (32768 * 0.00005)) = angular_speed * 1.917
+                    float omega_e_rad_s =
+                        (float)angular_speed * (3.14159f / (32768.0f * TS));  // Electrical angular velocity [rad/s]
+
+                    // ================================================================
+                    // Motor Parameters for Feedforward Calculation
+                    // ================================================================
+                    // R: Phase resistance in milliohms (mΩ)
+                    // L: Phase inductance in microhenries (μH) - measured or default 3 mH
+                    // λf: Back-EMF constant (flux linkage) - not yet measured, set to 0 for now
+
+                    int32_t R_mohm = motor.get_total_resistance();    // Phase resistance [mΩ]
+                    int32_t L_uh = motor.get_effective_inductance();  // Phase inductance [μH] (3000 μH = 3 mH default)
+
+                    // Convert inductance from μH to mH for calculation
+                    float L_h = (float)L_uh * 0.000001f;  // Inductance [mH]
+
+                    // ================================================================
+                    // Convert Target and Measured Currents to Milliamps
+                    // ================================================================
+                    // Current is in Q15 format, convert to physical units (mA)
+
+                    int32_t Id_target_ma =
+                        feedback.current.norm2ma(target_current.d);  // D-axis target current [mA] (zero for PMSM)
+                    int32_t Iq_target_ma = feedback.current.norm2ma(target_current.q);  // Q-axis target current [mA]
+
+                    // ================================================================
+                    // Feedforward Voltage Calculation
+                    // ================================================================
+                    // Vd_FF = (R * Id_target) - (ωe * L * Iq_target)
+                    // Vq_FF = (R * Iq_target) + (ωe * L * Id_target) + (ωe * λf)
+                    //
+                    // All calculations in millivolts (mV) and milliamps (mA)
+                    // R [mΩ], I [mA] → V [μV] → divide by 1000 to get [mV]
+                    // ωe [rad/s], L [mH], I [mA] → V [mV]
+
+                    // Resistive voltage drop: V_R = R * I [mΩ * mA = μV → mV]
+                    float Vd_resistive = ((float)R_mohm * (float)Id_target_ma) / 1000.0f;  // [mV]
+                    float Vq_resistive = ((float)R_mohm * (float)Iq_target_ma) / 1000.0f;  // [mV]
+
+                    // Inductive voltage drop: V_L = ωe * L * I [rad/s * mH * mA = mV]
+                    float Vd_inductive = omega_e_rad_s * L_h * (float)Iq_target_ma;  // [mV]
+                    float Vq_inductive = omega_e_rad_s * L_h * (float)Id_target_ma;  // [mV]
+
+                    // Back-EMF voltage: V_bemf = ωe * λf [rad/s * V·s/rad = V]
+                    // λf is not yet measured, set to 0 for now
+                    float Vq_bemf = 0.0f;  // [mV] - TODO: Add back-EMF constant measurement
+
+                    // Total feedforward voltages [mV]
+                    float Vd_FF_mv = Vd_resistive - Vd_inductive;            // Vd_FF = R*Id - ωe*L*Iq
+                    float Vq_FF_mv = Vq_resistive + Vq_inductive + Vq_bemf;  // Vq_FF = R*Iq + ωe*L*Id + ωe*λf
+
+                    // ================================================================
+                    // Convert Feedforward Voltages to Q15 Normalized Format
+                    // ================================================================
+                    // Convert from millivolts to Q15 normalized format using feedback supply voltage
+
+                    int16_t Vd_FF_norm = feedback.supply.mv2norm((int32_t)Vd_FF_mv);  // Convert to Q15
+                    int16_t Vq_FF_norm = feedback.supply.mv2norm((int32_t)Vq_FF_mv);  // Convert to Q15
+
+                    // ================================================================
+                    // PI Controller with Feedforward Compensation
+                    // ================================================================
+                    // PI controller calculates feedback correction based on current error
+                    // Feedforward adds model-based voltage to improve tracking performance
+
+                    int16_t vq_pi =
+                        pi_q_.tick(target_current.q, current_dq_filt.torque, v_limit - Vq_FF_norm, TS);  // Q-axis PI output
+                    int16_t vd_pi =
+                        pi_d_.tick(target_current.d, current_dq_filt.flux, v_limit - Vd_FF_norm, TS);  // D-axis PI output
+
+                    // Add feedforward compensation to PI output
+                    int32_t vd_total = (int32_t)vd_pi + (int32_t)Vd_FF_norm;  // Total D-axis voltage
+                    int32_t vq_total = (int32_t)vq_pi + (int32_t)Vq_FF_norm;  // Total Q-axis voltage
+
+                    // Store final voltage commands
+                    voltage_dq = Vec2D((int16_t)vd_total, (int16_t)vq_total);
+                    break;
                 }
-                break;
 
-            ///////////////////////////////////////////////////////////////////////////////
-            // MOTOR CALIBRATION PHASE (unified for all motor calibration states) ////
-            ///////////////////////////////////////////////////////////////////////////////
-            case DriverStatus_CalibratingMotor: {
-                // Unified motor calibration switch - handles all calibration sub-states
-                const int32_t curnt_a = motor_selector_.get_filtered_a();
-                const int32_t curnt_b = motor_selector_.get_filtered_b();
+                // Motor calibration in progress - unified motor calibration switch
+                // Handles all calibration sub-states
+                const int32_t curnt_a = motor_selector.get_filtered_a();
+                const int32_t curnt_b = motor_selector.get_filtered_b();
 
-                int32_t voltage_corrected = (motor_calib_.get_voltage() * 46341) >> 16;
+                int32_t voltage_corrected = (motor_calib.get_voltage() * 46341) >> 16;
 
                 int16_t measured_current = abs(curnt_a + curnt_b);
 
-                switch (motor_calib_.get_status()) {
+                switch (motor_calib_status) {
                     // CHECK WARMUP SUB-STATE ////////////////////////////////////////////////
-                    case MotorCalibration::Status_CheckWarmup: {
-                        // Get measured current (use D-axis current from DQ transform)
-                        if (timeout.get_timeout() == WARMUP_TIMEOUT) {
-                            CALIB_LOG("[CALIB] Starting motor warmup and connection check");
-                            // Setup stability checker for warmup phase
-                            stability_check_.reset();
-                            // Configure soft limits for calibration
-                            feedback_.power.set_overpower_soft_mw(test_pwr);  // Set soft power limit to 2W
-                            feedback_.supply.set_overvoltage_soft_norm(feedback_.supply.get_voltage_norm() / 2);
-                            // feedback_.current.set_overcurrent_soft_norm(INT16_MAX / 4);
-                            motor_selector_.set_motor_type(MotorType_STEP);
-                            motor_selector_.set_phase_pattern(PhasePattern_ABC);
-                            motor_calib_.reset_voltage();
-                            angle_ = CAL_ANGLE_45D;
-                            timeout.tick();
-                            break;
-                        }
-
+                    case MotorStatus::SoftWarmup: {
                         // Check for overpower using soft limit
-                        bool power_lim = feedback_.power.is_overpower_soft_norm(power_norm);
-                        bool voltg_lim = feedback_.supply.is_overvoltage_soft_norm(motor_calib_.get_voltage());
-                        // bool curnt_lim = feedback_.current.is_overcurrent_soft_norm(measured_current);
+                        bool power_lim = feedback.power.is_overpower_soft_norm(power_norm);
+                        bool voltg_lim = feedback.supply.is_overvoltage_soft_norm(motor_calib.get_voltage());
+                        // bool curnt_lim =  feedback.current.is_overcurrent_soft_norm(measured_current);
                         bool curnt_lim = false;
 
                         // If current stable or timeout - transition to settle before measure1
-                        if ((stability_check_.tick(measured_current) and CAL_UNDERPOWER_LIM_NORM < power_norm) or
+                        if ((stability_check.tick(measured_current) and CAL_UNDERPOWER_LIM_NORM < power_norm) or
                             timeout.tick() == 0) {
-                            CALIB_LOG("[CALIB] Warmup complete - current stable");
-                            CALIB_LOG_VAL("  Final voltage: ", motor_calib_.get_voltage());
-                            timeout.set_timeout(900);                                  // Set settle timeout to 900 ticks
-                            motor_calib_.set_status(MotorCalibration::Status_Settle);  // Transition to settle phase
+                            TP_LOG("[CALIB] Warmup complete - current stable");
+                            TP_LOG_VAL("  Final voltage: ", motor_calib.get_voltage());
+                            timeout.set_timeout(900);                  // Set settle timeout to 900 ticks
+                            motor_calib_status = MotorStatus::Settle;  // Transition to settle phase
+                            motor.set_status(MotorStatus::Settle);
                         } else {
                             // Check for overcurrent - reduce voltage by increment. If any limit hit, system will bounce around
                             // lim voltage
                             if (power_lim or curnt_lim or voltg_lim) {  // Overpower detected
-                                motor_calib_.decrease_voltage();        // Reduce by increment
+                                motor_calib.decrease_voltage();         // Reduce by increment
                             } else {
                                 // Normal ramp - increase voltage by increment
-                                motor_calib_.increase_voltage();  // Increase by increment
+                                motor_calib.increase_voltage();  // Increase by increment
                             }
                         }
                         break;
                     }
 
                     // SETTLE SUB-STATE (wait 900 ticks before measurement) ////////////////
-                    case MotorCalibration::Status_Settle: {
+                    case MotorStatus::Settle: {
                         // Log settle start on first cycle
                         if (timeout.get_timeout() == 900) {  // First cycle
-                            CALIB_LOG("[CALIB] Settling before measurement (900 ticks)");
+                            TP_LOG("[CALIB] Settling before measurement (900 ticks)");
                         }
 
                         // Wait for settle timeout to complete
                         if (timeout.tick() == 0) {  // Settle period complete
-                            CALIB_LOG("[CALIB] Settle complete - starting measurement");
-                            motor_calib_.set_status(MotorCalibration::Status_Measure);
+                            TP_LOG("[CALIB] Settle complete - starting measurement");
+                            motor_calib_status = MotorStatus::ResistanceMeasure;  // Transition to resistance measurement
+                            motor.set_status(MotorStatus::ResistanceMeasure);
                             timeout.set_timeout(CAL_OVERSAMPLING_POW2);  // Set measurement cycles
                         }
                         // During settle phase, maintain current voltage and angle
                         break;
                     }
 
-                    case MotorCalibration::Status_Measure: {
-                        // First cycle: reset accumulators (counter == 100 initially)
-                        if (timeout.get_timeout() == CAL_OVERSAMPLING_POW2) {                   // First cycle
-                            motor_calib_.reset_measure_accumulators();                          // Reset all accumulators
-                            CALIB_LOG("[CALIB] Starting resistance measurement (64 samples)");  // Log measurement start
-                        }
-
-                        // Accumulate current samples for averaging
-                        motor_calib_.accumulate_measure_currents(
-                            current_ab.a, current_ab.b);  // Add to accumulators
-                                                          // Decrement counter and check if measurement complete
-                        if (timeout.tick() == 0) {        // Counter reached 0 - 100 cycles done
-                            int32_t ia = motor_calib_.get_measure_current_a();
-                            int32_t ib = motor_calib_.get_measure_current_b();
-                            // Too low power, possibly no connection OR not enough power
-                            if (CAL_UNDERPOWER_LIM_NORM >= power_norm) {
-                                // No connection or DC motor branch
-                                if (motor_selector_.get_motor_type() == MotorType_DC) {
-                                    // we set ABC in else branch, so its easy way to check second entry
-                                    CALIB_LOG("[CALIB] Error:");
-                                    CALIB_LOG_VAL2("  Current A/B (mA): ", feedback_.current.norm2ma(ia),
-                                                   feedback_.current.norm2ma(ib));
-                                    CALIB_LOG_VAL("  Voltage (mV): ", feedback_.supply.norm2mv((uint32_t)voltage_corrected));
-                                    CALIB_LOG_VAL("  Angle: ", angle_);
-                                    set_calibration_error();
-                                } else if (motor_.get_total_resistance() != 0) {
-                                    motor_selector_.set_motor_type(MotorType_DC);
-                                    if (motor_selector_.get_phase_pattern() == PhasePattern_ACB)
-                                        motor_selector_.set_phase_pattern(PhasePattern_CBA);
-                                    else
-                                        motor_selector_.set_phase_pattern(PhasePattern_ACB);
-                                    CALIB_LOG_VAL(" DC motor: ", motor_selector_.get_phase_pattern());
-                                    set_calibration_success();
-                                } else {
-                                    // retry because it may be DC motor
-                                    motor_selector_.set_motor_type(MotorType_DC);
-                                    motor_calib_.reset_voltage();  // Reset voltage
-                                    stability_check_.reset();
-                                    motor_calib_.set_status(MotorCalibration::Status_CheckWarmup);  // Set calibration status
-                                    timeout.set_timeout(WARMUP_TIMEOUT - 1);
-                                    CALIB_LOG("[CALIB] Warmup again");
-                                    // we are far away from target power, something close to zero current
-                                    // probably DC motor in different connection
-                                }
-                            } else {  // we have enough power
-
-                                int32_t v_uv = feedback_.supply.norm2mv((uint32_t)voltage_corrected) * 1000;
-
-                                int32_t resistance_a = v_uv / feedback_.current.norm2ma(ia);  // Resistance in milliohms
-
-                                int32_t resistance_b = v_uv / feedback_.current.norm2ma(ib);  // Resistance in milliohms
-
-                                // Log measured currents and resistances
-                                CALIB_LOG("[CALIB] Resistance measurement complete:");
-                                CALIB_LOG_VAL2("  Current A/B (mA): ", feedback_.current.norm2ma(ia),
-                                               feedback_.current.norm2ma(ib));
-                                CALIB_LOG_VAL2("  Resistance A/B (mOhm): ", resistance_a, resistance_b);
-                                CALIB_LOG_VAL("  Voltage (mV): ", feedback_.supply.norm2mv((uint32_t)voltage_corrected));
-                                CALIB_LOG_VAL("  Angle: ", angle_);
-
-                                if (angle_ == 16384) {
-                                    if (14 * abs((2 * ib) + ia) < ((ib * 2) - ia)) {
-                                        // BLDC motor second pass: (phases equeal within ~15% from average)
-                                        // if current a = sum of b and c, where ib ~= ic
-                                        // Expected: iA - negative and dominant
-                                        // iB - positive and equal to half of iA amplitude
-                                        int32_t avg_r = (motor_.get_total_resistance() - resistance_a) / 3;
-                                        motor_.set_total_resistance(avg_r);
-
-                                        motor_selector_.set_motor_type(MotorType_BLDC);
-                                        CALIB_LOG("[CALIB] Motor type detected: BLDC");
-                                        CALIB_LOG_VAL("  Average resistance (mOhm): ", avg_r);
-                                        set_calibration_success();
-                                    }
-
-                                    else if ((ia >> 4) < ib) {
-                                        // Stepper motor second pass:
-                                        // Check if iA much greater than iB
-                                        // Expected: iA - negative dominant, iB close to 0 (any sign)
-                                        // Resistance already calculated
-                                        CALIB_LOG("[CALIB] Motor type detected: STEPPER");
-                                        CALIB_LOG_VAL("  Total resistance (mOhm): ", motor_.get_total_resistance());
-                                        set_calibration_success();
-                                    } else {
-                                        CALIB_LOG("[CALIB] ERROR: Motor type detection failed at angle 16384");
-                                        set_calibration_error();
-                                    }
-                                }  // Check if angle is around +225° (on second path for Stepper or DC motors)
-                                else if (angle_ == -24576) {
-                                    // Check if b and c are balanced (~15% from average)
-                                    if (14 * abs(ib - ia) < (ia + ib)) {
-                                        // Stepper motor
-
-                                        int32_t avg_r = (resistance_a + resistance_b) / 2;
-                                        motor_.set_total_resistance(avg_r);
-                                        CALIB_LOG("[CALIB] Motor type detected: STEPPER (balanced phases)");
-                                        CALIB_LOG_VAL("  Average resistance (mOhm): ", avg_r);
-                                        set_calibration_success();
-                                    } else {
-                                        CALIB_LOG("[CALIB] ERROR: Motor type detection failed at angle -24576");
-                                        set_calibration_error();
-                                    }
-                                } else if (angle_ == CAL_ANGLE_45D) {
-                                    timeout.set_timeout(1800);  // Set counter to cycles
-                                    if (14 * abs(ib - ia) < (-ia - ib)) {
-                                        // Stepper motor or BLDC first pass where phases are balanced (~15% from average)
-                                        motor_.set_total_resistance(-(resistance_a + resistance_b) / 2);
-
-                                        CALIB_LOG("[CALIB] Phases balanced - preparing rotation for motor type verification");
-                                        CALIB_LOG_VAL("  Temporary resistance (mOhm): ", motor_.get_total_resistance());
-
-                                        // Rotate angle by 30° slowly to verify
-                                        motor_calib_.start_slow_rotation(16384, power);  // Target: current + 30°
-                                        // set_calibration_success(); // TODO: REMOVE
-                                    }  // Check if angle is around 90° (angle woks on second pass for BLDC and stepper in correct
-                                       // phase)
-                                    else {
-                                        motor_calib_.set_voltage((int16_t)voltage_corrected);
-                                        motor_calib_.start_slow_rotation(-24576, power);
-                                        if (motor_selector_.get_motor_type() == MotorType_DC) {
-                                            // DC motor branch - connection ABC
-                                            motor_.set_total_resistance(resistance_a);
-                                            CALIB_LOG("[CALIB] Motor type detected: DC (ABC connection)");
-                                            CALIB_LOG_VAL("  Resistance (mOhm): ", resistance_a);
-                                            set_calibration_success();
-                                        } else if ((-ia >> 2) >= -ib) {
-                                            // motor type - Stepper or DC
-                                            // If next time we hit underpower (shouldnt happen for Stepper - then we go to DC
-                                            // motor)
-                                            motor_.set_total_resistance(-resistance_a);
-                                            CALIB_LOG("[CALIB] Phase B dominant - setting CBA pattern and rotating");
-                                            angle_ = PhasePattern_CBA;
-                                            motor_selector_.set_phase_pattern(PhasePattern_CBA);
-
-                                        } else if ((-ib >> 2) >= -ia) {
-                                            CALIB_LOG("[CALIB] Phase C dominant - setting ACB pattern and rotating");
-                                            // If next time we hit underpower (shouldnt happen for Stepper - then we go to DC
-                                            // motor)
-                                            motor_.set_total_resistance(-resistance_b);
-                                            motor_selector_.set_phase_pattern(PhasePattern_ACB);
-                                            angle_ = PhasePattern_ACB;
-                                            // Phase C dominant: motor type - Stepper or DC
-                                            // Set counter to cycles
-
-                                        } else {
-                                            CALIB_LOG("[CALIB] ERROR: Excessive deviation - unknown motor type");
-                                            switch_status(DriverStatus_Error);  // motor looks so strange
-                                        }
-                                    }
-                                } else {
-                                    CALIB_LOG("[CALIB] ERROR: Excessive deviation - unknown motor type1");
-                                    switch_status(DriverStatus_Error);  // motor looks so strange
-                                }
-                            }
-                        }
+                    case MotorStatus::ResistanceMeasure: {
+                        resistance_measure(current_ab, power_norm, voltage_corrected);
                     } break;
 
                     // SLOW ROTATION SUB-STATE (motor type detection) ///////////////////////
-                    case MotorCalibration::Status_SlowRotation: {
+                    case MotorStatus::SlowRotation: {
                         // Check power limit: if power exceeds limit by 25%, throw error
                         if (power >= (test_pwr * 5) / 2) {
-                            CALIB_LOG("[CALIB] ERROR: OP duting rotation");
+                            TP_LOG("[CALIB] ERROR: OP duting rotation");
                             set_calibration_error();  // Power exceeded threshold
                             break;
                         }
 
                         // Decrement counter and check if rotation complete
-                        if (timeout.tick() == 0) {                                     // Counter reached 0 - rotation done
-                            angle_ = motor_calib_.get_slow_rotation_angle_target();    // Set exact target angle
-                            timeout.set_timeout(900);                                  // Set settle timeout to 900 ticks
-                            motor_calib_.set_status(MotorCalibration::Status_Settle);  // Transition to settle phase
+                        if (timeout.tick() == 0) {                                  // Counter reached 0 - rotation done
+                            angle_ = motor_calib.get_slow_rotation_angle_target();  // Set exact target angle
+                            timeout.set_timeout(900);                               // Set settle timeout to 900 ticks
+                            motor_calib_status = MotorStatus::Settle;               // Transition to settle phase
+                            motor.set_status(MotorStatus::Settle);
                         } else {
                             // Calculate shortest path delta with int16_t overflow (automatic wrap-around)
-                            int16_t delta = motor_calib_.get_slow_rotation_angle_target() - angle_;  // Shortest path via overflow
+                            int16_t delta = motor_calib.get_slow_rotation_angle_target() - angle_;  // Shortest path via overflow
                             angle_ += delta / (int16_t)(timeout.get_timeout() + 1);  // Interpolate along shortest path
                         }
                         break;
                     }
 
                     // INDUCTANCE MEASUREMENT SUB-STATE (HFI-based inductance detection) ////
-                    case MotorCalibration::Status_InductanceMeasure: {
-                        // Log start of inductance measurement on first cycle
-                        if (timeout.get_timeout() == INDUCTANCE_MEASURE_CYCLES) {  // First cycle
-                            CALIB_LOG("[CALIB] Starting inductance measurement (1800 samples @ 1kHz HFI)");
-                            CALIB_LOG_VAL("  HFI voltage amplitude: ", motor_calib_.get_voltage());
-                            CALIB_LOG_VAL("  Angle (D-axis): ", angle_);
-                        }
+                    case MotorStatus::InductanceMeasure: {
+                        // // Log start of inductance measurement on first cycle
+                        // if (timeout.get_timeout() == INDUCTANCE_MEASURE_CYCLES) {  // First cycle
+                        //     TP_LOG("[CALIB] Starting inductance measurement (1800 samples @ 1kHz HFI)");
+                        //     TP_LOG_VAL("  HFI voltage amplitude: ", motor_calib.get_voltage());
+                        //     TP_LOG_VAL("  Angle (D-axis): ", angle_);
+                        // }
 
-                        // Generate 1 kHz HFI signal for D-axis injection
-                        Vec2D hfi_signal = hfi_generator_.tick();  // Get sine and cosine from generator
+                        // // Generate 1 kHz HFI signal for D-axis injection
+                        // Vec2D hfi_signal = hfi_generator_.tick();  // Get sine and cosine from generator
 
-                        // Apply HFI voltage to D-axis (cosine component for voltage injection)
-                        int16_t hfi_voltage = (motor_calib_.get_voltage() * hfi_signal.cos * 25) >> 15;  // Scale by cosine (Q15)
-                        voltage_dq = Vec2D(hfi_voltage + motor_calib_.get_voltage(), 0);  // Inject HFI voltage into D-axis only
+                        // // Apply HFI voltage to D-axis (cosine component for voltage injection)
+                        // int16_t hfi_voltage = (motor_calib.get_voltage() * hfi_signal.cos * 25) >> 15;  // Scale by cosine
+                        // (Q15) voltage_dq = Vec2D(hfi_voltage + motor_calib.get_voltage(), 0);  // Inject HFI voltage into
+                        // D-axis only
 
-                        // Get current measurements from motor selector
-                        const int32_t curnt_a = motor_selector_.get_currents().alpha;  // Phase A current
-                        const int32_t curnt_b = motor_selector_.get_currents().beta;   // Phase B current
+                        // // Get current measurements from motor selector
+                        // const int32_t curnt_a = motor_selector.get_currents().alpha;  // Phase A current
+                        // const int32_t curnt_b = motor_selector.get_currents().beta;   // Phase B current
 
-                        // Demodulate HFI response using sine component (90° phase shift for inductive response)
-                        hfi_sense_a_.tick((int16_t)curnt_a, hfi_signal.cos);  // Demodulate phase A with sine reference
-                        hfi_sense_b_.tick((int16_t)curnt_b, hfi_signal.cos);  // Demodulate phase B with sine reference
+                        // // Demodulate HFI response using sine component (90° phase shift for inductive response)
+                        // hfi_sense_a_.tick((int16_t)curnt_a, hfi_signal.cos);  // Demodulate phase A with sine reference
+                        // hfi_sense_b_.tick((int16_t)curnt_b, hfi_signal.cos);  // Demodulate phase B with sine reference
 
-                        // Accumulate demodulated HFI responses for averaging
-                        int16_t hfi_response_a = hfi_sense_a_.get_output();                  // Get demodulated signal A
-                        int16_t hfi_response_b = hfi_sense_b_.get_output();                  // Get demodulated signal B
-                        // motor_calib_.accumulate_inductance(hfi_response_a, hfi_response_b);  // Accumulate for averaging
+                        // // Accumulate demodulated HFI responses for averaging
+                        // int16_t hfi_response_a = hfi_sense_a_.get_output();                  // Get demodulated signal A
+                        // int16_t hfi_response_b = hfi_sense_b_.get_output();                  // Get demodulated signal B
+                        // // motor_calib.accumulate_inductance(hfi_response_a, hfi_response_b);  // Accumulate for averaging
 
-                        // Check if measurement complete (1800 cycles = 100 periods @ 1kHz)
-                        if (timeout.tick() == 0) {  // Counter reached 0 - measurement done
-                            // Calculate inductance from averaged HFI response
-                            // L = V / (2 * pi * f * I_hfi), where f = 1kHz
-                            // Simplified: L_norm = HFI_response (proportional to inductance)
-                            int32_t inductance_a = motor_calib_.get_inductance_a();  // Get averaged inductance A
-                            int32_t inductance_b = motor_calib_.get_inductance_b();  // Get averaged inductance B
+                        // // Check if measurement complete (1800 cycles = 100 periods @ 1kHz)
+                        // if (timeout.tick() == 0) {  // Counter reached 0 - measurement done
+                        //     // Calculate inductance from averaged HFI response
+                        //     // L = V / (2 * pi * f * I_hfi), where f = 1kHz
+                        //     // Simplified: L_norm = HFI_response (proportional to inductance)
+                        //     int32_t inductance_a = motor_calib.get_inductance_a();  // Get averaged inductance A
+                        //     int32_t inductance_b = motor_calib.get_inductance_b();  // Get averaged inductance B
 
-                            // Log inductance measurement results
-                            CALIB_LOG("[CALIB] Inductance measurement complete:");
-                            CALIB_LOG_VAL2("  HFI response A/B (normalized): ", inductance_a, inductance_b);
+                        //     // Log inductance measurement results
+                        //     TP_LOG("[CALIB] Inductance measurement complete:");
+                        //     TP_LOG_VALS("  HFI response A/B (normalized): ", inductance_a, inductance_b);
 
-                            // Store inductance values in motor structure (in microhenries, scaled from normalized)
-                            // Conversion: L_uH = (V_norm * 1000) / (2 * pi * 1000 * I_norm) = V_norm / (6.28 * I_norm)
-                            // Simplified proportional storage for now (actual calibration factor TBD)
-                            motor_.set_phase_inductance(0, inductance_a);  // Store phase A inductance
-                            motor_.set_phase_inductance(1, inductance_b);  // Store phase B inductance
+                        //     // Store inductance values in motor structure (in microhenries, scaled from normalized)
+                        //     // Conversion: L_uH = (V_norm * 1000) / (2 * pi * 1000 * I_norm) = V_norm / (6.28 * I_norm)
+                        //     // Simplified proportional storage for now (actual calibration factor TBD)
+                        //     motor.set_phase_inductance(0, inductance_a);  // Store phase A inductance
+                        //     motor.set_phase_inductance(1, inductance_b);  // Store phase B inductance
 
-                            CALIB_LOG_VAL2("  Stored inductance A/B (uH): ", inductance_a, inductance_b);
-                            CALIB_LOG("[CALIB] Motor calibration complete - transitioning to Ready");
+                        //     TP_LOG_VALS("  Stored inductance A/B (uH): ", inductance_a, inductance_b);
+                        //     TP_LOG("[CALIB] Motor calibration complete - transitioning to Ready");
 
-                            // // Inductance measurement complete - transition to Ready state
-                            // switch_status(DriverStatus_Ready);  // Calibration complete
-                            // motor_calib_.reset_voltage();       // Reset voltage to zero
-                            // voltage_ab = Vec2D(0, 0);           // Zero output voltage
-                        }
+                        //     // // Inductance measurement complete - transition to Ready state
+                        //     // switch_status(DriverStatus_Ready);  // Calibration complete
+                        //     // motor_calib.reset_voltage();       // Reset voltage to zero
+                        //     // voltage_ab = Vec2D(0, 0);           // Zero output voltage
+                        // }
                         break;
                     }
 
@@ -657,143 +630,341 @@ public:
 
                 // Set voltage_dq for all calibration states except inductance measurement
                 // (inductance measurement sets voltage_dq internally with HFI modulation)
-                if (motor_calib_.get_status() != MotorCalibration::Status_InductanceMeasure) {
-                    voltage_dq = Vec2D(motor_calib_.get_voltage(), 0);  // D axis injection
+                if (motor_calib_status != MotorStatus::InductanceMeasure) {
+                    voltage_dq = Vec2D(motor_calib.get_voltage(), 0);  // D axis injection
                 }
                 break;
             }
+                ///////////////////////////////////////////////////////////////////////////////
+            // CURRENT SENSOR OFFSET CALIBRATION SEQUENCE /////////////////////////////////
+            ///////////////////////////////////////////////////////////////////////////////
+            case OperationStatus::DriverCalibration:
+                // During calibration: first 50 cycles with zero PWM to ensure charge of bootstrap circuit
+                if (timeout.tick() > 0) {
+                    // Phase 1: Zero PWM for 50 cycles
+                    output.ch1 = 0;
+                    output.ch2 = 0;
+                    output.ch3 = 0;
+                    return;
+                }  // When charging complete - making all outputs high to ensure 0 current flow through low side sense
+                else if (timeout.get_timeout() == 0) {
+                    // Start calibration for all channels using feedback current sensor
+                    // Set calibration samples to 100 for feedback current sensor
+                    feedback.current.calibrate();  // Start calibration through friend access
+                    timeout.tick();
+                    // Phase 2: Max PWM during current sensor sampling
+                    output.ch1 = INT16_MAX;
+                    output.ch2 = INT16_MAX;
+                    output.ch3 = INT16_MAX;
+                    return;
+                }  // If calibration is not complete skip this turn
+                else if (!feedback.current.is_calibrated()) {
+                    return;
+                }  // If calibration complete switching to next step
+                else {
+                    // Calibration complete, update setup_status and transition to motor calibration phase
+                    setup_status.current_not_calibrated = 0;  // Clear flag (current sensors calibrated)
 
-            case DriverStatus_Ready:
-                // FOC current control with calibrated current values from feedback
-                // foc_current_control(Vec2D(0, target_current), angle, feedback_.current.norm(), voltage_ab);  // Use
-                // feedback current
+                    // Check if current sensors are functional by verifying calibration values
+                    bool sensors_ok = true;  // Assume sensors are functional
+                    // TODO: Add actual sensor health check logic here
+                    setup_status.current_sensors_faulty = sensors_ok ? 0 : 1;  // Update sensor health flag
+
+                    // Transition to motor calibration
+                    setup_status.set_driver_status(OperationStatus::Ready);
+                    start_motor_calibration();  // Start motor calibration sequence
+                }
                 break;
 
-            case DriverStatus_PlayingMelody:
-            case DriverStatus_Error:
-                // Output motor data to serial on error
-
-                // Restart calibration after error
-                switch_status(DriverStatus_Error);  // Power cant be reached
-                // start_inductance_calibration();
-                voltage_ab = Vec2D(0, 0);
-                break;
-
-            case DriverStatus_Calibrating:
             default:
-                voltage_ab = Vec2D(0, 0);
-                break;
+                output.ch1 = INT16_MIN;
+                output.ch2 = INT16_MIN;
+                output.ch3 = INT16_MIN;
+                return;
         }
-
-        //         // Step 4: Calculate current errors
-        // int16_t error_d = voltage_dq.flux - current_dq_filt.flux;      // d-axis (flux) error
-        // int16_t error_q = voltage_dq.torque - current_dq_filt.torque;  // q-axis (torque) error
-
-        // // Step 5: PI controllers for d and q axis (feedforward = 0, limit = INT16_MAX)
-        // pid_d_.tick(error_d, 0, INT16_MAX / 2);
-        // pid_q_.tick(error_q, 0, INT16_MAX / 2);
-
-        // // Step 6: Get voltage commands from PI controllers
-        // Vec2D voltage_dq(pid_d_.output(), pid_q_.output());
 
         // Step 7: Inverse Park transform - rotate DQ voltages back to AB
         voltage_dq_ = voltage_dq;
 
-        // voltage_ab = voltage_dq.rotate(angle_sincos);
         voltage_ab = voltage_dq.rotate(angle_sincos);
 
-        // converting to duty
-        voltage_ab.sin = feedback_.supply.norm2duty(voltage_ab.sin);
-        voltage_ab.cos = feedback_.supply.norm2duty(voltage_ab.cos);
+        Vec2D current_ab_filt = current_dq_filt.rotate(angle_sincos);
+
+        voltage_ab.sin = feedback.supply.norm2duty(voltage_ab.sin);
+        voltage_ab.cos = feedback.supply.norm2duty(voltage_ab.cos);
+
+        int16_t test_sin, test_sin_val, test_sincos, test_sincos_val;
+
+        int16_t dt_correction_sin = 0;
+        int16_t dt_correction_cos = 0;
+        if (compensation_current == 1) {
+            int16_t dt_correction_sincos =
+                deadtime_compensate_sqrt(current_ab_filt.cos + current_ab_filt.sin, voltage_ab.cos + voltage_ab.sin,
+                                         deadzone_sincos, i_deadband_sincos, dead_time_duty, test_sincos, test_sincos_val);
+            dt_correction_sin = deadtime_compensate_sqrt(current_ab_filt.sin, voltage_ab.sin, deadzone, i_deadband,
+                                                         dead_time_duty, test_sin, test_sin_val) +
+                                dt_correction_sincos;
+            dt_correction_cos = deadtime_compensate_sqrt(current_ab_filt.cos, voltage_ab.cos, deadzone, i_deadband,
+                                                         dead_time_duty, test_state, test_comp_val) +
+                                dt_correction_sincos;
+
+            voltage_ab.sin += dt_correction_sin;
+            voltage_ab.cos += dt_correction_cos;
+        }
+
         voltage_ab_ = voltage_ab;
 
         // Convert AB voltages to ABC phase voltages with phase remapping
-        motor_selector_.tick_voltage(voltage_ab, feedback_.supply.get_voltage_norm());
-        const int16_t* voltages = motor_selector_.get_voltages();
+        motor_selector.tick_voltage(voltage_ab, feedback.supply.get_voltage_norm());
+        const int16_t* voltages = motor_selector.get_voltages();
 
-        output[0] = voltages[0];
-        output[1] = voltages[1];
-        output[2] = voltages[2];
+        // Check for overcurrent or overvoltage errors and override PWM values
+        // OV has higher priority than OC
+        if (feedback.error.get_fatal_dc_ovlo()) {
+            // Overvoltage: Force regenerative braking (low-side ON, high-side OFF)
+            // Set all phases to 0 (negative duty = low-side active)
+            output[0] = 0;  // Phase A: regenerative braking
+            output[1] = 0;  // Phase B: regenerative braking
+            output[2] = 0;  // Phase C: regenerative braking
+        } else if (feedback.error.get_fatal_oc()) {
+            // Overcurrent: Force all outputs to Hi-Z (all FETs OFF)
+            // Set all phases to INT16_MIN (inactive state)
+            output[0] = INT16_MIN;  // Phase A: Hi-Z
+            output[1] = INT16_MIN;  // Phase B: Hi-Z
+            output[2] = INT16_MIN;  // Phase C: Hi-Z
+        } else {
+            // No error: Use normal PWM values from motor selector
+            output[0] = voltages[0];  // Phase A: normal operation
+            output[1] = voltages[1];  // Phase B: normal operation
+            output[2] = voltages[2];  // Phase C: normal operation
+        }
     }
 
-    Vec3D get_output() const { return output; }
+    /**
+     * @param current       Текущий ток (int16_t)
+     * @param threshold     Пороговое значение тока (int16_t, например 100)
+     * @param compensation  Полная величина компенсации (int16_t)
+     * @return              Скорректированная компенсация
+     */
+    int16_t deadtime_compensate_sqrt(int16_t current,
+                                     int16_t voltage,
+                                     int16_t threshold,
+                                     int16_t i_dband,
+                                     int16_t compensation,
+                                     int16_t& test_val,
+                                     int16_t& test_st) {
+        if (threshold <= 0 || compensation == 0) {
+            return 0;
+        }
+        int32_t cur = current;
+
+        int8_t current_sign = (cur >= 0) ? 1 : -1;
+        int8_t voltage_sign = (voltage >= 0) ? 1 : -1;
+
+        int32_t abs_current = cur * current_sign;
+
+        if (abs_current >= threshold) {
+            return current_sign * compensation;
+        } else if (abs_current <= i_dband) {
+            return 0;
+        } else {
+            // Переводим в float для расчета корня
+            float ratio = (float)(abs_current - i_dband) / (float)(threshold - i_dband);
+            // sqrtf() компилируется напрямую в инструкцию VSQRT.F32
+            // при правильных настройках FPU (-mfloat-abi=hard -mfpu=fpv4-sp-d16)
+            float f = sqrtf(ratio);
+            // Масштабируем и возвращаем в целые числа
+            int16_t scaled_comp = (int16_t)((float)compensation * f);
+            return current_sign * scaled_comp;
+        }
+    }
 
     void set_calibration_error() {
-        switch_status(DriverStatus_Error);
-        motor_calib_.reset_voltage();
+        setup_status.set_driver_status(OperationStatus::Error);  // Set driver status to Error
+        motor_calib_status = MotorStatus::CalibError;            // Set calibration error
+        motor.set_status(MotorStatus::CalibError);               // Update motor status
+        motor_calib.reset_voltage();
         voltage_ab_ = Vec2D(0, 0);  // Reset local debug var
     }
 
     // OPTIMIZATION: Helper for success transition - now transitions to inductance measurement
     void set_calibration_success() {
-        motor_.set_motor_type(motor_selector_.get_motor_type());        // Save detected motor type
-        motor_.set_phase_pattern(motor_selector_.get_phase_pattern());  // Save phase pattern
+        motor.set_motor_type(motor_selector.get_motor_type());        // Save detected motor type
+        motor.set_phase_pattern(motor_selector.get_phase_pattern());  // Save phase pattern
 
-        // // Transition to inductance measurement phase
-        // motor_calib_.set_status(MotorCalibration::Status_InductanceMeasure);  // Start inductance measurement
-        // timeout.set_timeout(INDUCTANCE_MEASURE_CYCLES);                       // Set timeout to 1800 cycles (100 periods @ 1kHz)
-        // motor_calib_.reset_inductance_accumulators();                         // Reset inductance accumulators
+        // Update setup_status flags after successful motor calibration
+        setup_status.motor_type_not_verified = 0;  // Clear flag (motor type verified)
 
-        // // Configure HFI generator for 1 kHz injection
-        // hfi_generator_.set_frequency_target(1000);    // Set 1 kHz carrier frequency
-        // hfi_generator_.set_amplitude(motor_calib_.get_voltage());  // Set amplitude to 25% of maximum
-        // hfi_generator_.reset();                       // Reset generator phase to zero
+        // Check voltage safety (example: voltage should be within safe range)
+        int16_t voltage_norm = feedback.supply.get_voltage_norm();
+        bool voltage_safe = (voltage_norm > 0) && (voltage_norm < INT16_MAX);  // Basic safety check
+        setup_status.voltage_unsafe = voltage_safe ? 0 : 1;                    // Update voltage safety flag
 
-        // // Reset HFI sense filters
-        // hfi_sense_a_.reset();  // Reset phase A HFI demodulator
-        // hfi_sense_b_.reset();  // Reset phase B HFI demodulator
+        // Mark motor calibration as complete (Success = 0)
+        motor_calib_status = MotorStatus::Success;  // Calibration complete
+        motor.set_status(MotorStatus::Success);     // Update motor status
 
-        // angle_ = 0;  // Set angle to 0° for D-axis injection
+        // Set driver status to Ready (bits 0-3 = 0)
+        setup_status.set_driver_status(OperationStatus::Ready);  // Driver now ready
     }
 
-    const int16_t* get_voltages() const { return motor_selector_.get_voltages(); }
+    inline void resistance_measure(Vec2D current_ab, int32_t power_norm, int32_t voltage_corrected) {
+        // First cycle: reset accumulators (counter == 100 initially)
+        if (timeout.get_timeout() == CAL_OVERSAMPLING_POW2) {                // First cycle
+            motor_calib.reset_measure_accumulators();                        // Reset all accumulators
+            TP_LOG("[CALIB] Starting resistance measurement (64 samples)");  // Log measurement start
+        }
 
-    const int16_t* get_control() const { return motor_selector_.get_voltages(); }
+        // Accumulate current samples for averaging
+        motor_calib.accumulate_measure_currents(current_ab.a,
+                                                current_ab.b);  // Add to accumulators
+                                                                // Decrement counter and check if measurement complete
+        if (timeout.tick() == 0) {                              // Counter reached 0 - 100 cycles done
+            int32_t ia = motor_calib.get_measure_current_a();
+            int32_t ib = motor_calib.get_measure_current_b();
+            // Too low power, possibly no connection OR not enough power
+            if (CAL_UNDERPOWER_LIM_NORM >= power_norm) {
+                // No connection or DC motor branch
+                if (motor_selector.get_motor_type() == MotorType_DC) {
+                    // we set ABC in else branch, so its easy way to check second entry
+                    TP_LOG("[CALIB] Error:");
+                    TP_LOG_VALS("  Current A/B (mA): ", feedback.current.norm2ma(ia), feedback.current.norm2ma(ib));
+                    TP_LOG_VAL("  Voltage (mV): ", feedback.supply.norm2mv((uint32_t)voltage_corrected));
+                    TP_LOG_VAL("  Angle: ", angle_);
+                    set_calibration_error();
+                } else if (motor.get_total_resistance() != 0) {
+                    motor_selector.set_motor_type(MotorType_DC);
+                    if (motor_selector.get_phase_pattern() == PhasePattern_ACB)
+                        motor_selector.set_phase_pattern(PhasePattern_CBA);
+                    else
+                        motor_selector.set_phase_pattern(PhasePattern_ACB);
+                    TP_LOG_VAL(" DC motor: ", motor_selector.get_phase_pattern());
+                    set_calibration_success();
+                } else {
+                    // retry because it may be DC motor
+                    motor_selector.set_motor_type(MotorType_DC);
+                    motor_calib.reset_voltage();  // Reset voltage
+                    stability_check.reset();
+                    motor_calib_status = MotorStatus::SoftWarmup;  // Restart warmup
+                    motor.set_status(MotorStatus::SoftWarmup);
+                    timeout.set_timeout(WARMUP_TIMEOUT - 1);
+                    TP_LOG("[CALIB] Warmup again");
+                    // we are far away from target power, something close to zero current
+                    // probably DC motor in different connection
+                }
+            } else {  // we have enough power
 
-    // Set maximum duty cycle limit
-    void set_duty(uint16_t duty_permille) { motor_selector_.set_duty(duty_permille); }
+                int32_t v_uv = feedback.supply.norm2mv((uint32_t)voltage_corrected) * 1000;
 
-    // Set current balance tolerance
-    void set_current_epsilon(int16_t epsilon) { motor_selector_.set_current_epsilon(epsilon); }
+                int32_t resistance_a = v_uv / feedback.current.norm2ma(ia);  // Resistance in milliohms
 
-    // Get last voltage command (for debugging)
-    Vec2D get_voltage_ab() const { return voltage_ab_; }
+                int32_t resistance_b = v_uv / feedback.current.norm2ma(ib);  // Resistance in milliohms
 
-    // Get current AB values (for debugging)
-    Vec2D get_current_ab() const { return motor_selector_.get_currents(); }
+                // Log measured currents and resistances
+                TP_LOG("[CALIB] Resistance measurement complete:");
+                TP_LOG_VALS("  Current A/B (mA): ", feedback.current.norm2ma(ia), feedback.current.norm2ma(ib));
+                TP_LOG_VALS("  Resistance A/B (mOhm): ", resistance_a, resistance_b);
+                TP_LOG_VAL("  Voltage (mV): ", feedback.supply.norm2mv((uint32_t)voltage_corrected));
+                TP_LOG_VAL("  Angle: ", angle_);
 
-    // Get normalized current values (for debugging) from feedback
-    const int16_t* get_current_normalized() const {
-        return feedback_.current.norm();  // Return normalized currents from feedback
-    }
+                if (angle_ == 16384) {
+                    if (14 * abs((2 * ia) + ib) < ((-ia * 2) + ib)) {
+                        // BLDC motor second pass: (phases equeal within ~15% from average)
+                        // if current a = sum of b and c, where ib ~= ic
+                        // Expected: iA - negative and dominant
+                        // iB - positive and equal to half of iA amplitude
+                        int32_t avg_r = (motor.get_total_resistance() + resistance_a) / 3;
+                        motor.set_total_resistance(avg_r);
 
-    // Check if current sensors are calibrated in feedback
-    bool is_current_calibrated() const {
-        return feedback_.current.is_calibrated();  // Check calibration status from feedback
-    }
+                        motor_selector.set_motor_type(MotorType_BLDC);
+                        TP_LOG("[CALIB] Motor type detected: BLDC");
+                        TP_LOG_VAL("  Average resistance (mOhm): ", avg_r);
+                        set_calibration_success();
+                    }
 
-    // Get current driver status from motor structure
-    DriverStatus get_status() const { return motor_.get_status(); }
+                    else if ((ib >> 4) > ia) {
+                        // Stepper motor second pass:
+                        // Check if iA much greater than iB
+                        // Expected: iA - negative dominant, iB close to 0 (any sign)
+                        // Resistance already calculated
+                        TP_LOG("[CALIB] Motor type detected: STEPPER");
+                        TP_LOG_VAL("  Total resistance (mOhm): ", motor.get_total_resistance());
+                        set_calibration_success();
+                    } else {
+                        TP_LOG("[CALIB] ERROR: Motor type detection failed at angle 16384");
+                        set_calibration_error();
+                    }
+                }  // Check if angle is around +225° (on second path for Stepper or DC motors)
+                else if (angle_ == -24576) {
+                    // Check if b and c are balanced (~15% from average)
+                    if (10 * abs(ib - ia) < (-ia - ib)) {
+                        // Stepper motor
 
-    // Manually start current calibration in feedback
-    void start_current_calibration() {
-        switch_status(DriverStatus_CalibrateCurrent);  // Update motor status
-        timeout.set_timeout(CALIBRATION_ZERO_CYCLES);
-        feedback_.current.calibrate();  // Start calibration through friend access
-    }
+                        int32_t avg_r = -(resistance_a + resistance_b) / 2;
+                        motor.set_total_resistance(avg_r);
+                        TP_LOG("[CALIB] Motor type detected: STEPPER (balanced phases)");
+                        TP_LOG_VAL("  Average resistance (mOhm): ", avg_r);
+                        set_calibration_success();
+                    } else {
+                        TP_LOG("[CALIB] ERROR: Motor type detection failed at angle -24576");
+                        set_calibration_error();
+                    }
+                } else if (angle_ == CAL_ANGLE_45D) {
+                    timeout.set_timeout(1800);  // Set counter to cycles
+                    if (10 * abs(ib - ia) < (ia + ib)) {
+                        // Stepper motor or BLDC first pass where phases are balanced (~15% from average)
+                        motor.set_total_resistance((resistance_a + resistance_b) / 2);
 
-    // Configure number of calibration samples in feedback
-    void set_current_calibration_samples(int32_t n) {
-        feedback_.current.set_calibration_samples(n);  // Configure samples through friend access
-    }
+                        TP_LOG("[CALIB] Phases balanced - preparing rotation for motor type verification");
+                        TP_LOG_VAL("  Temporary resistance (mOhm): ", motor.get_total_resistance());
 
-    /// Get current rotor angle (Q15 format, -32768 to 32767 = -π to π)
-    int16_t get_angle() const { return angle_; }
+                        // Rotate angle by 30° slowly to verify
+                        motor_calib.start_slow_rotation(16384, power);   // Target: current + 30°
+                        motor_calib_status = MotorStatus::SlowRotation;  // Set slow rotation status
+                        motor.set_status(MotorStatus::SlowRotation);
+                        // set_calibration_success(); // TODO: REMOVE
+                    }  // Check if angle is around 90° (angle woks on second pass for BLDC and stepper in correct
+                       // phase)
+                    else {
+                        motor_calib.set_voltage((int16_t)voltage_corrected);
+                        motor_calib.start_slow_rotation(-24576, power);
+                        motor_calib_status = MotorStatus::SlowRotation;  // Set slow rotation status
+                        motor.set_status(MotorStatus::SlowRotation);
+                        if (motor_selector.get_motor_type() == MotorType_DC) {
+                            // DC motor branch - connection ABC
+                            motor.set_total_resistance(-resistance_a);
+                            TP_LOG("[CALIB] Motor type detected: DC (ABC connection)");
+                            TP_LOG_VAL("  Resistance (mOhm): ", -resistance_a);
+                            set_calibration_success();
+                        } else if ((ia >> 2) >= ib) {
+                            // motor type - Stepper or DC
+                            // If next time we hit underpower (shouldnt happen for Stepper - then we go to DC
+                            // motor)
+                            motor.set_total_resistance(resistance_a);
+                            TP_LOG("[CALIB] Phase B dominant - setting CBA pattern and rotating");
+                            angle_ = PhasePattern_CBA;
+                            motor_selector.set_phase_pattern(PhasePattern_CBA);
 
-private:
-    /// Switch driver status and save previous state (inline for performance)
-    /// @param new_status New driver status to transition to
-    inline void switch_status(DriverStatus new_status) {
-        motor_.set_status(new_status);  // Set new status
+                        } else if ((ib >> 2) >= ia) {
+                            TP_LOG("[CALIB] Phase C dominant - setting ACB pattern and rotating");
+                            // If next time we hit underpower (shouldnt happen for Stepper - then we go to DC
+                            // motor)
+                            motor.set_total_resistance(resistance_b);
+                            motor_selector.set_phase_pattern(PhasePattern_ACB);
+                            angle_ = PhasePattern_ACB;
+                            // Phase C dominant: motor type - Stepper or DC
+                            // Set counter to cycles
+
+                        } else {
+                            TP_LOG("[CALIB] ERROR: Excessive deviation - unknown motor type - wrong 1st loop");
+                            set_calibration_error();  // motor looks so strange
+                        }
+                    }
+                } else {
+                    TP_LOG("[CALIB] ERROR: Excessive deviation - unknown motor type1");
+                    set_calibration_error();  // motor looks so strange
+                }
+            }
+        }
     }
 };

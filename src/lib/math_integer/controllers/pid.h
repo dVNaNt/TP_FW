@@ -70,7 +70,7 @@ public:
         integral_ += (error_i32 + previous_error_) >> 1;       // Average of current and previous error
 
         // Clamp integral with anti-windup to prevent saturation
-        integral_ = clamp_i32(integral_, limit_i32); // Limit integral accumulation
+        integral_ = clamp_i32(integral_, (limit_i32 << 7) / ki_); // Limit integral accumulation
 
         // Calculate integral term
         int32_t i = FAST_MATH 

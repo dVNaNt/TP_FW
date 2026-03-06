@@ -41,6 +41,7 @@ The firmware is built using a modular, header-only library architecture for maxi
 
 ### Available Environments
 
+- `cln17_v3_release` - CLN17 V3 release (default)
 - `radix_release` - Radix board
 
 ### Build Flags
@@ -54,22 +55,22 @@ The firmware is built using a modular, header-only library architecture for maxi
 
 ### Build
 ```bash
-python -m platformio run -e radix_release
+python -m platformio run -e cln17_v3_release
 ```
 
 ### Upload
 ```bash
-python -m platformio run -e radix_release -t upload
+python -m platformio run -e cln17_v3_release -t upload
 ```
 
 ### Clean Build
 ```bash
-python -m platformio run -e radix_release -t clean
+python -m platformio run -e cln17_v3_release -t clean
 ```
 
 ### Check Size
 ```bash
-python -m platformio run -e radix_release
+python -m platformio run -e cln17_v3_release
 ```
 And see output log for details. Example
 RAM:   [==        ]  x% (used x bytes from 32768 bytes)
@@ -77,13 +78,14 @@ Flash: [====      ]  x% (used x bytes from 131072 bytes)
 
 ### Debug
 ```bash
-python -m platformio debug -e radix_release
+python -m platformio debug -e cln17_v3_release
 ```
 
 ## Upload Protocols
 
 - **ST-Link**: Default, requires ST-Link programmer
 - **LOGGING**: SerialUSB everywhere if serial/USB requested
+  - For any SerialUSB log use macross: TP_LOG(msg), TP_LOG_VAL(msg, val), TP_LOG_ARRAY(msg, arr), TP_LOG_VALS(msg, ...)
 
 
 ## Development Guidelines
@@ -174,6 +176,7 @@ Example:
 - Mark member functions as `const` when they don't modify state
 - Use `constexpr` for compile-time constants and functions
 - DO NOT create getters and setters if not asked directly
+- Group methods by functional meaning (e.g. getters/setters for same variable should be close)
 
 ### Code Comments Best Practices
 - **Inline comments**: Explain what the line does

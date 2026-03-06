@@ -1,29 +1,14 @@
 #pragma once
 
 // Common includes for the translated TunePulse algo headers.
-#include <stdint.h>
 #include <limits.h>
-#include <stdlib.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "vectors.h"
+#include <stdint.h>
+#include <stdlib.h>
+#include <cmath>
+#include <atomic>  // C++ atomic operations support
 
-#include "motor_driver/types.h"
-
-// Stub macros for logging that mirror the defmt_rtt usage in the original Rust code.
-// Projects can redefine these before including the migration headers to hook into
-// a concrete logging implementation.
-#ifndef TUNEPULSE_LOG_INFO
-#define TUNEPULSE_LOG_INFO(fmt, ...) ((void)0)
-#endif
-
-#ifndef TUNEPULSE_LOG_WARN
-#define TUNEPULSE_LOG_WARN(fmt, ...) ((void)0)
-#endif
-
-#ifndef TUNEPULSE_LOG_ERROR
-#define TUNEPULSE_LOG_ERROR(fmt, ...) ((void)0)
-#endif
 
 // Utility clamp helper used across several headers.
 // Must be declared before including headers that use it.
@@ -37,14 +22,29 @@ static inline int32_t clamp_i32(int32_t value, int32_t limit) {
     return value;
 }
 
+enum Channel : uint8_t {
+    CH1 = 0,  // Channel 1 (array index 0)
+    CH2 = 1,  // Channel 2 (array index 1)
+    CH3 = 2   // Channel 3 (array index 2)
+};
+
+inline int16_t fast_sign_int(int32_t val) {
+    return (val >> 31) | 1; 
+    // Returns -1 for negative values and 1 for 0 and positive values.
+    // Zero is considered positive.
+}
+
+// SerialUSB Logging utill
+#include "dev_log.h"
 
 // Include headers that depend on the utility functions above
 #include "math_integer/controllers/pid.h"
-#include "math_integer/filters/filter1st.h"
+#include "math_integer/controllers/pid_f.h"
+#include "math_integer/filters/ema.h"
+#include "math_integer/filters/median3.h"
 #include "math_integer/helpers/stability_check.h"
-
-
-
+#include "motor_driver/types.h"
+#include "vectors.h"
 
 
 /// Frequency configuration structure
@@ -59,31 +59,22 @@ public:
     /// Constructor with default values
     /// @param freq_core Core frequency in Hz (default: 170000000 = 170 MHz for STM32G4)
     /// @param freq_pwm PWM frequency in Hz (default: 20000 = 20 kHz)
-    Frequency(int32_t freq_core = 170000000, int32_t freq_pwm = 18000)
-        : frequency_core_(freq_core)
-        , frequency_pwm_(freq_pwm)
-        , period_pwm_(0)
-    {
+    Frequency(int32_t freq_core = 170000000, int32_t freq_pwm = 20000)
+        : frequency_core_(freq_core), frequency_pwm_(freq_pwm), period_pwm_(0) {
         calculate_period();
     }
 
     /// Get core frequency in Hz
     /// @return Core frequency
-    inline int32_t get_frequency_core() const {
-        return frequency_core_;
-    }
+    inline int32_t get_frequency_core() const { return frequency_core_; }
 
     /// Get PWM frequency in Hz
     /// @return PWM frequency
-    inline int32_t get_frequency_pwm() const {
-        return frequency_pwm_;
-    }
+    inline int32_t get_frequency_pwm() const { return frequency_pwm_; }
 
     /// Get PWM period (timer ticks per PWM cycle)
     /// @return PWM period
-    inline int32_t get_period_pwm() const {
-        return period_pwm_;
-    }
+    inline int32_t get_period_pwm() const { return period_pwm_; }
 
     /// Set core frequency and recalculate period
     /// @param freq_core Core frequency in Hz
@@ -110,5 +101,3 @@ private:
         }
     }
 };
-
-
