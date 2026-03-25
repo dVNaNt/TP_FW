@@ -15,7 +15,7 @@
 #include "error.h"  // Include error manager (must be before supply_voltage and current_sense)
 #include "analog/supply_voltage.h"  // Include supply voltage sensing
 #include "analog/current_sense.h"  // Include current sensing
-#include "position/position_integrator.h"  // Include position/encoder tracking
+#include "position.h"  // Include position/encoder tracking
 #include "position/speed_estimator.h"  // Include position/encoder tracking
 #include "analog/power.h"
 
@@ -31,6 +31,9 @@ public:
     CurrentSense current;  // 3-channel current sensing with calibration
     Position position;  // Encoder position tracking and integration
     PowerMonitor power;
+    SpeedEstimator speed;
+
+    // SpeedEstimator speed;
     
 private:
     // Make tick() methods of internal structures accessible only to Feedback
@@ -43,6 +46,9 @@ private:
     DataInputs data_;  // Private copy of latest sensor data for external access
     uint32_t enabled_modules_;  // Bitmask of enabled modules for conditional tick execution
 
+    // Frequency monitoring variables
+    uint32_t tick_counter_;  // Counter for tick() calls
+    uint32_t last_report_time_us_;  // Last time frequency was reported (in microseconds)
     
     
 public:
@@ -56,10 +62,14 @@ public:
           inputs(0),  // Initialize inputs dump with mandatory fields using constructor
           supply(50, supply_max_mv, error),  // Initialize supply voltage sensor with error manager reference
           current(current_ch1_fs_ma, current_ch2_fs_ma, current_ch3_fs_ma, error),  // Initialize current sensors with error manager reference
-          position(),  // Initialize position integrator with default constructor
+          position(200.0, 20000),  // Initialize position integrator with default constructor
           data_(),  // Initialize data copy with default constructor
           enabled_modules_(0),  // Initialize enabled modules from mandatory fields
-          power(current.full_scale_max_ma, supply_max_mv)
+          power(current.full_scale_max_ma, supply_max_mv),
+          speed(20000),
+          tick_counter_(0),  // Initialize tick counter to zero
+          last_report_time_us_(0)  // Initialize last report time to zero
+          
     {
     }
 
@@ -96,15 +106,38 @@ public:
     const DataInputs& get_data() const {  // Return const reference to avoid copying
         return data_;  // Return private data copy
     }
-    
+    uint32_t tick1 = 0;
     // Main processing function: Update all feedback components with new sensor data
     // This is the only method that calls tick() on internal structures
     // Only processes modules that are enabled via enable_* functions
-    void tick() {  // Main processing function called each cycle to update all sensors
-        if (!inputs.is_updated()) {  // Use private method through friend access
-            return;  // Exit if no new data
+    // Monitors actual tick() call frequency and reports every 5 seconds
+    bool tick() {  // Main processing function called each cycle to update all sensors
+        // Increment tick counter for frequency monitoring
+        tick_counter_++;
+        
+        // Check if 5 seconds have passed since last report (5,000,000 microseconds)
+        uint32_t current_time_us = micros();  // Get current time in microseconds
+        uint32_t elapsed_us = current_time_us - last_report_time_us_;  // Calculate elapsed time
+        
+        // Report frequency every 5 seconds (5,000,000 microseconds)
+        if (elapsed_us >= 5000000) {  // Check if 5 seconds elapsed
+            // Calculate actual frequency: ticks / seconds
+            float actual_frequency_hz = (float)tick_counter_ / (elapsed_us / 1000000.0f);  // Convert microseconds to seconds
+            float actual_frequency1_hz = (float)tick1 / (elapsed_us / 1000000.0f);  // Convert microseconds to seconds
+            // Log the actual tick frequency
+            TP_LOG_VALS("Feedback F (Hz):", (int32_t)actual_frequency_hz,(int32_t)actual_frequency1_hz);
+            
+            // Reset counters for next measurement period
+            tick_counter_ = 0;  // Reset tick counter
+            tick1 = 0;
+            last_report_time_us_ = current_time_us;  // Update last report time
         }
         
+        if (!inputs.is_updated()) {  // Use private method through friend access
+            return false;  // Exit if no new data
+        }
+        
+        tick1++;
         // Get latest complete sensor data from inputs dump and store in private copy
         data_ = inputs.get_data();  // Use private method through friend access and store in member
         
@@ -118,10 +151,12 @@ public:
             current.tick(data_.currnt_adc);  // Process current ADC array
         }
         
-        // Update position integrator only if enabled
-        if (enabled_modules_ & (uint32_t)DataInputsBit_ANGLE) {  // Check if ANGLE bit is set
-            position.tick(data_.angle_raw);  // Process encoder angle value using member function
-        }
+        // // Update position integrator only if enabled
+        // if (enabled_modules_ & (uint32_t)DataInputsBit_ANGLE) {  // Check if ANGLE bit is set
+        //     position.tick(data_.angle_raw);  // Process encoder angle value using member function
+        //     speed.tick(position.get_raw_position());
+        // }
+        return true;
     }
     
 };  // End of Feedback structure definition

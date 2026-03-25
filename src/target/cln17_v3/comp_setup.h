@@ -70,311 +70,93 @@ void COMP_Set_OV_Protection_State(void);
 void COMP_Clear_OC_Protection_State(void);
 void COMP_Clear_OV_Protection_State(void);
 
-/**
- * @brief Initialize DAC1 for overcurrent comparator thresholds
- * DAC1_CH1: COMP1 threshold (Phase B overcurrent on PA1)
- * DAC1_CH2: COMP2 threshold (Phase A overcurrent on PA3)
- */
-static inline void MX_DAC1_Init(void) {
-    // Enable DAC1 clock using HAL macro
-    __HAL_RCC_DAC1_CLK_ENABLE();
+static inline void MX_DAC1_Init(void) {         // Begin function to initialize DAC1 peripheral
+    RCC->AHB2ENR |= RCC_AHB2ENR_DAC1EN;         // Enable DAC1 clock on the AHB2 bus via RCC register
+    (void)(RCC->AHB2ENR & RCC_AHB2ENR_DAC1EN);  // Dummy read to ensure clock is fully propagated before access
 
-    // Wait for clock to stabilize
-    volatile uint32_t wait = 1000;
-    while (wait--) {
-        __NOP();
-    }
+    // Configure both channels: Mode 3 (internal connect, buffer OFF)
+    DAC1->MCR = (3UL << DAC_MCR_MODE1_Pos) | (3UL << DAC_MCR_MODE2_Pos);
 
-    // Configure DAC1 Channel 1 (COMP1 threshold for Phase B)
-    LL_DAC_SetMode(DAC1, LL_DAC_CHANNEL_1, LL_DAC_MODE_NORMAL_OPERATION);
-    LL_DAC_SetOutputBuffer(DAC1, LL_DAC_CHANNEL_1, LL_DAC_OUTPUT_BUFFER_DISABLE);        // Internal connection only
-    LL_DAC_SetOutputConnection(DAC1, LL_DAC_CHANNEL_1, LL_DAC_OUTPUT_CONNECT_INTERNAL);  // Connect to COMP
-    LL_DAC_Enable(DAC1, LL_DAC_CHANNEL_1);                                               // Enable channel 1
+    DAC1->CR |= DAC_CR_EN1 | DAC_CR_EN2;  // Enable DAC1 Channel 1 and Channel 2 simultaneously
 
-    // Wait for DAC channel to stabilize
-    wait = 1000;
-    while (wait--) {
-        __NOP();
-    }
+    // Wait until both hardware ready flags are set
+    while ((DAC1->SR & (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY)) != (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY))
+        __NOP();  // Prevent compiler optimization of the loop while waiting for hardware stabilization
 
-    // Configure DAC1 Channel 2 (COMP2 threshold for Phase A)
-    LL_DAC_SetMode(DAC1, LL_DAC_CHANNEL_2, LL_DAC_MODE_NORMAL_OPERATION);
-    LL_DAC_SetOutputBuffer(DAC1, LL_DAC_CHANNEL_2, LL_DAC_OUTPUT_BUFFER_DISABLE);        // Internal connection only
-    LL_DAC_SetOutputConnection(DAC1, LL_DAC_CHANNEL_2, LL_DAC_OUTPUT_CONNECT_INTERNAL);  // Connect to COMP
-    LL_DAC_Enable(DAC1, LL_DAC_CHANNEL_2);                                               // Enable channel 2
+    DAC1->DHR12R1 = 0U;  // Set initial mid-scale/default value to Channel 1 data register
+    DAC1->DHR12R2 = 0U;  // Set initial mid-scale/default value to Channel 2 data register
+}  // End of MX_DAC1_Init function
 
-    // Wait for DAC channel to stabilize
-    wait = 1000;
-    while (wait--) {
-        __NOP();
-    }
+static inline void MX_DAC3_Init(void) {         // Begin function to initialize DAC3 peripheral
+    RCC->AHB2ENR |= RCC_AHB2ENR_DAC3EN;         // Enable DAC3 clock on the AHB2 bus via RCC register
+    (void)(RCC->AHB2ENR & RCC_AHB2ENR_DAC3EN);  // Dummy read to guarantee bus clock synchronization
 
-    // Set default threshold values (will be updated by current sense callbacks)
-    LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, 0);  // Mid-scale default
-    LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_2, 0);  // Mid-scale default
+    // Set both channels to Mode 3: buffer disabled, internal peripheral connection
+    DAC3->MCR = (3UL << DAC_MCR_MODE1_Pos) | (3UL << DAC_MCR_MODE2_Pos);
+    DAC3->CR |= DAC_CR_EN1 | DAC_CR_EN2;  // Turn on both DAC3 channels at the same time
 
-    // Wait for DAC to settle
-    wait = 1000;
-    while (wait--) {
-        __NOP();
-    }
-}
+    // Poll status register for wake-up completion
+    while ((DAC3->SR & (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY)) != (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY))
+        __NOP();  // Execute no-operation instruction to save power during short hardware spinlock
 
-/**
- * @brief Initialize DAC3 for overvoltage and overcurrent comparator thresholds
- * DAC3_CH1: COMP3 threshold (Overvoltage on PA0)
- * DAC3_CH2: COMP4 threshold (Phase C overcurrent on PB0)
- */
-static inline void MX_DAC3_Init(void) {
-    // Enable DAC3 clock using HAL macro
-    __HAL_RCC_DAC3_CLK_ENABLE();
+    DAC3->DHR12R1 = 1024U;  // Apply default startup threshold for overvoltage protection to Channel 1
+    DAC3->DHR12R2 = 0U;     // Apply default startup threshold for overcurrent to Channel 2
+}  // End of MX_DAC3_Init function
 
-    // Wait for clock to stabilize
-    volatile uint32_t wait = 1000;
-    while (wait--) {
-        __NOP();
-    }
+void DAC_Set_COMP2_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase A overcurrent threshold
+    DAC1->DHR12R2 =
+        (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC1 CH2 register
+}  // End of DAC_Set_COMP2_OC_Threshold function
 
-    // Configure DAC3 Channel 1 (COMP3 threshold for overvoltage)
-    LL_DAC_SetMode(DAC3, LL_DAC_CHANNEL_1, LL_DAC_MODE_NORMAL_OPERATION);
-    LL_DAC_SetOutputBuffer(DAC3, LL_DAC_CHANNEL_1, LL_DAC_OUTPUT_BUFFER_DISABLE);        // Internal connection only
-    LL_DAC_SetOutputConnection(DAC3, LL_DAC_CHANNEL_1, LL_DAC_OUTPUT_CONNECT_INTERNAL);  // Connect to COMP
-    LL_DAC_Enable(DAC3, LL_DAC_CHANNEL_1);                                               // Enable channel 1
+void DAC_Set_COMP1_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase B overcurrent threshold
+    DAC1->DHR12R1 =
+        (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC1 CH1 register
+}  // End of DAC_Set_COMP1_OC_Threshold function
 
-    // Wait for DAC channel to stabilize
-    wait = 1000;
-    while (wait--) {
-        __NOP();
-    }
+void DAC_Set_COMP4_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase C overcurrent threshold
+    DAC3->DHR12R2 =
+        (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC3 CH2 register
+}  // End of DAC_Set_COMP4_OC_Threshold function
 
-    // Configure DAC3 Channel 2 (COMP4 threshold for Phase C overcurrent)
-    LL_DAC_SetMode(DAC3, LL_DAC_CHANNEL_2, LL_DAC_MODE_NORMAL_OPERATION);
-    LL_DAC_SetOutputBuffer(DAC3, LL_DAC_CHANNEL_2, LL_DAC_OUTPUT_BUFFER_DISABLE);        // Internal connection only
-    LL_DAC_SetOutputConnection(DAC3, LL_DAC_CHANNEL_2, LL_DAC_OUTPUT_CONNECT_INTERNAL);  // Connect to COMP
-    LL_DAC_Enable(DAC3, LL_DAC_CHANNEL_2);                                               // Enable channel 2
+void DAC_Set_COMP3_OV_Threshold(
+    uint16_t threshold) {                           // Function to dynamically update overvoltage threshold without blocking code
+    if ((DAC3->CR & DAC_CR_EN1) != 0U) {            // Safely verify that DAC3 Channel 1 is actually enabled to prevent hardfaults
+        DAC3->DHR12R1 = (threshold >> 4) & 0x0FFF;  // Perform 16-to-12-bit downscaling safely and update threshold register
+    }  // End of hardware enable check condition
+}  // End of DAC_Set_COMP3_OV_Threshold function
 
-    // Wait for DAC channel to stabilize
-    wait = 1000;
-    while (wait--) {
-        __NOP();
-    }
+static inline void MX_COMPS_INIT(void) {          // Begin function to initialize all four analog comparators simultaneously
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;         // Enable peripheral clock for SYSCFG bus which contains the comparators
+    (void)(RCC->APB2ENR & RCC_APB2ENR_SYSCFGEN);  // Perform a dummy read to ensure AHB/APB bridge clock synchronization
 
-    // Set default threshold values (will be updated by callbacks)
-    LL_DAC_ConvertData12RightAligned(DAC3, LL_DAC_CHANNEL_1, 1024);  // Mid-scale default
-    LL_DAC_ConvertData12RightAligned(DAC3, LL_DAC_CHANNEL_2, 0);     // Mid-scale default
+    COMP1->CSR = 0UL;  // Force disable COMP1 and clear all previous register states to ensure hardware safety
+    COMP2->CSR = 0UL;  // Force disable COMP2 and clear all previous register states to ensure hardware safety
+    COMP3->CSR = 0UL;  // Force disable COMP3 and clear all previous register states to ensure hardware safety
+    COMP4->CSR = 0UL;  // Force disable COMP4 and clear all previous register states to ensure hardware safety
 
-    // Wait for DAC to settle
-    wait = 1000;
-    while (wait--) {
-        __NOP();
-    }
-}
+    // Apply Phase B overcurrent config: PA1 input, DAC1_CH1 ref, inverted
+    COMP1->CSR = LL_COMP_INPUT_PLUS_IO1 | LL_COMP_INPUT_MINUS_DAC1_CH1 | LL_COMP_HYSTERESIS_MEDIUM | LL_COMP_OUTPUTPOL_INVERTED |
+                 LL_COMP_BLANKINGSRC_NONE;
+    // Apply Phase A overcurrent config: PA3 input, DAC1_CH2 ref, inverted
+    COMP2->CSR = LL_COMP_INPUT_PLUS_IO2 | LL_COMP_INPUT_MINUS_DAC1_CH2 | LL_COMP_HYSTERESIS_MEDIUM | LL_COMP_OUTPUTPOL_INVERTED |
+                 LL_COMP_BLANKINGSRC_NONE;
+    // Apply Overvoltage config: PA0 input, DAC3_CH1 ref, non-inverted
+    COMP3->CSR = LL_COMP_INPUT_PLUS_IO1 | LL_COMP_INPUT_MINUS_DAC3_CH1 | LL_COMP_HYSTERESIS_MEDIUM |
+                 LL_COMP_OUTPUTPOL_NONINVERTED | LL_COMP_BLANKINGSRC_NONE;
+    // Apply Phase C overcurrent config: PB0 input, DAC3_CH2 ref, inverted
+    COMP4->CSR = LL_COMP_INPUT_PLUS_IO1 | LL_COMP_INPUT_MINUS_DAC3_CH2 | LL_COMP_HYSTERESIS_MEDIUM | LL_COMP_OUTPUTPOL_INVERTED |
+                 LL_COMP_BLANKINGSRC_NONE;
 
-/**
- * @brief DAC callback for Phase A overcurrent threshold (COMP2)
- * Called by CurrentSense when overcurrent limit is updated
- * @param threshold ADC threshold value (0-4095, 12-bit)
- */
-void DAC_Set_COMP2_OC_Threshold(uint16_t threshold) {
-    LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_2, threshold >> 4);  // Update DAC1_CH2 for COMP2
-}
+    COMP1->CSR |= COMP_CSR_EN;  // Safely set the enable bit for COMP1 only after the configuration is fully applied
+    COMP2->CSR |= COMP_CSR_EN;  // Safely set the enable bit for COMP2 only after the configuration is fully applied
+    COMP3->CSR |= COMP_CSR_EN;  // Safely set the enable bit for COMP3 only after the configuration is fully applied
+    COMP4->CSR |= COMP_CSR_EN;  // Safely set the enable bit for COMP4 only after the configuration is fully applied
 
-/**
- * @brief DAC callback for Phase B overcurrent threshold (COMP1)
- * Called by CurrentSense when overcurrent limit is updated
- * @param threshold ADC threshold value (0-4095, 12-bit)
- */
-void DAC_Set_COMP1_OC_Threshold(uint16_t threshold) {
-    LL_DAC_ConvertData12RightAligned(DAC1, LL_DAC_CHANNEL_1, threshold >> 4);  // Update DAC1_CH1 for COMP1
-}
-
-/**
- * @brief DAC callback for Phase C overcurrent threshold (COMP4)
- * Called by CurrentSense when overcurrent limit is updated
- * @param threshold ADC threshold value (0-4095, 12-bit)
- */
-void DAC_Set_COMP4_OC_Threshold(uint16_t threshold) {
-    LL_DAC_ConvertData12RightAligned(DAC3, LL_DAC_CHANNEL_2, threshold >> 4);  // Update DAC3_CH2 for COMP4
-}
-
-/**
- * @brief DAC callback for overvoltage threshold (COMP3)
- * Called by SupplyVoltage when overvoltage limit is updated
- * @param threshold ADC threshold value (0-65535, 16-bit scaled to 12-bit)
- */
-void DAC_Set_COMP3_OV_Threshold(uint16_t threshold) {
-    SerialUSB.print("   [DEBUG] DAC_Set_COMP3_OV_Threshold called with threshold=");
-    SerialUSB.println(threshold);
-    SerialUSB.flush();
-
-    // Convert 16-bit ADC value to 12-bit DAC value (right shift by 4)
-    uint16_t dac_value = threshold >> 4;  // Scale from 16-bit to 12-bit
-
-    SerialUSB.print("   [DEBUG] dac_value (12-bit)=");
-    SerialUSB.println(dac_value);
-    SerialUSB.flush();
-
-    // Check if DAC3 is enabled before writing
-    if (!LL_DAC_IsEnabled(DAC3, LL_DAC_CHANNEL_1)) {
-        SerialUSB.println("   [ERROR] DAC3_CH1 is not enabled!");
-        SerialUSB.flush();
-        return;
-    }
-
-    SerialUSB.println("   [DEBUG] DAC3_CH1 is enabled, writing value...");
-    SerialUSB.flush();
-
-    // Use software trigger to update DAC value safely
-    LL_DAC_ConvertData12RightAligned(DAC3, LL_DAC_CHANNEL_1, dac_value);  // Update DAC3_CH1 for COMP3
-
-    // Wait for DAC to settle
-    volatile uint32_t wait = 100;
-    while (wait--) {
-        __NOP();
-    }
-
-    SerialUSB.println("   [DEBUG] DAC3_CH1 updated successfully");
-    SerialUSB.flush();
-}
-
-/**
- * @brief Initialize COMP1 for Phase B overcurrent detection
- * INP: PA1 (I_B current sense)
- * INM: DAC1_CH1 (threshold reference)
- */
-static inline void MX_COMP1_Init(void) {
-    // Enable SYSCFG clock (contains COMP peripheral)
-    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
-
-    // Disable COMP1 before configuration
-    LL_COMP_Disable(COMP1);
-
-    // Set input plus to PA1 (IO1 for COMP1)
-    LL_COMP_SetInputPlus(COMP1, LL_COMP_INPUT_PLUS_IO1);
-
-    // Set input minus to DAC1_CH1
-    LL_COMP_SetInputMinus(COMP1, LL_COMP_INPUT_MINUS_DAC1_CH1);
-
-    // Set hysteresis for noise immunity
-    LL_COMP_SetInputHysteresis(COMP1, LL_COMP_HYSTERESIS_MEDIUM);
-
-    // Output polarity: non-inverted (high when INP > INM)
-    LL_COMP_SetOutputPolarity(COMP1, LL_COMP_OUTPUTPOL_INVERTED);
-
-    // Blanking source: none
-    LL_COMP_SetOutputBlankingSource(COMP1, LL_COMP_BLANKINGSRC_NONE);
-
-    // Enable COMP1
-    LL_COMP_Enable(COMP1);
-
-    // Wait for COMP1 startup time (~10us)
-    volatile uint32_t wait = 200;
-    while (wait--) {
-        __NOP();
-    }
-}
-
-/**
- * @brief Initialize COMP2 for Phase A overcurrent detection
- * INP: PA3 (I_A current sense)
- * INM: DAC1_CH2 (threshold reference)
- */
-static inline void MX_COMP2_Init(void) {
-    // Disable COMP2 before configuration
-    LL_COMP_Disable(COMP2);
-
-    // Set input plus to PA3 (IO2 for COMP2)
-    LL_COMP_SetInputPlus(COMP2, LL_COMP_INPUT_PLUS_IO2);
-
-    // Set input minus to DAC1_CH2
-    LL_COMP_SetInputMinus(COMP2, LL_COMP_INPUT_MINUS_DAC1_CH2);
-
-    // Set hysteresis for noise immunity
-    LL_COMP_SetInputHysteresis(COMP2, LL_COMP_HYSTERESIS_MEDIUM);
-
-    // Output polarity: non-inverted (high when INP > INM)
-    LL_COMP_SetOutputPolarity(COMP2, LL_COMP_OUTPUTPOL_INVERTED);
-
-    // Blanking source: none
-    LL_COMP_SetOutputBlankingSource(COMP2, LL_COMP_BLANKINGSRC_NONE);
-
-    // Enable COMP2
-    LL_COMP_Enable(COMP2);
-
-    // Wait for COMP2 startup time (~10us)
-    volatile uint32_t wait = 200;
-    while (wait--) {
-        __NOP();
-    }
-}
-
-/**
- * @brief Initialize COMP3 for overvoltage detection
- * INP: PA0 (VSENS voltage sense)
- * INM: DAC3_CH1 (threshold reference)
- */
-static inline void MX_COMP3_Init(void) {
-    // Disable COMP3 before configuration
-    LL_COMP_Disable(COMP3);
-
-    // Set input plus to PA0 (IO1 for COMP3)
-    LL_COMP_SetInputPlus(COMP3, LL_COMP_INPUT_PLUS_IO1);
-
-    // Set input minus to DAC3_CH1
-    LL_COMP_SetInputMinus(COMP3, LL_COMP_INPUT_MINUS_DAC3_CH1);
-
-    // Set hysteresis for noise immunity
-    LL_COMP_SetInputHysteresis(COMP3, LL_COMP_HYSTERESIS_MEDIUM);
-
-    // Output polarity: non-inverted (high when INP > INM)
-    LL_COMP_SetOutputPolarity(COMP3, LL_COMP_OUTPUTPOL_NONINVERTED);
-
-    // Blanking source: none
-    LL_COMP_SetOutputBlankingSource(COMP3, LL_COMP_BLANKINGSRC_NONE);
-
-    // Enable COMP3
-    LL_COMP_Enable(COMP3);
-
-    // Wait for COMP3 startup time (~10us)
-    volatile uint32_t wait = 200;
-    while (wait--) {
-        __NOP();
-    }
-}
-
-/**
- * @brief Initialize COMP4 for Phase C overcurrent detection
- * INP: PB0 (I_C current sense)
- * INM: DAC3_CH2 (threshold reference)
- */
-static inline void MX_COMP4_Init(void) {
-    // Disable COMP4 before configuration
-    LL_COMP_Disable(COMP4);
-
-    // Set input plus to PB0 (IO1 for COMP4)
-    LL_COMP_SetInputPlus(COMP4, LL_COMP_INPUT_PLUS_IO1);
-
-    // Set input minus to DAC3_CH2
-    LL_COMP_SetInputMinus(COMP4, LL_COMP_INPUT_MINUS_DAC3_CH2);
-
-    // Set hysteresis for noise immunity
-    LL_COMP_SetInputHysteresis(COMP4, LL_COMP_HYSTERESIS_MEDIUM);
-
-    // Output polarity: non-inverted (high when INP > INM)
-    LL_COMP_SetOutputPolarity(COMP4, LL_COMP_OUTPUTPOL_INVERTED);
-
-    // Blanking source: none
-    LL_COMP_SetOutputBlankingSource(COMP4, LL_COMP_BLANKINGSRC_NONE);
-
-    // Enable COMP4
-    LL_COMP_Enable(COMP4);
-
-    // Wait for COMP4 startup time (~10us)
-    volatile uint32_t wait = 200;
-    while (wait--) {
-        __NOP();
-    }
-}
+    volatile uint32_t wait = 1000;  // Initialize a volatile delay variable to wait for analog comparator startup time
+    while (wait--) {                // Loop continuously until the countdown reaches zero
+        __NOP();  // Execute hardware no-operation to prevent compiler from optimizing out the 10 microsecond delay
+    }  // End of analog stabilization delay loop
+}  // End of MX_COMPS_INIT function
 
 /**
  * @brief Initialize GPIO PB10 (DRV_FAULT) with pullup for external fault detection
@@ -430,15 +212,15 @@ static inline void COMP_EXTI_Init(void) {
     LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_22);    // Rising edge trigger (fault)
     LL_EXTI_DisableFallingTrig_0_31(LL_EXTI_LINE_22);  // Falling edge trigger (clear)
 
-    // Enable EXTI line 29 (COMP3) - both edges
-    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_29);           // Unmask interrupt
-    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_29);   // Rising edge trigger (fault)
-    LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_29);  // Falling edge trigger (clear)
-
     // Enable EXTI line 30 (COMP4) - both edges
     LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_30);            // Unmask interrupt
     LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_30);    // Rising edge trigger (fault)
     LL_EXTI_DisableFallingTrig_0_31(LL_EXTI_LINE_30);  // Falling edge trigger (clear)
+
+    // Enable EXTI line 29 (COMP3) - both edges
+    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_29);           // Unmask interrupt
+    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_29);   // Rising edge trigger (fault)
+    LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_29);  // Falling edge trigger (clear)
 
     // Clear any pending flags
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_21 | LL_EXTI_LINE_22 | LL_EXTI_LINE_29 | LL_EXTI_LINE_30);
@@ -539,7 +321,7 @@ extern "C" void EXTI15_10_IRQHandler(void) {
 
         // Set fatal overcurrent error flag
         if (g_heart_ptr != nullptr) {
-            g_heart_ptr->feedback.error.set_fatal_oc();  // Set fatal overcurrent error
+            g_heart_ptr->feedback.error.set_fatal_driver();  // Set fatal overcurrent error
         }
     }
 }
@@ -549,12 +331,9 @@ extern "C" void EXTI15_10_IRQHandler(void) {
  * Initializes DACs, comparators, GPIO fault input, and EXTI interrupts for overcurrent and overvoltage protection
  */
 inline void COMP_Protection_Init(void) {
-    MX_DAC1_Init();            // Initialize DAC1 for COMP1/COMP2 thresholds
-    MX_DAC3_Init();            // Initialize DAC3 for COMP3/COMP4 thresholds
-    MX_COMP1_Init();           // Initialize COMP1 (Phase B overcurrent)
-    MX_COMP2_Init();           // Initialize COMP2 (Phase A overcurrent)
-    MX_COMP3_Init();           // Initialize COMP3 (Overvoltage)
-    MX_COMP4_Init();           // Initialize COMP4 (Phase C overcurrent)
+    MX_DAC1_Init();  // Initialize DAC1 for COMP1/COMP2 thresholds
+    MX_DAC3_Init();  // Initialize DAC3 for COMP3/COMP4 thresholds
+    MX_COMPS_INIT();
     MX_DRV_FAULT_GPIO_Init();  // Initialize PB10 (DRV_FAULT) GPIO with pullup and EXTI
     COMP_EXTI_Init();          // Enable comparator interrupts
 }

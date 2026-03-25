@@ -1,178 +1,173 @@
-#ifndef ADC_SETUP_CLN17V3_H
-#define ADC_SETUP_CLN17V3_H
+#ifndef ADC_DMA_SETUP_CLN17V3_H // Include guard to prevent multiple inclusions of this header file
+#define ADC_DMA_SETUP_CLN17V3_H // Define the include guard macro for the preprocessor
 
-#include <Arduino.h>
-#include "stm32g4xx_ll_adc.h"   // STM32G4 ADC peripheral library
-#include "stm32g4xx_ll_bus.h"   // STM32G4 bus peripheral library
-#include "stm32g4xx_ll_gpio.h"  // STM32G4 GPIO peripheral library
-#include "stm32g4xx_ll_rcc.h"   // STM32G4 RCC peripheral library
-#include "dma_setup.h"          // DMA buffer definitions
+#include <Arduino.h> // Include standard Arduino framework types
+#include "stm32g4xx_hal.h" // Include HAL required for DMA and NVIC setup
+#include "stm32g4xx_ll_adc.h" // Include LL ADC (Kept for compatibility with your existing DMA callback)
+#include "stm32g4xx_ll_bus.h" // Include LL Bus definitions
+#include "stm32g4xx_ll_gpio.h" // Include LL GPIO definitions
+#include "stm32g4xx_ll_rcc.h" // Include LL RCC definitions
+#include "stm32g4xx_ll_dma.h" // Include LL DMA definitions
 
-// Function to initialize ADC1 with DMA
-void MX_ADC1_Init() {
-    LL_ADC_InitTypeDef ADC_InitStruct = {0};              // ADC initialization structure
-    LL_ADC_REG_InitTypeDef ADC_REG_InitStruct = {0};      // ADC regular group init
-    LL_ADC_CommonInitTypeDef ADC_CommonInitStruct = {0};  // ADC common init
+extern void ADC_READY_Callback(); // Forward declaration for the FOC execution callback
 
-    RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};  // Peripheral clock init
+// OPTIMIZATION: 4-byte memory alignment to prevent Cortex-M4 cache and bus fetch delays
+alignas(4) inline volatile uint32_t dma_buffer_adc12[2] = {0}; // Dual ADC DMA buffer holding both ranks
 
-    // Configure ADC12 clock source
-    PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC12;
-    PeriphClkInit.Adc12ClockSelection = RCC_ADC12CLKSOURCE_SYSCLK;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK) {
-        Error_Handler();  // Handle clock configuration error
-    }
+inline DMA_HandleTypeDef hdma_adc1; // Global HAL handle for DMA structure
 
-    // Enable ADC12 peripheral clock
-    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_ADC12);
+/**
+ * @brief Initialize DMA for ADC12 (Dual Mode Master)
+ * As requested, this DMA and NVIC configuration is strictly UNTOUCHED.
+ */
+inline void MX_DMA_ADC1_Init(void) { // Initialize the DMA mechanism
+    __HAL_RCC_DMAMUX1_CLK_ENABLE(); // Enable the hardware clock for the DMA Multiplexer
+    __HAL_RCC_DMA1_CLK_ENABLE(); // Enable the hardware clock for DMA1
 
-    // Configure ADC resolution and data alignment
-    ADC_InitStruct.Resolution = LL_ADC_RESOLUTION_12B;      // 12-bit resolution
-    ADC_InitStruct.DataAlignment = LL_ADC_DATA_ALIGN_LEFT;  // Left-aligned (normalization)
-    ADC_InitStruct.LowPowerMode = LL_ADC_LP_MODE_NONE;      // No low power mode
-    LL_ADC_Init(ADC1, &ADC_InitStruct);
-
-    // Configure ADC1 regular group (3 channels: I_A, I_B, I_C)
-    ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_2RANKS;  // 3 channels
-    ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;             // Software trigger
-    ADC_REG_InitStruct.SequencerDiscont = LL_ADC_REG_SEQ_DISCONT_DISABLE;    // No discontinuous
-    ADC_REG_InitStruct.ContinuousMode = LL_ADC_REG_CONV_SINGLE;              // Single conversion
-    ADC_REG_InitStruct.DMATransfer = LL_ADC_REG_DMA_TRANSFER_LIMITED;        // DMA limited mode
-    ADC_REG_InitStruct.Overrun = LL_ADC_REG_OVR_DATA_PRESERVED;              // Preserve on overrun
-    LL_ADC_REG_Init(ADC1, &ADC_REG_InitStruct);
-
-    LL_ADC_SetGainCompensation(ADC1, 0);                // No gain compensation
-    LL_ADC_SetOverSamplingScope(ADC1, LL_ADC_OVS_DISABLE);  // No oversampling
-
-    // Configure dual mode: simultaneous regular conversions
-    ADC_CommonInitStruct.CommonClock = LL_ADC_CLOCK_SYNC_PCLK_DIV4;  // Clock divider
-    ADC_CommonInitStruct.Multimode = LL_ADC_MULTI_DUAL_REG_SIMULT;   // Dual simultaneous mode
-    LL_ADC_CommonInit(__LL_ADC_COMMON_INSTANCE(ADC1), &ADC_CommonInitStruct);
-
-    // Disable deep power down and enable internal regulator
-    LL_ADC_DisableDeepPowerDown(ADC1);
-    LL_ADC_EnableInternalRegulator(ADC1);
+    hdma_adc1.Instance = DMA1_Channel5; // Assign DMA instance to Channel 5
+    hdma_adc1.Init.Request = DMA_REQUEST_ADC1; // Route the hardware request trigger from ADC1
+    hdma_adc1.Init.Direction = DMA_PERIPH_TO_MEMORY; // Set transfer direction from ADC to RAM
+    hdma_adc1.Init.PeriphInc = DMA_PINC_DISABLE; // Keep peripheral address fixed at the Common Data Register
+    hdma_adc1.Init.MemInc = DMA_MINC_ENABLE; // Increment memory address to fill the array elements
     
-    // Wait for regulator stabilization
-    uint32_t wait_loop_index = ((LL_ADC_DELAY_INTERNAL_REGUL_STAB_US * (SystemCoreClock / (100000 * 2))) / 10);
-    while (wait_loop_index != 0) {
-        wait_loop_index--;
-    }
-
-    // Configure ADC1 channels
-    // Rank 1: PA3 (I_A) -> ADC1_IN4
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_4);
-    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_4, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_4, LL_ADC_SINGLE_ENDED);
-
-    // Rank 3: PB0 (I_C) -> ADC1_IN15
-    LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_15);
-    LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_15, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC1, LL_ADC_CHANNEL_15, LL_ADC_SINGLE_ENDED);
-}
-
-// Function to start ADC1
-void MX_ADC1_Start() {
-    // Calibrate ADC1
-    LL_ADC_StartCalibration(ADC1, LL_ADC_SINGLE_ENDED);
-    while (LL_ADC_IsCalibrationOnGoing(ADC1));  // Wait for calibration
+    // OPTIMIZATION: Read exactly a 32-bit word in one go (CDR contains Master+Slave combined)
+    hdma_adc1.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD; // Read 32 bits from peripheral
+    hdma_adc1.Init.MemDataAlignment = DMA_MDATAALIGN_WORD; // Write 32 bits to memory
+    hdma_adc1.Init.Mode = DMA_CIRCULAR; // Automatically wrap around to the start of the buffer
+    hdma_adc1.Init.Priority = DMA_PRIORITY_VERY_HIGH; // Highest bus priority to prevent FOC starvation
     
-    // Enable ADC1
-    LL_ADC_Enable(ADC1);
-    while (LL_ADC_IsActiveFlag_ADRDY(ADC1) == 0);  // Wait until ready
+    if (HAL_DMA_Init(&hdma_adc1) != HAL_OK) { // Execute HAL initialization
+        Error_Handler(); // Trigger global error state if DMA init fails
+    } // End DMA init check
+
+    HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 1, 0); // Set very high interrupt priority for FOC latency
+    HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn); // Enable DMA Channel 5 interrupt in the NVIC
+
+    // START DMA: Reading continuously from the COMMON Data Register (CDR)
+    HAL_DMA_Start(&hdma_adc1, (uint32_t)&ADC12_COMMON->CDR, (uint32_t)dma_buffer_adc12, 2); // Map CDR to array
     
-    // Clear end of conversion flag
-    if (LL_ADC_IsActiveFlag_EOC(ADC1))
-        LL_ADC_ClearFlag_EOC(ADC1);
-}
+    __HAL_DMA_ENABLE_IT(&hdma_adc1, DMA_IT_TC | DMA_IT_TE); // Enable Transfer Complete and Transfer Error interrupts
+} // End of MX_DMA_ADC1_Init function
 
-// Function to start DMA conversion for ADC1
-void ADC1_StartDMAConversion() {
-    LL_ADC_REG_StartConversion(ADC1);  // Start ADC1 conversion
-}
+/**
+ * @brief DMA1 Channel 5 IRQ handler
+ * As requested, UNTOUCHED.
+ */
+extern "C" void DMA1_Channel5_IRQHandler(void) { // Interrupt vector for DMA Channel 5
+    if (LL_DMA_IsActiveFlag_TC5(DMA1)) { // Check if the Transfer Complete flag is triggered
+        // OPTIMIZATION: Clear global flag (TC, TE, HT) in exactly 1 hardware clock cycle
+        LL_DMA_ClearFlag_GI5(DMA1); // Apply single-cycle flag clearance
+        ADC_READY_Callback(); // Trigger the main FOC mathematical loop
+    } // End of flag check
+} // End of DMA IRQ Handler
 
-// Function to initialize ADC2 with DMA (PA0 VSENS -> ADC2_IN1, PA1 I_B -> ADC2_IN2)
-void MX_ADC2_Init() {
-    LL_ADC_InitTypeDef ADC_InitStruct = {0};
-    LL_ADC_REG_InitTypeDef ADC_REG_InitStruct = {0};
+/**
+ * @brief Fast direct-register initialization for ADC1 and ADC2
+ * Completely replaces all bloated LL_ADC initialization structures for maximum speed and memory compactness.
+ */
+inline void MX_ADCs_Init() { // Unified bare-metal initialization function for both ADCs
+    // 1. Clock Configuration
+    RCC->CCIPR = (RCC->CCIPR & ~RCC_CCIPR_ADC12SEL) | (2U << RCC_CCIPR_ADC12SEL_Pos); // Route SYSCLK directly to ADC12
+    RCC->AHB2ENR |= RCC_AHB2ENR_ADC12EN; // Enable hardware clock bus for the ADC12 peripheral
 
-    // Enable ADC12 peripheral clock
-    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_ADC12);
+    // 2. Disable Deep Power Down and Enable Regulators
+    ADC1->CR &= ~ADC_CR_DEEPPWD; // Exit deep power down mode for ADC1
+    ADC2->CR &= ~ADC_CR_DEEPPWD; // Exit deep power down mode for ADC2
+    ADC1->CR |= ADC_CR_ADVREGEN; // Enable internal voltage regulator for ADC1
+    ADC2->CR |= ADC_CR_ADVREGEN; // Enable internal voltage regulator for ADC2
 
-    // Configure ADC2 resolution and data alignment
-    ADC_InitStruct.Resolution = LL_ADC_RESOLUTION_12B;
-    ADC_InitStruct.DataAlignment = LL_ADC_DATA_ALIGN_LEFT;
-    ADC_InitStruct.LowPowerMode = LL_ADC_LP_MODE_NONE;
-    LL_ADC_Init(ADC2, &ADC_InitStruct);
+    // 3. Delay for regulator stabilization (STM32G4 requires ~20us minimum)
+    // 170 MHz system clock = 170 cycles per microsecond. A simple while loop takes ~3 cycles per iteration.
+    volatile uint32_t wait_loop_index = (170UL * 20UL) / 3UL; // Calculate 20us wait dynamic threshold
+    while (wait_loop_index != 0) { wait_loop_index--; } // Block CPU execution until regulator is completely stable
 
-    // Configure ADC2 regular group (2 channels: VSENS, I_B)
-    ADC_REG_InitStruct.SequencerLength = LL_ADC_REG_SEQ_SCAN_ENABLE_2RANKS;  // 2 channels
-    ADC_REG_InitStruct.TriggerSource = LL_ADC_REG_TRIG_SOFTWARE;
-    ADC_REG_InitStruct.SequencerDiscont = LL_ADC_REG_SEQ_DISCONT_DISABLE;
-    ADC_REG_InitStruct.ContinuousMode = LL_ADC_REG_CONV_SINGLE;
-    ADC_REG_InitStruct.DMATransfer = LL_ADC_REG_DMA_TRANSFER_LIMITED;
-    ADC_REG_InitStruct.Overrun = LL_ADC_REG_OVR_DATA_PRESERVED;
-    LL_ADC_REG_Init(ADC2, &ADC_REG_InitStruct);
+    // 4. ADC12 Common Register Configuration (Dual Mode Setup)
+    // CKMODE = 3 (Synchronous PCLK/4), MDMA = 2 (12/10-bit mode for DMA), DUAL = 6 (Regular Simultaneous Mode)
+    ADC12_COMMON->CCR = (3U << ADC_CCR_CKMODE_Pos) | (2U << ADC_CCR_MDMA_Pos) | (6U << ADC_CCR_DUAL_Pos); // Write common setup
 
-    LL_ADC_SetGainCompensation(ADC2, 0);
-    LL_ADC_SetOverSamplingScope(ADC2, LL_ADC_OVS_DISABLE);
-
-    // Disable deep power down and enable internal regulator
-    LL_ADC_DisableDeepPowerDown(ADC2);
-    LL_ADC_EnableInternalRegulator(ADC2);
+    // 5. ADC1 (Master) Configuration
+    // ALIGN = 1 (Left-aligned), DMACFG = 1 (Circular DMA), DMAEN = 1 (Enable DMA requests)
+    ADC1->CFGR = ADC_CFGR_ALIGN | ADC_CFGR_DMACFG | ADC_CFGR_DMAEN; // Write CFGR register
     
-    // Wait for regulator stabilization
-    uint32_t wait_loop_index = ((LL_ADC_DELAY_INTERNAL_REGUL_STAB_US * (SystemCoreClock / (100000 * 2))) / 10);
-    while (wait_loop_index != 0) {
-        wait_loop_index--;
-    }
-    // Rank 2: PA1 (I_B) -> ADC2_IN2
-    LL_ADC_REG_SetSequencerRanks(ADC2, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_2);
-    LL_ADC_SetChannelSamplingTime(ADC2, LL_ADC_CHANNEL_2, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC2, LL_ADC_CHANNEL_2, LL_ADC_SINGLE_ENDED);
-
-    // Configure ADC2 channels
-    // Rank 1: PA0 (VSENS) -> ADC2_IN1
-    LL_ADC_REG_SetSequencerRanks(ADC2, LL_ADC_REG_RANK_2, LL_ADC_CHANNEL_1);
-    LL_ADC_SetChannelSamplingTime(ADC2, LL_ADC_CHANNEL_1, LL_ADC_SAMPLINGTIME_2CYCLES_5);
-    LL_ADC_SetChannelSingleDiff(ADC2, LL_ADC_CHANNEL_1, LL_ADC_SINGLE_ENDED);
-
-
-}
-
-// Function to start DMA conversion for ADC2
-void ADC2_StartDMAConversion() {
-    LL_ADC_REG_StartConversion(ADC2);  // Start ADC2 conversion
-}
-
-// Initialize both ADC1 and ADC2
-void ADC_Init() {
-    MX_ADC1_Init();  // Initialize ADC1
-    MX_ADC2_Init();  // Initialize ADC2
-    MX_ADC1_Start(); // Start ADC1
+    // Sequencer SQR1: L = 1 (Length = 2 ranks). SQ1 = 4 (PA3/I_A), SQ2 = 15 (PB0/I_C)
+    ADC1->SQR1 = (1U << ADC_SQR1_L_Pos) | (4U << ADC_SQR1_SQ1_Pos) | (15U << ADC_SQR1_SQ2_Pos); // Write Rank sequence
     
-    // Start ADC2
-    LL_ADC_StartCalibration(ADC2, LL_ADC_SINGLE_ENDED);
-    while (LL_ADC_IsCalibrationOnGoing(ADC2));
-    LL_ADC_Enable(ADC2);
-    while (LL_ADC_IsActiveFlag_ADRDY(ADC2) == 0);
-    if (LL_ADC_IsActiveFlag_EOC(ADC2))
-        LL_ADC_ClearFlag_EOC(ADC2);
-}
+    // Sampling Time: SMP4 = 1 (6.5 cycles), SMP15 = 1 (6.5 cycles)
+    ADC1->SMPR1 = (1U << ADC_SMPR1_SMP4_Pos); // Apply ultra-fast sampling time to Channel 4
+    ADC1->SMPR2 = (1U << ADC_SMPR2_SMP15_Pos); // Apply ultra-fast sampling time to Channel 15
 
-// Get ADC values from DMA buffers
-void ADC_get_values(uint16_t& current_a,
-                    uint16_t& current_b,
-                    uint16_t& current_c,
-                    uint16_t& voltage_supply,
-                    uint16_t& voltage_vref,
-                    uint16_t& voltage_temp) {
-    current_a = dma_buffer_adc1[0];       // I_A (PA3 - ADC1_IN4)
-    current_b = dma_buffer_adc2[0];       // I_B (PA1 - ADC1_IN2)
-    current_c = dma_buffer_adc1[1];       // I_C (PB0 - ADC1_IN15)
-    voltage_supply = dma_buffer_adc2[1];  // VSENS (PA0 - ADC2_IN1)
-    voltage_vref = 0;                     // Not used
-    voltage_temp = 0;                     // Not used
-}
+    // 6. ADC2 (Slave) Configuration
+    // ALIGN = 1 (Left-aligned). NOTE: Slave does NOT generate DMA requests, so DMAEN is left as 0
+    ADC2->CFGR = ADC_CFGR_ALIGN; // Write slave CFGR register
+    
+    // Sequencer SQR1: L = 1 (Length = 2 ranks). SQ1 = 2 (PA1/I_B), SQ2 = 1 (PA0/VSENS)
+    ADC2->SQR1 = (1U << ADC_SQR1_L_Pos) | (2U << ADC_SQR1_SQ1_Pos) | (1U << ADC_SQR1_SQ2_Pos); // Write Rank sequence
+    
+    // Sampling Time: SMP1 = 1 (6.5 cycles), SMP2 = 1 (6.5 cycles)
+    ADC2->SMPR1 = (1U << ADC_SMPR1_SMP1_Pos) | (1U << ADC_SMPR1_SMP2_Pos); // Apply ultra-fast sampling to Ch1 and Ch2
+} // End of bare-metal MX_ADCs_Init function
 
-#endif  // ADC_SETUP_CLN17V3_H
+/**
+ * @brief Ultra-fast single-instruction trigger for Dual ADC conversion
+ */
+__attribute__((always_inline)) inline void ADC1_StartDMAConversion() { // Inline start command replacing LL
+    ADC1->CR |= ADC_CR_ADSTART; // Start ADC1 conversion (ADC2 automatically triggers simultaneously in Dual Mode)
+} // End of ADC1_StartDMAConversion function
+
+/**
+ * @brief Master initialization wrapper orchestrating ADC startup sequencing
+ */
+inline void ADC_Init() { // Main initialization wrapper
+    MX_DMA_ADC1_Init(); // Initialize DMA first (Using untouched HAL/LL logic)
+    MX_ADCs_Init(); // Initialize ADC bare-metal hardware configuration
+    
+    // Calibrate ADC1 (Master)
+    ADC1->CR |= ADC_CR_ADCAL; // Trigger hardware calibration sequence for ADC1
+    while (ADC1->CR & ADC_CR_ADCAL); // Block CPU execution until ADC1 hardware clears the calibration flag
+    
+    // Calibrate ADC2 (Slave)
+    ADC2->CR |= ADC_CR_ADCAL; // Trigger hardware calibration sequence for ADC2
+    while (ADC2->CR & ADC_CR_ADCAL); // Block CPU execution until ADC2 hardware clears the calibration flag
+    
+    // Clear Ready Flags
+    ADC1->ISR = ADC_ISR_ADRDY; // Write 1 to clear the ADRDY flag before enabling
+    ADC2->ISR = ADC_ISR_ADRDY; // Write 1 to clear the ADRDY flag before enabling
+    
+    // Enable ADCs
+    ADC1->CR |= ADC_CR_ADEN; // Set Enable bit for ADC1
+    ADC2->CR |= ADC_CR_ADEN; // Set Enable bit for ADC2
+    
+    // Wait for both ADCs to be fully ready
+    while ((ADC1->ISR & ADC_ISR_ADRDY) == 0); // Block CPU until ADC1 is confirmed ready
+    while ((ADC2->ISR & ADC_ISR_ADRDY) == 0); // Block CPU until ADC2 is confirmed ready
+    
+    // Clear End of Conversion flags before first use to ensure clean interrupts
+    ADC1->ISR = ADC_ISR_EOC; // Write 1 to clear EOC flag
+    ADC2->ISR = ADC_ISR_EOC; // Write 1 to clear EOC flag
+} // End of ADC_Init function
+
+/**
+ * @brief Safely parses DMA buffer into human-readable variables
+ */
+__attribute__((always_inline)) inline void ADC_get_values(uint16_t& current_a, // Phase A reference
+                           uint16_t& current_b, // Phase B reference
+                           uint16_t& current_c, // Phase C reference
+                           uint16_t& voltage_supply, // Bus voltage reference
+                           uint16_t& voltage_vref, // VREF reference
+                           uint16_t& voltage_temp) { // MCU temperature reference
+                           
+    // OPTIMIZATION: Fetch the volatile memory exactly once to prevent cache stalls and race conditions
+    uint32_t reg0 = dma_buffer_adc12[0]; // Fetch Rank 1 dual data
+    uint32_t reg1 = dma_buffer_adc12[1]; // Fetch Rank 2 dual data
+    
+    current_a      = (uint16_t)(reg0 & 0xFFFF);        // Extract lower 16 bits: ADC1 Rank 1 (I_A)
+    current_b      = (uint16_t)((reg0 >> 16) & 0xFFFF);// Extract upper 16 bits: ADC2 Rank 1 (I_B)
+    
+    current_c      = (uint16_t)(reg1 & 0xFFFF);        // Extract lower 16 bits: ADC1 Rank 2 (I_C)
+    voltage_supply = (uint16_t)((reg1 >> 16) & 0xFFFF);// Extract upper 16 bits: ADC2 Rank 2 (VSENS)
+    
+    voltage_vref = 0; // VREF currently unconfigured, set to 0 to prevent garbage values
+    voltage_temp = 0; // Temp currently unconfigured, set to 0 to prevent garbage values
+} // End of ADC_get_values function
+
+#endif // ADC_DMA_SETUP_CLN17V3_H // Final close of the header include guard

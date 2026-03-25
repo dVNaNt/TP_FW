@@ -1,307 +1,119 @@
-#ifndef TIMER_PWM_CLN17V3_H
-#define TIMER_PWM_CLN17V3_H
+#ifndef TIMER_PWM_CLN17V3_H // Include guard to prevent multiple inclusions of this header file
+#define TIMER_PWM_CLN17V3_H // Define the include guard macro for the preprocessor
 
-#include <Arduino.h>
-#include "config.h"
-#include "stm32g4xx_hal.h"
-#include "stm32g4xx_ll_gpio.h"
-#include "target.h"
+#include <Arduino.h> // Include Arduino framework for basic standard types
+#include "stm32g4xx.h" // Include pure CMSIS register definitions for STM32G4
+#include "stm32g4xx_hal_tim.h" // Include HAL TIM purely to support the required IRQ handler structure
+#include "target.h" // Include hardware target-specific tuning parameters
 
-// PWM timer parameters (use guards to avoid redefinition from lib.h)
-#ifndef PWM_TIMER_PERIOD
-constexpr uint16_t PWM_TIMER_PERIOD = 4250;      // Timer period (ARR)
-#endif
+#ifndef PWM_TIMER_PERIOD // Check if the PWM timer period is not defined at the project level
+constexpr uint16_t PWM_TIMER_PERIOD = 4250; // Set default timer period (ARR value) for the carrier frequency
+#endif // Close conditional preprocessor block for the period
 
-#ifndef PWM_TIMER_FREQ_HZ
-constexpr uint16_t PWM_TIMER_FREQ_HZ = 20000;    // PWM frequency in Hz
-#endif
+#ifndef PWM_TIMER_FREQ_HZ // Check if the PWM frequency is not defined at the project level
+constexpr uint16_t PWM_TIMER_FREQ_HZ = 20000; // Set default PWM frequency to 20 kHz
+#endif // Close conditional preprocessor block for the frequency
 
-constexpr int32_t TIMER_CLOCK_HZ = 170UL;        // System clock 170 MHz
+constexpr int32_t TIMER_CLOCK_HZ = 170UL; // Define the core system clock speed as 170 MHz for reference
 
-// Dead time configuration (in timer ticks)
-constexpr uint8_t PWM_DEADTIME_TICKS = SYS_PARAMS::DEADTIME_TICKS_CONST;
+constexpr uint8_t PWM_DEADTIME_TICKS = SYS_PARAMS::DEADTIME_TICKS_CONST; // Extract initial deadtime from system parameters
 
-// Runtime dead time control (volatile for dynamic adjustment)
-volatile uint8_t PWM_DEADTIME_RUNTIME = PWM_DEADTIME_TICKS;  // Current dead time value in timer ticks
+volatile uint8_t PWM_DEADTIME_RUNTIME = PWM_DEADTIME_TICKS; // Allow deadtime to be updated dynamically at runtime
 
-// ADC trigger delay in timer ticks
-volatile int16_t ADC_DELAY_TICKS = SYS_PARAMS::ADC_DELAY_TICKS_CONST;
-volatile int16_t ADC_TRIGGER_POINT = 0;
+volatile int16_t ADC_DELAY_TICKS = SYS_PARAMS::ADC_DELAY_TICKS_CONST; // Set volatile ADC delay for FOC trigger offset
+volatile int16_t ADC_TRIGGER_POINT = 0; // Initialize volatile ADC trigger point to zero
 
-TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim1; // Declare the HAL structure globally to satisfy HAL_TIM_IRQHandler requirement
 
-/**
- * @brief Initialize TIM1 for complementary PWM
- */
-void MX_TIM1_Init(void) {
-    TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-    TIM_MasterConfigTypeDef sMasterConfig = {0};
-    TIM_OC_InitTypeDef sConfigOC = {0};
-    TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
-
-    // TIM1 base configuration
-    htim1.Instance = TIM1;
-    htim1.Init.Prescaler = 0;  // No prescaler (170 MHz)
-    htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED3;  // Center-aligned mode 3
-    htim1.Init.Period = PWM_TIMER_PERIOD;  // ARR value
-    htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim1.Init.RepetitionCounter = 0;  // No repetition
-    htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+inline void MX_TIM1_Init(void) { // Define an inline function for bare-metal register initialization
+    RCC->APB2ENR |= RCC_APB2ENR_TIM1EN; // Enable the hardware clock routing specifically for TIM1 peripheral
+    htim1.Instance = TIM1; // Link the HAL handler to TIM1 instance so HAL_TIM_IRQHandler does not crash
     
-    if (HAL_TIM_Base_Init(&htim1) != HAL_OK) {
-        Error_Handler();
-    }
-
-    // Clock source configuration
-    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-    if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK) {
-        Error_Handler();
-    }
-
-    // PWM mode initialization
-    if (HAL_TIM_PWM_Init(&htim1) != HAL_OK) {
-        Error_Handler();
-    }
-
-    // Master configuration
-    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-    sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
-    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-    if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK) {
-        Error_Handler();
-    }
-
-    // PWM channel configuration (CH1, CH2, CH3)
-    sConfigOC.OCMode = TIM_OCMODE_PWM1;
-    sConfigOC.Pulse = 0;  // Initial duty cycle = 0%
-    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-    sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-    sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-    sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-
-    // Configure all three PWM channels
-    if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK) {
-        Error_Handler();
-    }
-    if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK) {
-        Error_Handler();
-    }
-    if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK) {
-        Error_Handler();
-    }
-
-    // Configure CH4 for ADC trigger
-    sConfigOC.OCMode = TIM_OCMODE_PWM1;
-    sConfigOC.Pulse = ADC_TRIGGER_POINT;
-    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-    if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK) {
-        Error_Handler();
-    }
-
-    // Break and dead time configuration
-    sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-    sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-    sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-    sBreakDeadTimeConfig.DeadTime = PWM_DEADTIME_TICKS;  // Dead time
-    sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-    sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-    sBreakDeadTimeConfig.BreakFilter = 0;
-    sBreakDeadTimeConfig.Break2State = TIM_BREAK2_DISABLE;
-    sBreakDeadTimeConfig.Break2Polarity = TIM_BREAK2POLARITY_HIGH;
-    sBreakDeadTimeConfig.Break2Filter = 0;
-    sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+    // FIX: TIM_CR1_CMS_1 corresponds to Center-Aligned Mode 2 (Interrupt flags set on counting up)
+    TIM1->CR1 = TIM_CR1_CMS_1 | TIM_CR1_ARPE; // Set Center-aligned mode 2 and enable Auto-Reload Preload
+    TIM1->CR2 = 0; // Clear CR2 to keep default states (no master mode TRGO needed if CH4 is used directly)
+    TIM1->PSC = 0; // Set prescaler to 0 to run the timer at the absolute maximum 170MHz frequency
+    TIM1->ARR = PWM_TIMER_PERIOD; // Write the carrier period directly to the Auto-Reload Register
     
-    if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK) {
-        Error_Handler();
-    }
-}
+    // Configure CCMR1 for CH1 and CH2: PWM Mode 1 (110 in OCxM) and enable preload (OCxPE)
+    TIM1->CCMR1 = (6U << TIM_CCMR1_OC1M_Pos) | TIM_CCMR1_OC1PE | (6U << TIM_CCMR1_OC2M_Pos) | TIM_CCMR1_OC2PE; // Write CH1/CH2 config
+    
+    // Configure CCMR2 for CH3 and CH4: PWM Mode 1 (110 in OCxM) and enable preload (OCxPE)
+    TIM1->CCMR2 = (6U << TIM_CCMR2_OC3M_Pos) | TIM_CCMR2_OC3PE | (6U << TIM_CCMR2_OC4M_Pos) | TIM_CCMR2_OC4PE; // Write CH3/CH4 config
+    
+    TIM1->CCER = 0; // Initialize Capture/Compare Enable Register to 0 (all outputs safely disabled for now)
+    TIM1->BDTR = PWM_DEADTIME_TICKS; // Write initial deadtime directly to Break and Dead-Time Register
+    TIM1->EGR = TIM_EGR_UG; // Force an Update Generation event to shadow all registers immediately
+} // End of MX_TIM1_Init bare-metal function
 
-/**
- * @brief Start TIM1 PWM outputs
- */
-void MX_TIM1_Start() {
-    // Start complementary PWM on channels 1, 2, 3
-    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);  // Start CH1N
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);     // Start CH1
+inline void MX_TIM1_Start() { // Define an inline function to activate timer outputs directly via registers
+    TIM1->CCR4 = PWM_TIMER_PERIOD - ADC_DELAY_TICKS; // Write initial ADC trigger timing to Capture/Compare 4
     
-    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);  // Start CH2N
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);     // Start CH2
+    TIM1->SR = ~(TIM_SR_UIF | TIM_SR_CC4IF); // Clear Update Interrupt Flag and CH4 Interrupt Flag efficiently
+    TIM1->DIER = TIM_DIER_CC4IE; // Enable hardware interrupt specifically for CH4 (ADC trigger)
     
-    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);  // Start CH3N
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);     // Start CH3
-    
-    // Start CH4 with interrupts for ADC trigger
-    HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_4);
+    TIM1->CCER = 0x1555U; // Pre-enable all complimentary outputs: CC1E/NE, CC2E/NE, CC3E/NE, and CC4E
+    TIM1->CR1 |= TIM_CR1_CEN; // Set Counter Enable bit to start the primary TIM1 timer counting
+    TIM1->BDTR |= TIM_BDTR_MOE; // Set Main Output Enable bit to route timer signals to physical GPIO pins
+} // End of MX_TIM1_Start bare-metal function
 
-    // Clear pending Update flag
-    __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
-    
-    // Clear CH4 compare flag
-    __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_CC4);
+extern TunePulseHeart* volatile g_heart_ptr; // Expose the global control state pointer for protection checks
 
-    // Start timer with Update interrupt
-    HAL_TIM_Base_Start_IT(&htim1);
-    
-    // Enable main output
-    __HAL_TIM_MOE_ENABLE(&htim1);
-}
+// Force maximum inline speed and O3 optimization exclusively for this ultra-fast mathematical loop
+__attribute__((always_inline, optimize("O3"))) 
+inline void TIM1_Set_PWM_Values(const int16_t pwmValues[3]) { // Define ultra-fast PWM update function
+    int32_t d0 = pwmValues[0]; // Load requested duty cycle for Phase A
+    int32_t d1 = pwmValues[1]; // Load requested duty cycle for Phase B
+    int32_t d2 = pwmValues[2]; // Load requested duty cycle for Phase C
 
-// Forward declarations for protection state checking from TunePulseHeart
-extern TunePulseHeart* volatile g_heart_ptr;
+    TunePulseHeart* heart = g_heart_ptr; // Safely cache the volatile pointer to a local register for speed
+    if (heart != nullptr) { // Check if the pointer has been properly initialized
+        if (heart->feedback.error.get_fatal_dc_ovlo()) { // Check Over-Voltage state first (highest priority)
+            d0 = d1 = d2 = 0; // Force duty cycle to 0 for regenerative braking (All Low-sides ON)
+        } else if (heart->feedback.error.get_fatal_oc()) { // Otherwise check Over-Current state
+            d0 = d1 = d2 = -PWM_TIMER_PERIOD; // Force duty cycle to negative period for Hi-Z (All FETs OFF)
+        } // End of protection condition checks
+    } // End of pointer safety check
 
-/**
- * @brief Set PWM duty cycle values for 3 phases with overcurrent/overvoltage protection
- * @param pwmValues Array of 3 duty cycle values (-PWM_TIMER_PERIOD to +PWM_TIMER_PERIOD)
- *                  Positive: normal PWM mode (high-side switching)
- *                  Negative: braking mode (low-side switching, high-side OFF)
- *                  INT16_MIN = disable phase (all outputs LOW)
- * 
- * PROTECTION LOGIC:
- * - If overcurrent (OC) error: Force all phases to INT16_MIN (Hi-Z, all FETs OFF)
- * - If overvoltage (OV) error: Force all phases to 0 (regenerative braking, low-side ON)
- * - If both OV and OC: Overvoltage has priority (regenerative braking)
- * - Protection state overrides software PWM values
- */
-void TIM1_Set_PWM_Values(const int16_t pwmValues[3]) {
-    // Check for protection errors (OV has higher priority than OC)
-    bool ov_error = (g_heart_ptr != nullptr) && g_heart_ptr->feedback.error.get_fatal_dc_ovlo();  // Check overvoltage
-    bool oc_error = (g_heart_ptr != nullptr) && g_heart_ptr->feedback.error.get_fatal_oc();  // Check overcurrent
-    
-    // Determine protection PWM values based on error state
-    int16_t protected_pwm[3];  // Array to hold protected PWM values
-    
-    if (ov_error) {
-        // Overvoltage: Enable regenerative braking (low-side ON, high-side OFF)
-        // Set all phases to 0 (negative duty = low-side active)
-        protected_pwm[0] = 0;  // Phase A: low-side ON
-        protected_pwm[1] = 0;  // Phase B: low-side ON
-        protected_pwm[2] = 0;  // Phase C: low-side ON
-    } else if (oc_error) {
-        // Overcurrent: Disable all outputs (Hi-Z state)
-        // Set all phases to INT16_MIN (all FETs OFF)
-        protected_pwm[0] = INT16_MIN;  // Phase A: all FETs OFF
-        protected_pwm[1] = INT16_MIN;  // Phase B: all FETs OFF
-        protected_pwm[2] = INT16_MIN;  // Phase C: all FETs OFF
-    } else {
-        // No error: Use software-provided PWM values
-        protected_pwm[0] = pwmValues[0];  // Phase A: normal operation
-        protected_pwm[1] = pwmValues[1];  // Phase B: normal operation
-        protected_pwm[2] = pwmValues[2];  // Phase C: normal operation
-    }
-    
-    // Process each phase with protected PWM values
-    for (uint8_t phase = 0; phase < 3; phase++) {
-        uint32_t channel;  // TIM channel identifier
-        
-        // Map phase index to TIM channel
-        if (phase == 0) channel = TIM_CHANNEL_1;       // Phase A
-        else if (phase == 1) channel = TIM_CHANNEL_2;  // Phase B
-        else channel = TIM_CHANNEL_3;                  // Phase C
-        
-        int16_t duty = protected_pwm[phase];  // Get protected duty cycle value (may be overridden by error state)
-        
-        if (duty == INT16_MIN) {
-            // Timer inactive mode: all FETs OFF (both high-side and low-side disabled)
-            __HAL_TIM_SET_COMPARE(&htim1, channel, 0);  // Set compare to 0
-            TIM1->CCER &= ~(0x5 << (phase * 4));        // Disable both CHx and CHxN outputs (all FETs OFF)
-        } 
-        else if (duty < 0) {
-            // Braking mode: high-side OFF, low-side PWM with corrected duty
-            int16_t abs_duty = -duty;  // Convert to positive value
-            if (abs_duty > PWM_TIMER_PERIOD) abs_duty = PWM_TIMER_PERIOD;  // Clamp to max
-            
-            __HAL_TIM_SET_COMPARE(&htim1, channel, abs_duty);  // Set PWM duty cycle
-            
-            // Configure outputs: CHx=OFF (high-side), CHxN=ON (low-side)
-            uint32_t ccer_mask = (0x5 << (phase * 4));  // Mask for CHxE and CHxNE bits
-            TIM1->CCER &= ~ccer_mask;                   // Clear both enable bits
-            TIM1->CCER |= (0x4 << (phase * 4));         // Enable only CHxN (low-side)
-        } 
-        else {
-            // Normal PWM mode: complementary outputs active
-            if (duty > PWM_TIMER_PERIOD) duty = PWM_TIMER_PERIOD;  // Clamp to max
-            
-            __HAL_TIM_SET_COMPARE(&htim1, channel, duty);  // Set PWM duty cycle
-            
-            // Enable both CHx (high-side) and CHxN (low-side) outputs
-            TIM1->CCER |= (0x5 << (phase * 4));  // Set CHxE and CHxNE bits
-        }
-    }
-    
-    // Find maximum absolute PWM value for ADC trigger calculation
-    int16_t max_pwm = 0;  // Initialize to zero
-    for (uint8_t i = 0; i < 3; i++) {
-        int16_t abs_val = (pwmValues[i] < 0) ? -pwmValues[i] : pwmValues[i];  // Get absolute value
-        if (abs_val != INT16_MIN && abs_val > max_pwm) {  // Update max if valid and larger
-            max_pwm = abs_val;
-        }
-    }
-    
-    if (max_pwm == 0) max_pwm = PWM_TIMER_PERIOD;  // Default to full period if all disabled
-    
-    // Calculate ADC trigger point: max PWM + delay
-    int16_t adc_trigger = max_pwm + ADC_DELAY_TICKS;
-    
-    // Clamp to valid range [0, PWM_TIMER_PERIOD-1]
-    if (adc_trigger < 0) adc_trigger = 0;
-    if (adc_trigger > PWM_TIMER_PERIOD) adc_trigger = PWM_TIMER_PERIOD - 1;
+    // __builtin_abs compiles to a single-cycle, branchless ARM instruction (no pipeline stalls)
+    uint32_t abs0 = __builtin_abs(d0); // Get absolute value for Phase A duty cycle
+    uint32_t abs1 = __builtin_abs(d1); // Get absolute value for Phase B duty cycle
+    uint32_t abs2 = __builtin_abs(d2); // Get absolute value for Phase C duty cycle
 
-    // Set ADC trigger on channel 4
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, (uint16_t)adc_trigger);
+    // Clamping using ternary operators is highly optimized by GCC into branchless IT (If-Then) blocks
+    TIM1->CCR1 = (abs0 > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : abs0; // Clamp and write Phase A register
+    TIM1->CCR2 = (abs1 > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : abs1; // Clamp and write Phase B register
+    TIM1->CCR3 = (abs2 > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : abs2; // Clamp and write Phase C register
+
+    // Fast mask generation: CC4E is bit 12 (0x1000U). We unconditionally keep CH4 enabled.
+    uint32_t ccer_mask = 0x1000U; // Start with CH4 Output Compare enable bit set
+    ccer_mask |= 0x04U | (d0 > 0); // CH1: CC1NE is always 1 (0x04), CC1E is 1 only if duty is positive
+    ccer_mask |= (0x04U | (d1 > 0)) << 4; // CH2: Shifted by 4 bits for CC2NE and CC2E
+    ccer_mask |= (0x04U | (d2 > 0)) << 8; // CH3: Shifted by 8 bits for CC3NE and CC3E
+
+    // Direct assignment is significantly faster than Read-Modify-Write (|=) because we know all exact bit states
+    TIM1->CCER = ccer_mask; // Overwrite CCER register completely in one atomic hardware cycle
+
+    int16_t delay = ADC_DELAY_TICKS; // Fetch volatile ADC delay variable exactly once to prevent race conditions
+    uint32_t safe_delay = (delay < 0) ? 0 : ((delay > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : delay); // Branchless clamp
+    TIM1->CCR4 = PWM_TIMER_PERIOD - safe_delay; // Assign safe calculated delay directly to CCR4 register
     
-    // Update dead time configuration dynamically
-    // Access BDTR register to update dead time (DTG field: bits 0-7)
-    uint32_t bdtr = TIM1->BDTR;  // Read current BDTR register value
-    bdtr &= ~TIM_BDTR_DTG;       // Clear DTG field (dead time generator bits)
-    bdtr |= (PWM_DEADTIME_RUNTIME & 0xFF);  // Set new dead time value (8-bit field)
-    TIM1->BDTR = bdtr;           // Write back to BDTR register
-}
+    // Direct assignment overwriting BDTR completely, preserving MOE and updating runtime deadtime instantly
+    TIM1->BDTR = TIM_BDTR_MOE | (PWM_DEADTIME_RUNTIME & 0xFFU); // Update deadtime safely without Read-Modify-Write
+} // End of TIM1_Set_PWM_Values ultra-fast function
 
-/**
- * @brief Update ADC trigger point when frequency changes
- */
-void TIM1_Update_ADC_Trigger(uint16_t new_period, uint16_t new_freq_hz, int16_t adc_delay_ticks = ADC_DELAY_TICKS) {
-    ADC_DELAY_TICKS = adc_delay_ticks;  // Update delay
-    int16_t new_trigger_point = 0;
-    
-    // Update timer period
-    __HAL_TIM_SET_AUTORELOAD(&htim1, new_period);
-    
-    // Update ADC trigger point on channel 4
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, new_trigger_point);
-}
+extern void FOC_TimTrig_Callback(); // Forward declare the ultra-fast callback located in the NVIC file
 
-/**
- * @brief TIM1 IRQ handler
- */
-extern "C" void TIM1_UP_TIM16_IRQHandler(void) {
-    HAL_TIM_IRQHandler(&htim1);
-}
+extern "C" void TIM1_CC_IRQHandler(void) { // Define the hardware interrupt vector for Capture/Compare events
+    if (TIM1->SR & TIM_SR_CC4IF) { // Check purely if the Channel 4 (ADC trigger) interrupt flag is active
+        TIM1->SR = ~TIM_SR_CC4IF; // Clear the interrupt flag immediately by writing 0 to its bit
+        FOC_TimTrig_Callback(); // Directly call our optimized callback, bypassing HAL completely
+    } // End of CC4IF check
+} // End of TIM1_CC_IRQHandler function
 
-/**
- * @brief TIM1 CC IRQ handler
- */
-extern "C" void TIM1_CC_IRQHandler(void) {
-    HAL_TIM_IRQHandler(&htim1);
-}
+inline void PWM_Init() { // Define inline wrapper to trigger full PWM subsystem initialization
+    MX_TIM1_Init(); // Execute bare-metal timer configuration
+    MX_TIM1_Start(); // Execute bare-metal output and interrupt startup sequence
+} // End of PWM_Init function
 
-/**
- * @brief TIM1 MSP initialization
- */
-extern "C" void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* htim_base) {
-    if (htim_base->Instance == TIM1) {
-        __HAL_RCC_TIM1_CLK_ENABLE();  // Enable TIM1 clock
-    }
-}
-
-/**
- * @brief Initialize PWM system
- */
-void PWM_Init() {
-    MX_TIM1_Init();  // Initialize TIM1
-    MX_TIM1_Start(); // Start TIM1 PWM
-}
-
-#endif  // TIMER_PWM_CLN17V3_H
+#endif // TIMER_PWM_CLN17V3_H // Final close of the header include guard

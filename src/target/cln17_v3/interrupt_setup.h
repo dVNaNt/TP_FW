@@ -1,133 +1,77 @@
-#ifndef NVIC_CLN17V3_H
-#define NVIC_CLN17V3_H
+#ifndef NVIC_CLN17V3_H  // Include guard to prevent multiple inclusions of this header file
+#define NVIC_CLN17V3_H  // Define the include guard macro for the preprocessor
 
-#include <Arduino.h>
-#include "config.h"
+#include <Arduino.h>  // Include Arduino framework for basic standard types
 
-#include "adc_setup.h"
-#include "clock_setup.h"
-#include "dma_setup.h"
-#include "gpio_setup.h"
-#include "spi_setup.h"
-#include "system_setup.h"
-#include "timer_pwm_setup.h"
+#include "adc_setup.h"    // Include ADC subsystem initialization and control
+#include "clock_setup.h"  // Include system clock configuration
+#include "comp_setup.h"   // Include analog comparator subsystem setup
+#include "gpio_setup.h"   // Include general purpose I/O configuration
 
-/**
- * PWM Timer Execution Pattern (TIM1 Center-Aligned Mode 3)
- * =========================================================
- *
- * Timer cycle:     0 ────────► ARR ────────► 0
- *                  │    UP      │    DOWN    │
- *                  UF          OF           UF
- *
- * PWM output (complementary mode with dead time):
- *   - CHx  HIGH when CNT < CCRx (high-side on)
- *   - CHxN HIGH when CNT >= CCRx + deadtime (low-side on)
- *
- * Event sequence per full cycle:
- * ┌─────────────────────────────────────────────────────────────────┐
- * │  CNT:  0 ──► CCR4 ──────────► ARR ──► CCR4 ──────────► 0        │
- * │             │                  │       │                │        │
- * │        ADC_START_Callback    PWM_Callback │           ENCODER_Callback
- * │        (ADC sample)       (update PWM) │           (read encoder)
- * │                                        │                         │
- * │                               (skip ADC on down)                 │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * POSITION_Callback is called from SPI DMA complete (when encoder data ready)
- */
+#include "spi_setup.h"        // Include SPI communication setup for the encoder
+#include "timer_pwm_setup.h"  // Include PWM timer hardware definitions and functions
 
-// Forward declaration of TunePulseHeart for error flag access
-struct TunePulseHeart;
-extern TunePulseHeart* volatile g_heart_ptr;  // Global volatile pointer for ISR access
 
-extern void PWM_Callback();        // Called at overflow (CNT reaches ARR) - update PWM duty
-extern void ENCODER_Callback();    // Called at underflow (CNT reaches 0) - trigger encoder read
-extern void ADC_START_Callback();  // Called before overflow (CH4 match on UP) - sample ADC
-extern void ADC_READY_Callback();  // Called from DMA complete
-extern void POSITION_Callback();   // Called from SPI complete (encoder data ready)
 
-/**
- * @brief Initialize NVIC interrupts
- */
-void NVIC_Init() {
-    // DMA interrupt init (ADC1 RX - Channel 5)
-    NVIC_SetPriority(DMA1_Channel5_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 3, 0));
-    NVIC_EnableIRQ(DMA1_Channel5_IRQn);
+struct TunePulseHeart;                        // Forward declaration of the main FOC controller structure
+extern TunePulseHeart* volatile g_heart_ptr;  // Expose global volatile pointer to access FOC instance inside ISRs
 
-    // DMA interrupt init (ADC2 RX - Channel 6)
-    NVIC_SetPriority(DMA1_Channel6_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 3, 0));
-    NVIC_EnableIRQ(DMA1_Channel6_IRQn);
+inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA completion event
 
-    // SPI1 interrupt init
-    NVIC_SetPriority(SPI1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0));
-    NVIC_EnableIRQ(SPI1_IRQn);
+    uint16_t current_values[3];                              // Declare array to store raw ADC current readings for all 3 phases
+    uint16_t voltage_supply, voltage_vref, temperature_adc;  // Declare variables for auxiliary system measurements
+    ADC_get_values(current_values[0], current_values[1], current_values[2], voltage_supply, voltage_vref,
+                   temperature_adc);  // Fetch all ADC readings simultaneously
 
-    // TIM1 Update interrupt init
-    HAL_NVIC_SetPriority(TIM1_UP_TIM16_IRQn, 2, 0);
-    HAL_NVIC_EnableIRQ(TIM1_UP_TIM16_IRQn);
+    constexpr uint16_t upper_th = uint16_t(
+        (65535.0f * (3.3f - 0.3f)) / 3.3f);  // Calculate max valid ADC threshold at compile time (excluding non-linear zone)
+    constexpr uint16_t lower_th = uint16_t((65535.0f * 0.3f) / 3.3f);  // Calculate min valid ADC threshold at compile time
+    constexpr uint32_t valid_range =
+        upper_th - lower_th;  // Calculate the allowed ADC range at compile time to avoid runtime math
 
-    // TIM1 Capture Compare interrupt init
-    HAL_NVIC_SetPriority(TIM1_CC_IRQn, 2, 0);
-    HAL_NVIC_EnableIRQ(TIM1_CC_IRQn);
+    if ((uint32_t)(current_values[0] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase A
+        current_values[0] = UINT16_MAX;  // Mark Phase A reading as invalid if it falls outside the valid range
 
-    // Note: PB10 (DRV_FAULT) GPIO and EXTI initialization is handled in comp_setup.h
-    // via MX_DRV_FAULT_GPIO_Init() using LL API (higher priority)
-}
+    if ((uint32_t)(current_values[1] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase B
+        current_values[1] = UINT16_MAX;  // Mark Phase B reading as invalid if it falls outside the valid range
+
+    if ((uint32_t)(current_values[2] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase C
+        current_values[2] = UINT16_MAX;  // Mark Phase C reading as invalid if it falls outside the valid range
+
+    TUNE_HEART.on_adc_values(current_values, voltage_supply,
+                             temperature_adc);  // Pass the validated data into the FOC algorithm core
+
+}  // End of ADC_READY_Callback function
+
+inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA completion
+
+    TUNE_HEART.on_encoder_raw(SPI1_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
+
+}  // End of POSITION_Callback function
+
+
+
+inline void NVIC_Init() {  // Define the initialization function for the Nested Vectored Interrupt Controller
+    NVIC_SetPriority(SPI1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 6, 0));  // Set SPI1 interrupt to priority level 6
+    NVIC_EnableIRQ(SPI1_IRQn);  // Enable the SPI1 interrupt in the NVIC hardware
+
+    NVIC_SetPriority(TIM1_CC_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 3,
+                                                       0));  // Set TIM1 Capture/Compare interrupt to high priority level 3
+    NVIC_EnableIRQ(TIM1_CC_IRQn);                            // Enable the TIM1 Capture/Compare interrupt in the NVIC hardware
+}  // End of NVIC_Init function
 
 /**
- * Timer Update callback (Center-Aligned Mode 3: Update on BOTH overflow and underflow)
+ * @brief Ultra-fast TIM1 CH4 Match Callback (Replaces HAL_TIM_OC_DelayElapsedCallback)
  *
- * Sequence:
- *   Start:      is_overflow = true (first event will be overflow after CNT goes 0→ARR)
- *   1st Update: is_overflow = true  → PWM_Callback() at overflow (CNT=ARR)
- *   2nd Update: is_overflow = false → ENCODER_Callback() at underflow (CNT=0)
- *   3rd Update: is_overflow = true  → PWM_Callback()
- *   4th Update: is_overflow = false → ENCODER_Callback()
- *   ...
+ * This function bypasses HAL entirely. It must be called directly from TIM1_CC_IRQHandler.
  */
-extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
-    if (htim->Instance != TIM1)
-        return;  // Only handle TIM1 (PWM timer)
+inline void FOC_TimTrig_Callback() {  // Define custom inline callback for the timer trigger event
+    ADC1_StartDMAConversion();  // Trigger hardware dual ADC conversion (ADC1 and ADC2 start synchronously)
 
-    static bool is_overflow = true;  // Toggle flag, starts true (first event is OF)
+    SPI1_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading
 
-    if (is_overflow) {
-        PWM_Callback();  // Update PWM duty at overflow (CNT=ARR)
-    } else {
-        ENCODER_Callback();  // Trigger encoder read at underflow (CNT=0)
-    }
+    TIM1_Set_PWM_Values(
+        TUNE_HEART.pwm_duty_values());  // Request new duty cycles from FOC core and write them to hardware registers
+}  // End of FOC_TimTrig_Callback function
 
-    is_overflow = !is_overflow;  // Toggle for next event
-}
-
-/**
- * Output Compare match callback (CH4 triggers when CNT == CCR4)
- *
- * CH4 match occurs TWICE per full cycle (on UP and DOWN count)
- * ADC sampling happens on count UP, just before overflow
- *
- * Sequence:
- *   Start:      is_count_up = true (first match is on UP toward ARR)
- *   1st match:  is_count_up = true  → ADC_START_Callback() (sample ADC before OF)
- *   2nd match:  is_count_up = false → skip (count DOWN, after OF)
- *   3rd match:  is_count_up = true  → ADC_START_Callback()
- *   4th match:  is_count_up = false → skip
- *   ...
- */
-extern "C" void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
-    if (htim->Instance != TIM1)
-        return;  // Only handle TIM1
-    if (htim->Channel != HAL_TIM_ACTIVE_CHANNEL_4)
-        return;  // Only handle CH4 (ADC trigger)
-
-    static bool is_count_up = true;  // Toggle flag, starts true (first match on UP)
-
-    if (is_count_up) {
-        ADC_START_Callback();  // Sample ADC on count UP (before overflow)
-    }
-
-    is_count_up = !is_count_up;  // Toggle for next match
-}
-
-#endif  // NVIC_CLN17V3_H
+#endif  // NVIC_CLN17V3_H // Final close of the header include guard

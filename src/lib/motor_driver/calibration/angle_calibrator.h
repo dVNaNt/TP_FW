@@ -1,287 +1,393 @@
+/**
+ * @file angle_calibrator.h
+ * @brief Motor angle calibration state machine and control
+ *
+ * Implements a multi-stage calibration process for motor encoder alignment.
+ * The calibration performs the following stages:
+ *
+ * 1. Setup: Initialize calibration parameters
+ * 2. Reset: Perform test steps to verify motor response
+ * 3. Pass0: Test single pole motion to detect direction and consistency
+ * 4. Pass1: Full rotation in positive direction with position sampling
+ * 5. Pass2: Full rotation in negative direction with position sampling
+ * 6. Check: Validate calibration data consistency
+ * 7. Ready: Calibration complete, motor ready for operation
+ *
+ * Each calibration cycle consists of four sub-stages:
+ * - Setup: Prepare for new cycle
+ * - Rotating: Move motor at specified speed
+ * - Waiting: Allow motor to settle
+ * - Sampling: Oversample encoder position for stable reading
+ *
+ * The calibration removes hysteresis by collecting data in both directions
+ * and builds a correction table for accurate position feedback.
+ *
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
+ */
+
 #pragma once
 
 #include "../../common.h"
 #include "calibration_table.h"
 
-/// Represents the current stage of the calibration process.
-typedef enum {
-    /// Test the motor's ability to respond linearly and consistently by performing a few test steps.
-    CalStage_Reset = 0, // Initial setup stage for calibration
-    CalStage_Setup = 1, // Stage where the motor is allowed to settle before starting calibration steps
-    CalStage_Pass0 = 2,
-    CalStage_Pass1 = 3, // First pass of the calibration
-    CalStage_Pass2 = 4, // Second pass of the calibration
-    CalStage_Check = 5, // State for verifying the calibration
-    CalStage_Ready = 6, // Calibration is complete and ready
-    CalStage_Error = 7, // An error occurred during calibration
-} CalStage;
-
-/// Represents the state within each calibration cycle quarter:
-/// (Setup -> Rotating -> Waiting -> Sampling)
-typedef enum {
-    /// Initial setup state before starting rotation and sampling.
-    CalSamplingState_Setup,
-    /// Motor is rotating during a calibration step.
-    CalSamplingState_Rotating,
-    /// Motor is waiting (stationary) for a specified settling time.
-    CalSamplingState_Waiting,
-    /// Motor is sampling (oversampling the encoder position) for averaging.
-    CalSamplingState_Sampling,
-} CalSamplingState;
-
-/// The main driver struct for the motor, holding all the state required for operation and calibration.
-typedef struct {
-    uint16_t frequency;    // Update frequency (ticks per second)
-    int32_t position; // Current encoder position reading
-
-    CalStage calibration_stage; // Current stage of the overall calibration process
-    CalSamplingState cal_cycle_stage; // Current sub-stage of the calibration cycle (Setup, Rotating, Waiting, Sampling)
-
-    uint16_t angle_el;    // Electrical angle of the motor (0..65535), used to control phase
-    uint16_t ang_el_step; // Defines how many steps to move in one sub-cycle
-
-    size_t cal_idx; // Index for counting steps during calibration cycles
-    int32_t oversampled_pos; // Accumulator for averaging positions during oversampling (Sampling stage)
-
-    size_t time_in_state; // Counter for how many ticks remain in the current calibration sub-stage
-
-    int32_t direction; // Current rotation direction (1 for forward, -1 for backward)
-    int32_t speed;     // Speed (steps per tick) during calibration
-    size_t settling_time; // Settling time in milliseconds
-
-    int32_t init_pos; // Position recorded at the start of a calibration step
-    int32_t temp_pos; // Temporary position for measuring movement increments
-    int32_t dif_max;  // Maximum difference in step measurement for consistency checks
-    int32_t dif_min;  // Minimum difference in step measurement for consistency checks
-
-    CalibrationTable cal_table;
-    uint16_t el_step_idx;
-} AngleCalibrator;
-
-enum {
-    ANGLE_CAL_CAL_SETTLING_TIME_US = 25000, // Settling time in milliseconds
-    ANGLE_CAL_CAL_SPEED_US = 2500, // Speed in angle increments per millisecond
-
-    ANGLE_CAL_CAL_OVERSEMPLING = 100, // Number of samples per oversampling period for averaging
-    ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 16,
-    ANGLE_CAL_CAL_POINTS_PER_360EL = 4,
+/**
+ * @brief Calibration stage enumeration
+ *
+ * Represents the current stage of the overall calibration process.
+ */
+enum CalStage {
+    CalStage_Reset = 0,  // Initial setup stage for calibration
+    CalStage_Setup = 1,  // Stage where motor is allowed to settle before starting
+    CalStage_Pass0 = 2,  // Test single pole motion for direction detection
+    CalStage_Pass1 = 3,  // First pass: full rotation with sampling
+    CalStage_Pass2 = 4,  // Second pass: reverse rotation with sampling
+    CalStage_Check = 5,  // Verify calibration data consistency
+    CalStage_Ready = 6,  // Calibration complete and ready for operation
+    CalStage_Error = 7,  // Error occurred during calibration
 };
 
-/// Inline method to decrement a counter until it reaches zero.
-///
-/// Returns:
-/// * `false` while counter > 0
-/// * `true` when the counter reaches 0
-static inline bool angle_cal_iter(size_t* counter) {
-    if (*counter > 0) {
-        *counter -= 1; // Decrement the counter
-        return false; // Still have ticks left
+/**
+ * @brief Calibration sampling state enumeration
+ *
+ * Represents the state within each calibration cycle:
+ * Setup -> Rotating -> Waiting -> Sampling
+ */
+enum CalSamplingState {
+    CalSamplingState_Setup,     // Initial setup before starting rotation
+    CalSamplingState_Rotating,  // Motor is rotating during calibration step
+    CalSamplingState_Waiting,   // Motor is stationary, waiting for settling
+    CalSamplingState_Sampling,  // Oversampling encoder position for averaging
+};
+
+/**
+ * @brief Calibration configuration constants
+ */
+enum {
+    ANGLE_CAL_CAL_SETTLING_TIME_US = 50000,  // Settling time in microseconds
+    ANGLE_CAL_CAL_SPEED_US = 2500,           // Speed in angle increments per microsecond
+    ANGLE_CAL_CAL_OVERSEMPLING = 128,        // Number of samples per oversampling period
+    ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 8     // Number of test steps in Pass0
+};
+
+/**
+ * @brief Motor angle calibrator state machine
+ *
+ * Manages the complete calibration process including motor movement,
+ * position sampling, and calibration table generation.
+ */
+struct AngleCalibrator {
+public:
+    /**
+     * @brief Creates a new AngleCalibrator instance
+     * @param frequency Update frequency in ticks per second
+     * @return Initialized AngleCalibrator
+     */
+    AngleCalibrator(uint16_t freq) {
+        size_t settling_time =
+            calculate_settling_time(frequency, ANGLE_CAL_CAL_SETTLING_TIME_US);  // Convert settling time to ticks
+        frequency = freq;                                                        // Store update frequency
+        cal_table = CalibrationTable::create();                                  // Create calibration table
     }
-    return true; // Counter reached zero
-}
 
-/// Inline method for oversampling the encoder position data.
-static inline bool angle_cal_oversampling(int32_t position, size_t* iter, int32_t* integral) {
-    *integral += position; // Add current position to the integral
-    if (*iter > 0) {
-        *iter -= 1; // Decrease iteration count
-    }
-    if (*iter == 0) {
-        // If no more iterations left, finalize averaging
-        *integral = *integral / ANGLE_CAL_CAL_OVERSEMPLING; // Compute the average
-        return true; // Oversampling complete
-    }
-    return false; // Still sampling
-}
+    /**
+     * @brief Main calibration tick function
+     * @param encoder_pos Current encoder position reading
+     * @param motor_type_step Motor type calibration step (4 for Stepper, 6 for BLDC)
+     * @return Current electrical angle for motor control
+     *
+     * Called at regular intervals to advance the calibration state machine.
+     * Returns the electrical angle to apply to the motor.
+     * The motor_type_step parameter determines calibration points per electrical rotation.
+     */
+    uint16_t tick(int32_t encoder_pos, uint8_t motor_type_step) {
+        position = encoder_pos;                                // Update internal position from sensor
+        int32_t stable_pos = run_sampling_cycle(ang_el_step);  // Perform calibration cycle and get stable position
 
-/// Inline method for rotating the motor at a given increment per tick.
-static inline void angle_cal_move_at_speed(AngleCalibrator* self, int32_t increment) {
-    uint16_t new_angle = (uint16_t)(self->angle_el + (uint16_t)increment); // Wrap around if overflow
-    self->angle_el = new_angle; // Update the motor's electrical angle
-}
+        if (stable_pos != INT32_MIN) {
+            // Stable position obtained, advance calibration stage
+            switch (calibration_stage) {
+                case CalStage_Setup:
+                    TP_LOG("CALIBRATION: Starting calibration process");         // Log calibration start
+                    cal_idx = 10;                                                // Set initial iteration count
+                    calibration_stage = CalStage_Reset;                          // Move to Reset stage
+                    speed = calculate_speed(frequency, ANGLE_CAL_CAL_SPEED_US);  // Calculate speed in ticks
+                    TP_LOG("CALIBRATION: Reset stage - performing test steps");  // Log stage transition
+                    return angle_el;                                             // Return current angle
 
-/// Calculate speed in ticks per millisecond.
-static inline int32_t angle_cal_calculate_speed(uint16_t frequency, size_t speed_us) {
-    return (int32_t)((frequency * speed_us) / 1000000u);
-}
-
-/// Calculate settling time in ticks based on frequency and milliseconds.
-static inline size_t angle_cal_calculate_settling_time(uint16_t frequency, size_t settling_us) {
-    return (size_t)((frequency * settling_us) / 1000000u);
-}
-
-static inline AngleCalibrator angle_calibrator_new(uint16_t frequency) {
-    size_t settling_time = angle_cal_calculate_settling_time(frequency, ANGLE_CAL_CAL_SETTLING_TIME_US);
-    AngleCalibrator a;
-    a.frequency = frequency;
-    a.position = 0;
-    a.calibration_stage = CalStage_Setup;
-    a.cal_cycle_stage = CalSamplingState_Setup;
-    a.angle_el = 0;
-    a.cal_idx = 0;
-    a.oversampled_pos = 0;
-    a.time_in_state = 0;
-    a.ang_el_step = 0;
-    a.direction = 0;
-    a.speed = 1;
-    a.settling_time = settling_time;
-    a.init_pos = 0;
-    a.temp_pos = 0;
-    a.dif_max = INT32_MIN;
-    a.dif_min = INT32_MAX;
-    a.cal_table = calibration_table_new();
-    a.el_step_idx = 0;
-    return a;
-}
-
-/// Executes one complete cycle of moving, waiting, and sampling for calibration.
-static inline int32_t angle_cal_run_sampling_cycle(AngleCalibrator* self, uint16_t steps) {
-    switch (self->cal_cycle_stage) {
-        case CalSamplingState_Setup:
-            // Prepare for a new calibration cycle
-            self->oversampled_pos = 0; // Reset oversampling accumulator
-            self->cal_cycle_stage = CalSamplingState_Rotating; // Next state: Rotating
-            self->time_in_state = (steps == 0) ? 0 : (size_t)steps / (size_t)abs(self->speed == 0 ? 1 : self->speed); // Calculate how long to rotate
-            self->el_step_idx = (uint16_t)(self->angle_el + (uint16_t)((int32_t)steps * (int32_t)(self->speed < 0 ? -1 : 1)));
-            return INT32_MIN; // Not finished yet
-
-        case CalSamplingState_Rotating:
-            // Rotate the motor for the specified time
-            angle_cal_move_at_speed(self, self->speed); // Advance angle by 'speed' each tick
-
-            if (angle_cal_iter(&self->time_in_state)) {
-                // Once done rotating, move to Waiting state
-                self->cal_cycle_stage = CalSamplingState_Waiting;
-                self->time_in_state = self->settling_time; // Settle time
-                self->angle_el = self->el_step_idx; // Fine tune angle to
-            }
-            return INT32_MIN; // Still not finished
-
-        case CalSamplingState_Waiting:
-            // Motor is now stationary, waiting
-            if (angle_cal_iter(&self->time_in_state)) {
-                // After waiting, move to Sampling state
-                self->cal_cycle_stage = CalSamplingState_Sampling;
-                self->time_in_state = ANGLE_CAL_CAL_OVERSEMPLING; // Perform oversampling
-            }
-            return INT32_MIN; // Still waiting
-
-        case CalSamplingState_Sampling:
-            // Oversample the encoder position to get a stable reading
-            if (angle_cal_oversampling(self->position, &self->time_in_state, &self->oversampled_pos)) {
-                // Once oversampling is complete:
-                self->cal_cycle_stage = CalSamplingState_Setup; // Reset cycle stage
-                return self->oversampled_pos; // Return the averaged stable position
-            }
-            return INT32_MIN; // Still sampling
-    }
-    return INT32_MIN;
-}
-
-/// High-level calibration method.
-static inline uint16_t angle_calibrator_tick(AngleCalibrator* self, int32_t encoder_pos) {
-    self->position = encoder_pos; // Update the internal position from the sensor
-    int32_t stable_pos = angle_cal_run_sampling_cycle(self, self->ang_el_step); // Perform a calibration cycle and get stable position
-
-    if (stable_pos != INT32_MIN) {
-        switch (self->calibration_stage) {
-            case CalStage_Setup:
-                self->cal_idx = 10; // Arbitrary index setting for demonstration
-                self->calibration_stage = CalStage_Reset;
-                self->speed = angle_cal_calculate_speed(self->frequency, ANGLE_CAL_CAL_SPEED_US);
-                return self->angle_el;
-
-            case CalStage_Reset:
-                if (angle_cal_iter(&self->cal_idx)) {
-                    self->init_pos = stable_pos;
-                    self->temp_pos = stable_pos;
-                    self->dif_max = INT32_MIN;
-                    self->dif_min = INT32_MAX;
-                    self->ang_el_step = (uint16_t)(UINT16_MAX / ANGLE_CAL_CAL_FIRST_STEP_USTEPS);
-                    self->cal_idx = ANGLE_CAL_CAL_FIRST_STEP_USTEPS;
-                    self->calibration_stage = CalStage_Pass0;
-                    TP_LOG("CALIBRATION: Test single pole motion");
-                }
-                break;
-
-            case CalStage_Pass0: {
-                int32_t dif = self->temp_pos - stable_pos;
-                self->temp_pos = stable_pos;
-                if (dif < self->dif_min) self->dif_min = dif;
-                if (dif > self->dif_max) self->dif_max = dif;
-
-                if (angle_cal_iter(&self->cal_idx)) {
-                    int32_t travel = self->init_pos - self->temp_pos; // Total travel during test
-
-                    int32_t direction = (travel >= 0) ? 1 : -1;
-                    self->direction = direction;
-
-                    int32_t avg_step = (travel * direction) / ANGLE_CAL_CAL_FIRST_STEP_USTEPS;
-                    int32_t deviation = self->dif_max - self->dif_min;
-
-                    if (avg_step < deviation) {
-                        self->calibration_stage = CalStage_Error;
-                        return self->angle_el;
+                case CalStage_Reset:
+                    if (iter(&cal_idx)) {
+                        // Reset stage complete, prepare for Pass0
+                        init_pos = stable_pos;                                                   // Record initial position
+                        temp_pos = stable_pos;                                                   // Initialize temporary position
+                        dif_max = INT32_MIN;                                                     // Reset max difference
+                        dif_min = INT32_MAX;                                                     // Reset min difference
+                        ang_el_step = (uint16_t)(UINT16_MAX / ANGLE_CAL_CAL_FIRST_STEP_USTEPS);  // Calculate step size
+                        cal_idx = ANGLE_CAL_CAL_FIRST_STEP_USTEPS;                               // Set number of test steps
+                        calibration_stage = CalStage_Pass0;                                      // Move to Pass0
+                        TP_LOG("CALIBRATION: Test single pole motion");                          // Log stage transition
                     }
+                    break;
 
-                    TP_LOG_VAL("CALIBRATION: Detected motion direction: ", (long)self->direction);
-                    self->calibration_stage = CalStage_Pass1;
-                    self->ang_el_step = (uint16_t)(UINT16_MAX / ANGLE_CAL_CAL_POINTS_PER_360EL);
-                    self->speed = (int32_t)(-self->speed * self->direction);
-                    self->cal_idx = 0;
-                    self->init_pos = stable_pos;
-                    calibration_table_reset(&self->cal_table, ANGLE_CAL_CAL_POINTS_PER_360EL);
-                    TP_LOG("CALIBRATION: Full rotation in positive direction with sampling");
+                case CalStage_Pass0: {
+                    // Test single pole motion to detect direction and consistency
+                    int32_t dif = temp_pos - stable_pos;  // Calculate step difference
+                    temp_pos = stable_pos;                // Update temporary position
+                    if (dif < dif_min)
+                        dif_min = dif;  // Track minimum difference
+                    if (dif > dif_max)
+                        dif_max = dif;  // Track maximum difference
+
+                    if (iter(&cal_idx)) {
+                        // Pass0 complete, analyze results
+                        int32_t travel = init_pos - temp_pos;        // Calculate total travel distance
+                        int32_t direction = (travel >= 0) ? 1 : -1;  // Determine rotation direction
+                        this->direction = direction;                 // Store detected direction
+
+                        int32_t avg_step = (travel * direction) / ANGLE_CAL_CAL_FIRST_STEP_USTEPS;  // Calculate average step size
+                        int32_t deviation = dif_max - dif_min;  // Calculate step deviation range
+
+                        if (avg_step < deviation) {
+                            // Motion too inconsistent, calibration failed
+                            TP_LOG("CALIBRATION: ERROR - Motion too inconsistent");  // Log calibration error
+                            calibration_stage = CalStage_Error;                      // Move to Error stage
+                            return angle_el;                                         // Return current angle
+                        }
+
+                        TP_LOG_VAL("CALIBRATION: Detected motion direction: ", (long)this->direction);  // Log detected direction
+                        calibration_stage = CalStage_Pass1;                                             // Move to Pass1
+                        ang_el_step =
+                            (uint16_t)(UINT16_MAX /
+                                       motor_type_step);  // Calculate step size based on motor type (4 for Stepper, 6 for BLDC)
+                        speed = (int32_t)(-speed * this->direction);  // Adjust speed for detected direction
+                        cal_idx = 0;                                  // Reset calibration index
+                        init_pos = stable_pos;                        // Record starting position for Pass1
+                        cal_table.reset(motor_type_step);             // Reset calibration table with motor-specific step count
+                        TP_LOG("CALIBRATION: Full rotation in positive direction with sampling");  // Log stage transition
+                    }
+                    break;
                 }
-                break;
+
+                case CalStage_Pass1: {
+                    // Full rotation in positive direction with position sampling
+                    int32_t avg_step = (stable_pos - init_pos) / (int32_t)(cal_idx + 1);  // Calculate average step size
+                    if (stable_pos - init_pos > (int32_t)UINT16_MAX + (avg_step / 3)) {
+                        // Completed full rotation, move to Pass2
+                        calibration_stage = CalStage_Pass2;  // Move to Pass2
+                        TP_LOG_VAL("CALIBRATION: Full rotation in negative direction with sampling ",
+                                   cal_idx);  // Log stage transition
+                        speed = -speed;       // Reverse speed for backward rotation
+                        return angle_el;      // Return current angle
+                    }
+                    cal_table.fill_first(cal_idx, (uint16_t)stable_pos);  // Store position in calibration table
+                    cal_idx += 1;                                         // Increment calibration index
+                    break;
+                }
+
+                case CalStage_Pass2:
+                    // Full rotation in negative direction with position sampling
+                    if (cal_idx > 0) {
+                        cal_idx -= 1;  // Decrement calibration index
+                    }
+                    cal_table.fill_second(cal_idx, (uint16_t)stable_pos);  // Store backward position in table
+
+                    if (cal_idx == 0) {
+                        // Pass2 complete, move to Check stage
+                        TP_LOG("CALIBRATION: Pass2 complete - validating data");  // Log stage transition
+                        calibration_stage = CalStage_Check;                       // Move to Check stage
+                        angle_el = 0;                                             // Reset electrical angle
+                    }
+                    break;
+
+                case CalStage_Check:
+                    // Validate calibration data
+                    if (cal_table.check())                                                 // Perform calibration table validation
+                        TP_LOG("CALIBRATION: Validation complete - motor ready for use");  // Log calibration success
+                    else
+                        TP_LOG("CALIBRATION: Validation error - motor ready for use");
+                    calibration_stage = CalStage_Ready;  // Move to Ready stage
+                    break;
+
+                case CalStage_Error:
+                case CalStage_Ready:
+                default:
+                    break;  // No action in Error or Ready states
             }
-
-            case CalStage_Pass1: {
-                int32_t avg_step = (stable_pos - self->init_pos) / (int32_t)(self->cal_idx + 1);
-                if (stable_pos - self->init_pos > (int32_t)UINT16_MAX + (avg_step / 3)) {
-                    self->calibration_stage = CalStage_Pass2;
-                    TP_LOG("CALIBRATION: Full rotation in negative direction with sampling");
-                    self->speed = -self->speed;
-                    return self->angle_el;
-                }
-                calibration_table_fill_first(&self->cal_table, self->cal_idx, (uint16_t)stable_pos);
-                self->cal_idx += 1;
-                break;
-            }
-
-            case CalStage_Pass2:
-                if (self->cal_idx > 0) {
-                    self->cal_idx -= 1;
-                }
-                calibration_table_fill_second(&self->cal_table, self->cal_idx, (uint16_t)stable_pos);
-
-                if (self->cal_idx == 0) {
-                    self->calibration_stage = CalStage_Check;
-                    TP_LOG("CALIBRATION: Finished. Next => NORMAL RUN");
-                    self->angle_el = 0;
-                }
-                break;
-
-            case CalStage_Check:
-                calibration_table_check(&self->cal_table);
-                self->calibration_stage = CalStage_Ready;
-                break;
-            case CalStage_Error:
-            case CalStage_Ready:
-            default:
-                break;
         }
+        return angle_el;  // Return current electrical angle
     }
-    return self->angle_el;
-}
 
-/// Check if calibration is complete (motor is ready for normal operation).
-static inline bool angle_calibrator_is_ready(const AngleCalibrator* self) {
-    return self->calibration_stage == CalStage_Ready;
-}
+    /**
+     * @brief Checks if calibration is complete
+     * @return true if motor is ready for normal operation
+     */
+    bool is_ready() const {
+        return calibration_stage == CalStage_Ready;  // Check if in Ready stage
+    }
 
-static inline void angle_calibrator_get_correction(const AngleCalibrator* self, uint16_t pos, uint16_t* corrected_pos, uint16_t* mech_angle) {
-    calibration_table_correct_pos(&self->cal_table, pos, corrected_pos, mech_angle);
-}
+    /**
+     * @brief Gets corrected position using calibration table
+     * @param pos Raw encoder position
+     * @param mech_angle Output: mechanical angle
+     */
+    uint16_t get_el_angle_correction(uint16_t pos) const {
+        return cal_table.correct_el_angle(pos);  // Apply calibration correction
+    }
 
 
+    uint16_t get_position_correction(uint16_t pos) const {
+        return cal_table.correct_position(pos);  // Apply calibration correction
+    }
+
+private:
+    uint16_t frequency;    // Update frequency in ticks per second
+    int32_t position = 0;  // Current encoder position reading
+
+    CalStage calibration_stage = CalStage_Setup;                // Current stage of overall calibration process
+    CalSamplingState cal_cycle_stage = CalSamplingState_Setup;  // Current sub-stage of calibration cycle
+
+    uint16_t angle_el = 0;     // Electrical angle of motor (0..65535)
+    uint16_t ang_el_step = 0;  // Angle step size for current calibration stage
+
+    size_t cal_idx = 0;           // Index for counting steps during calibration
+    int32_t oversampled_pos = 0;  // Accumulator for averaging positions during oversampling
+    int32_t base = 0;
+
+    size_t time_in_state = 0;  // Counter for ticks remaining in current sub-stage
+
+    int32_t direction = 0;  // Rotation direction (1 forward, -1 backward)
+    int32_t speed = 1;      // Speed in angle increments per tick
+    size_t settling_time;   // Settling time in ticks
+
+    int32_t init_pos = 0;         // Position recorded at start of calibration step
+    int32_t temp_pos = 0;         // Temporary position for measuring movement
+    int32_t dif_max = INT32_MIN;  // Maximum step difference for consistency checks
+    int32_t dif_min = INT32_MAX;  // Minimum step difference for consistency checks
+
+    CalibrationTable cal_table;  // Calibration data table
+    uint16_t el_step_idx = 0;    // Target electrical angle after rotation
+
+    /**
+     * @brief Decrements a counter until it reaches zero
+     * @param counter Pointer to counter variable
+     * @return false while counter > 0, true when counter reaches 0
+     */
+    static bool iter(size_t* counter) {
+        if (*counter > 0) {
+            *counter -= 1;  // Decrement counter
+            return false;   // Still have ticks left
+        }
+        return true;  // Counter reached zero
+    }
+
+    /**
+     * @brief Oversamples encoder position for stable reading
+     * @param position Current encoder position
+     * @param iter Pointer to iteration counter
+     * @param integral Pointer to accumulator
+     * @return true when oversampling complete, false otherwise
+     */
+    bool oversampling(int32_t position, size_t& iter, int32_t& integral, int32_t& base) {
+        if (iter == ANGLE_CAL_CAL_OVERSEMPLING) {
+            base = position;  // Сохраняем абсолютную позицию (включая обороты)
+            integral = 0;     // Строго очищаем сумму!
+        }
+
+        // (uint16_t) решает проблему дрожания 65535<->0
+        // (int16_t) дает знак отклонения, не теряя при этом макро-смещение в base
+        int16_t diff = (int16_t)(uint16_t)(position - base);
+        integral += diff;
+
+        if (iter > 0) {
+            iter -= 1;  // Decrement iteration counter
+        }
+
+        if (iter == 0) {
+            // Усредненную дельту прибавляем к абсолютной базе
+            integral = base + (integral / (int32_t)ANGLE_CAL_CAL_OVERSEMPLING);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * @brief Rotates motor at specified speed
+     * @param increment Angle increment per tick
+     */
+    void move_at_speed(int32_t increment) {
+        uint16_t new_angle = (uint16_t)(angle_el + (uint16_t)increment);  // Calculate new angle (wraps automatically)
+        angle_el = new_angle;                                             // Update electrical angle
+    }
+
+    /**
+     * @brief Calculates speed in angle increments per tick
+     * @param frequency Update frequency in Hz
+     * @param speed_us Speed in microseconds
+     * @return Speed in angle increments per tick
+     */
+    static int32_t calculate_speed(uint16_t frequency, size_t speed_us) {
+        return (int32_t)((frequency * speed_us) / 1000000u);  // Convert to ticks
+    }
+
+    /**
+     * @brief Calculates settling time in ticks
+     * @param frequency Update frequency in Hz
+     * @param settling_us Settling time in microseconds
+     * @return Settling time in ticks
+     */
+    static size_t calculate_settling_time(uint16_t frequency, size_t settling_us) {
+        return (size_t)((frequency * settling_us) / 1000000u);  // Convert to ticks
+    }
+
+    /**
+     * @brief Executes one complete sampling cycle
+     * @param steps Number of angle steps to move
+     * @return Stable averaged position or INT32_MIN if not yet complete
+     *
+     * Cycle stages: Setup -> Rotating -> Waiting -> Sampling
+     */
+    int32_t run_sampling_cycle(uint16_t steps) {
+        switch (cal_cycle_stage) {
+            case CalSamplingState_Setup:
+                // Prepare for new calibration cycle
+                oversampled_pos = 0;                          // Reset oversampling accumulator
+                cal_cycle_stage = CalSamplingState_Rotating;  // Move to Rotating state
+                time_in_state =
+                    (steps == 0) ? 0 : (size_t)steps / (size_t)abs(speed == 0 ? 1 : speed);  // Calculate rotation duration
+                el_step_idx =
+                    (uint16_t)(angle_el + (uint16_t)((int32_t)steps * (int32_t)(speed < 0 ? -1 : 1)));  // Calculate target angle
+                return INT32_MIN;                                                                       // Not finished yet
+
+            case CalSamplingState_Rotating:
+                // Rotate motor for specified time
+                move_at_speed(speed);  // Advance angle by speed each tick
+
+                if (iter(&time_in_state)) {
+                    // Rotation complete, move to Waiting state
+                    cal_cycle_stage = CalSamplingState_Waiting;  // Move to Waiting state
+                    time_in_state = settling_time;               // Set settling time duration
+                    angle_el = el_step_idx;                      // Fine-tune angle to target
+                }
+                return INT32_MIN;  // Still rotating
+
+            case CalSamplingState_Waiting:
+                // Motor stationary, waiting for settling
+                if (iter(&time_in_state)) {
+                    // Settling complete, move to Sampling state
+                    cal_cycle_stage = CalSamplingState_Sampling;  // Move to Sampling state
+                    time_in_state = ANGLE_CAL_CAL_OVERSEMPLING;   // Set oversampling count
+                }
+                return INT32_MIN;  // Still waiting
+
+            case CalSamplingState_Sampling:
+                // Oversample encoder position for stable reading
+                if (oversampling(position, time_in_state, oversampled_pos, base)) {
+                    // Oversampling complete
+                    cal_cycle_stage = CalSamplingState_Setup;  // Reset to Setup for next cycle
+                    return oversampled_pos;                    // Return averaged stable position
+                }
+                return INT32_MIN;  // Still sampling
+        }
+        return INT32_MIN;  // Default return
+    }
+};

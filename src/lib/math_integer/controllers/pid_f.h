@@ -88,7 +88,7 @@ public:
     /// @param limit_q15 Maximum output voltage in Q15 format [0..32767]
     /// @param dt_seconds Time since last call in seconds [s]
     /// @return Controller output voltage in Q15 format [-32767..32767]
-    int16_t tick(int16_t target_q15, int16_t measurement_q15, int16_t limit_q15, float dt_seconds) {
+    int16_t tick(int32_t target_q15, int32_t measurement_q15, int32_t limit_q15, float dt_seconds) {
         // Validate time step (protect against zero or negative dt)
         if (dt_seconds <= 0.0f) {
             dt_seconds = 0.0001f;  // Default to 10 kHz sampling rate (100 us period)

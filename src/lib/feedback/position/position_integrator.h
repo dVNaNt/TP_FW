@@ -47,7 +47,7 @@ public:
     Position(uint8_t alpha) : position_(0), filter_(0, alpha) {}  // Constructor: Create with specified filter alpha
     
     // Get current encoder angle (0..65535)
-    inline uint16_t get_angle() const {  // Get current angle value
+    inline uint16_t get_angle() {  // Get current angle value
         return (uint16_t)position_;  // Return low 16 bits as angle
     }
     

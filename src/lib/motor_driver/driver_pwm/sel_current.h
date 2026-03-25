@@ -25,9 +25,7 @@ private:
     Vec2D ab_out_;  // Output Vec2D: sin=alpha, cos=beta in Q15 format
 
     // LPF filters for phase currents (used for balance validation)
-    FilterEMA lpf_a_;  // LPF filter for phase A current
-    FilterEMA lpf_b_;  // LPF filter for phase B current
-    FilterEMA lpf_c_;  // LPF filter for phase C current
+    FilterEMA lpf_;  // LPF filter for phase balance
 
     // Reference to parent Feedback
     Feedback& feedback_;
@@ -49,11 +47,7 @@ public:
         : feedback_(parent),
           epsilon_abs_(0)  // Will be calculated in set_epsilon()
           ,
-          lpf_a_(0, LPF_ALPHA)  // Initialize LPF for phase A
-          ,
-          lpf_b_(0, LPF_ALPHA)  // Initialize LPF for phase B
-          ,
-          lpf_c_(0, LPF_ALPHA)  // Initialize LPF for phase C
+          lpf_(0, LPF_ALPHA)  // Initialize LPF for phase A
           ,
           ab_out_{0, 0}  // Initialize output Vec2D to zeros
           ,
@@ -67,7 +61,6 @@ public:
         epsilon_abs_ = abs((int32_t)epsilon);  // Store absolute value of epsilon
     }
 
-
     /// Main calculation: convert ABC currents to AB with sensor recombination
     /// @param abc ABC currents array [A, B, C] in Q15 format (INT16_MIN = sensor missing)
     /// @param motor_type Motor type (1=DC, 4=Stepper, 6=BLDC)
@@ -80,20 +73,19 @@ public:
 
         // Validate motor type is supported or no current sense or we have only C current for DC or we have only 1 current for
         // BLDC/STEP (short exit)
-        if (!(mt == MotorType_DC || mt == MotorType_BLDC || mt == MotorType_STEP) or !(valid_a || valid_b) or
-            (mt != MotorType_DC and present_cnt == 1)) {
+        if (!(valid_a || valid_b) or (mt != MotorType_DC and present_cnt == 1)) {
             ab_out_ = Vec2D(INT16_MIN, INT16_MIN);
             err_ = true;
             return;  // Exit early on invalid motor type
         }
- 
+
         // making invalid currents as zero to simplify balance math
         int32_t ia = (abc.a != INT16_MIN) ? abc.a : 0;
         int32_t ib = (abc.b != INT16_MIN) ? abc.b : 0;
         int32_t ic = (abc.c != INT16_MIN) ? abc.c : 0;
 
-        if (present_cnt < 3) { // speedup logic if all 3 sensors present
-            const int32_t sum = clamp_i32(ia + ib + ic, INT16_MAX);
+        const int32_t sum = clamp_i32(ia + ib + ic, INT16_MAX);
+        if (present_cnt < 3) {  // speedup logic if all 3 sensors present
             // Recombine missing phase using Kirchhoff's Current Law (ia + ib + ic = 0)
             if (!valid_a)
                 ia = -sum;  // Phase A missing: ia = -(ib + ic)
@@ -109,36 +101,34 @@ public:
         // Handle DC motor: calculate current from available sensors
         switch (mt) {
             case MotorType_DC:
-                alpha = (ib - ia) / 2;  // if we have only one sensor it will be recongured so less math branches
-                beta = 0;               // Beta = 0 for DC motor
+                alpha = (ib - ia) >> 1;  // if we have only one sensor it will be recongured so less math branches
+                beta = 0;                // Beta = 0 for DC motor
                 break;
             case MotorType_STEP:
                 alpha = ia;
                 beta = ib;
                 break;
-            default:  // MotorType_BLDC
+            case MotorType_BLDC:
                 // Perform Clarke Transform to convert ABC to alpha-beta
                 constexpr static int32_t INV_SQRT3_Q15 = 18919;  // 1/sqrt(3) in Q15 format (floor(0.577350269 * 2^15) = 18918.6)
                 alpha = ia;
                 // Calculate beta: I_beta = (I_B - I_C) *  1/sqrt(3)
                 beta = clamp_i32(((ib - ic) * INV_SQRT3_Q15) >> 15, INT16_MAX);  // Shift right to convert to Q15
                 break;
+            default:
+                ab_out_ = Vec2D(INT16_MIN, INT16_MIN);
+                err_ = true;
+                return;  // Exit early on invalid motor type
         }
         ab_out_ = {alpha, beta};
         err_ = false;  // Clear error flag
 
-        // Update LPF filters with recombined values (always tick all 3 filters)
-        lpf_a_.tick_lpf(ia);  // Filter phase A current
-        lpf_b_.tick_lpf(ib);  // Filter phase B current
-        lpf_c_.tick_lpf(ic);  // Filter phase C current
-
-        if (present_cnt + (mt == MotorType_DC) >= 3) {
-            // Handle motor phase balance
+        if (present_cnt + (mt == MotorType_DC) >= 3) {  // Handle motor phase balance
             // Calibration mode uses stepper-style current sensing (direct alpha-beta mapping)
-            const int32_t bal = (int32_t)lpf_c_.get_output() + (int32_t)lpf_a_.get_output() + (int32_t)lpf_b_.get_output();
-            if (abs(bal) > epsilon_abs_) {  // Check if within tolerance
-                err_ = true;                // Clear error flag if balanced
-            }
+            // Filter updated only when enough sensors for motor balance (2 for DC and 3 for rest). Using real sum of sensors
+            const int16_t bal = lpf_.tick_lpf(sum);
+            if (bal > epsilon_abs_ or bal < -epsilon_abs_)  // Check if within tolerance
+                err_ = true;                                // Clear error flag if balanced
         }
     }
 
@@ -149,16 +139,4 @@ public:
     /// Get AB output as Vec2D (alpha-beta currents)
     /// @return Vec2D with sin=alpha, cos=beta in Q15 format
     inline Vec2D get_ab() const { return ab_out_; }
-
-    /// Get filtered phase A current value
-    /// @return Filtered phase A current in Q15 format
-    inline int16_t get_filtered_a() const { return lpf_a_.get_output(); }
-
-    /// Get filtered phase B current value
-    /// @return Filtered phase B current in Q15 format
-    inline int16_t get_filtered_b() const { return lpf_b_.get_output(); }
-
-    /// Get filtered phase C current value
-    /// @return Filtered phase C current in Q15 format
-    inline int16_t get_filtered_c() const { return lpf_c_.get_output(); }
 };

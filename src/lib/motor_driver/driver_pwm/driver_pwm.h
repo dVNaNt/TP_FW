@@ -4,6 +4,7 @@
 
 #include "../../common.h"
 #include "../../feedback/feedback.h"
+#include "../../math_integer/controllers/ladrc1st.h"
 #include "../../math_integer/helpers/frequency_generator.h"  // Frequency generator for HFI
 #include "../../math_integer/helpers/speaker.h"              // Motor speaker for audio feedback
 #include "../../math_integer/helpers/stability_check.h"      // Stability check for current monitoring
@@ -11,6 +12,7 @@
 #include "../motor.h"                                        // Motor parameters structure
 #include "hfi_sense.h"                                       // HFI sense for inductance measurement
 #include "sel_motor.h"
+#include "foc-current.h"                                     // FOC current controller with feedforward
 
 volatile int16_t dead_time_duty = 1310;
 volatile int16_t dead_time_duty_sincos = 0;
@@ -32,6 +34,7 @@ static constexpr int16_t CAL_ANGLE_45D = 8192;  // -45 deg
 static constexpr int16_t WARMUP_TIMEOUT = 4500;
 static constexpr int16_t SETTLE_TIMEOUT = 900;
 static constexpr int16_t ROTATION_TIMEOUT = 1800;
+
 
 // Motor calibration structure with all calibration-related variables and states
 struct MotorCalibration {
@@ -130,6 +133,7 @@ public:
     void reset_voltage() { voltage_ = 0; }  // Reset voltage to zero
 };
 
+
 struct DriverPWM {
 public:
     // Motor configuration reference (owned by TunePulseHeart)
@@ -160,8 +164,6 @@ public:
         tick_control_foc_(angle, target_current, feedback);
     }
 
-    // Set maximum duty cycle limit
-    void set_duty(uint16_t duty_permille) { motor_selector.set_duty(duty_permille); }
 
     // Set current balance tolerance
     void set_current_epsilon(int16_t epsilon) { motor_selector.set_current_epsilon(epsilon); }
@@ -258,6 +260,9 @@ private:
     FilterEMA lpf_id_;
     FilterEMA lpf_iq_;
 
+    LADRC1st ladrc_d = LADRC1st(0.00005f, 4000.0f, 12000.0f, 1.0f / 0.003);
+    LADRC1st ladrc_q = LADRC1st(0.00005f, 4000.0f, 12000.0f, 1.0f / 0.003);
+
     // Adaptive low-pass filter for current measurement from 100hz to 3500hz spin frequency with 20khz base rate
     // Main goal is to adjust Fc to reduce phase delay on high frequency signals. At low speeds it will ensure high filtration to
     // reduce audiable noise caused by current regulators
@@ -269,6 +274,9 @@ private:
 
     FocPI pi_d_;
     FocPI pi_q_;
+    
+    // FOC current controller with feedforward compensation
+    FocCurrentController foc_current_;
 
     // Used to charge mosfet driver before going high on all channels
     static constexpr uint32_t CALIBRATION_ZERO_CYCLES = 50;  // Cycles with zero PWM
@@ -380,13 +388,13 @@ private:
                 if (motor_calib_status == MotorStatus::Success) {  // Check if motor calibration is complete
 
                     // ========================================================================
-                    // IV. Processing main FOC loop execution
+                    // IV. Processing main FOC loop execution with FOC Current Controller
                     // ========================================================================
 
                     // System timing parameters
                     const float TS = 1.0f / 20000.0f;  // Sampling period: 50 us (20 kHz PWM frequency)
 
-                    // Voltage limit (half of supply voltage for safety margin)
+                    // Voltage limit (60% of supply voltage for safety margin)
                     int16_t v_limit = ((int32_t)feedback.supply.get_voltage_norm() * 3) / 5;  // Q15 normalized voltage limit
 
                     // ================================================================
@@ -404,86 +412,67 @@ private:
                         (float)angular_speed * (3.14159f / (32768.0f * TS));  // Electrical angular velocity [rad/s]
 
                     // ================================================================
-                    // Motor Parameters for Feedforward Calculation
+                    // Convert Target and Measured Currents to Amperes
                     // ================================================================
-                    // R: Phase resistance in milliohms (mΩ)
-                    // L: Phase inductance in microhenries (μH) - measured or default 3 mH
-                    // λf: Back-EMF constant (flux linkage) - not yet measured, set to 0 for now
-
-                    int32_t R_mohm = motor.get_total_resistance();    // Phase resistance [mΩ]
-                    int32_t L_uh = motor.get_effective_inductance();  // Phase inductance [μH] (3000 μH = 3 mH default)
-
-                    // Convert inductance from μH to mH for calculation
-                    float L_h = (float)L_uh * 0.000001f;  // Inductance [mH]
+                    // Current is in Q15 format, convert to physical units (A)
+                    
+                    float Id_target_a = (float)feedback.current.norm2ma(target_current.d) / 1000.0f;  // D-axis target current [A]
+                    float Iq_target_a = (float)feedback.current.norm2ma(target_current.q) / 1000.0f;  // Q-axis target current [A]
+                    
+                    float Id_measured_a = (float)feedback.current.norm2ma(current_dq_filt.flux) / 1000.0f;  // D-axis measured current [A]
+                    float Iq_measured_a = (float)feedback.current.norm2ma(current_dq_filt.torque) / 1000.0f;  // Q-axis measured current [A]
 
                     // ================================================================
-                    // Convert Target and Measured Currents to Milliamps
+                    // FOC Current Controller Execution
                     // ================================================================
-                    // Current is in Q15 format, convert to physical units (mA)
-
-                    int32_t Id_target_ma =
-                        feedback.current.norm2ma(target_current.d);  // D-axis target current [mA] (zero for PMSM)
-                    int32_t Iq_target_ma = feedback.current.norm2ma(target_current.q);  // Q-axis target current [mA]
-
+                    // Call FOC current controller with feedforward compensation
+                    // Controller automatically handles:
+                    // - Resistive voltage drop (R * I)
+                    // - Inductive voltage drop (ω * L * I)
+                    // - Back-EMF compensation (ω * Ke)
+                    // - Cross-coupling terms (d-q interaction)
+                    // - PI feedback correction
+                    // - Anti-windup protection
+                    
+                    float bus_voltage_v = (float)feedback.supply.norm2mv(feedback.supply.get_voltage_norm()) / 1000.0f;  // Bus voltage [V]
+                    float voltage_limit_fraction = 0.50f;  // 60% voltage limit for safety margin
+                    float theta_el_rad = (float)angle_ * (3.14159f / 32768.0f);  // Convert Q15 angle to radians
+                    
+                    // Execute FOC current controller
+                    FocCurrentController::VoltageDQ voltage_dq_result = foc_current_.tick(
+                        Id_target_a,           // Target D-axis current [A]
+                        Iq_target_a,           // Target Q-axis current [A]
+                        Id_measured_a,         // Measured D-axis current [A]
+                        Iq_measured_a,         // Measured Q-axis current [A]
+                        bus_voltage_v,         // Bus voltage [V]
+                        voltage_limit_fraction,// Voltage limit fraction (0.6 = 60%)
+                        theta_el_rad,          // Electrical angle [rad]
+                        omega_e_rad_s          // Electrical angular velocity [rad/s]
+                    );
+                    
                     // ================================================================
-                    // Feedforward Voltage Calculation
+                    // Convert FOC Controller Output to Q15 Normalized Format
                     // ================================================================
-                    // Vd_FF = (R * Id_target) - (ωe * L * Iq_target)
-                    // Vq_FF = (R * Iq_target) + (ωe * L * Id_target) + (ωe * λf)
-                    //
-                    // All calculations in millivolts (mV) and milliamps (mA)
-                    // R [mΩ], I [mA] → V [μV] → divide by 1000 to get [mV]
-                    // ωe [rad/s], L [mH], I [mA] → V [mV]
-
-                    // Resistive voltage drop: V_R = R * I [mΩ * mA = μV → mV]
-                    float Vd_resistive = ((float)R_mohm * (float)Id_target_ma) / 1000.0f;  // [mV]
-                    float Vq_resistive = ((float)R_mohm * (float)Iq_target_ma) / 1000.0f;  // [mV]
-
-                    // Inductive voltage drop: V_L = ωe * L * I [rad/s * mH * mA = mV]
-                    float Vd_inductive = omega_e_rad_s * L_h * (float)Iq_target_ma;  // [mV]
-                    float Vq_inductive = omega_e_rad_s * L_h * (float)Id_target_ma;  // [mV]
-
-                    // Back-EMF voltage: V_bemf = ωe * λf [rad/s * V·s/rad = V]
-                    // λf is not yet measured, set to 0 for now
-                    float Vq_bemf = 0.0f;  // [mV] - TODO: Add back-EMF constant measurement
-
-                    // Total feedforward voltages [mV]
-                    float Vd_FF_mv = Vd_resistive - Vd_inductive;            // Vd_FF = R*Id - ωe*L*Iq
-                    float Vq_FF_mv = Vq_resistive + Vq_inductive + Vq_bemf;  // Vq_FF = R*Iq + ωe*L*Id + ωe*λf
-
-                    // ================================================================
-                    // Convert Feedforward Voltages to Q15 Normalized Format
-                    // ================================================================
-                    // Convert from millivolts to Q15 normalized format using feedback supply voltage
-
-                    int16_t Vd_FF_norm = feedback.supply.mv2norm((int32_t)Vd_FF_mv);  // Convert to Q15
-                    int16_t Vq_FF_norm = feedback.supply.mv2norm((int32_t)Vq_FF_mv);  // Convert to Q15
-
-                    // ================================================================
-                    // PI Controller with Feedforward Compensation
-                    // ================================================================
-                    // PI controller calculates feedback correction based on current error
-                    // Feedforward adds model-based voltage to improve tracking performance
-
-                    int16_t vq_pi =
-                        pi_q_.tick(target_current.q, current_dq_filt.torque, v_limit - Vq_FF_norm, TS);  // Q-axis PI output
-                    int16_t vd_pi =
-                        pi_d_.tick(target_current.d, current_dq_filt.flux, v_limit - Vd_FF_norm, TS);  // D-axis PI output
-
-                    // Add feedforward compensation to PI output
-                    int32_t vd_total = (int32_t)vd_pi + (int32_t)Vd_FF_norm;  // Total D-axis voltage
-                    int32_t vq_total = (int32_t)vq_pi + (int32_t)Vq_FF_norm;  // Total Q-axis voltage
-
+                    // Convert from volts to Q15 normalized format using feedback supply voltage
+                    
+                    int32_t Vd_mv = (int32_t)(voltage_dq_result.u_d * 1000.0f);  // Convert to millivolts
+                    int32_t Vq_mv = (int32_t)(voltage_dq_result.u_q * 1000.0f);  // Convert to millivolts
+                    
+                    int16_t Vd_norm = feedback.supply.mv2norm(Vd_mv);  // Convert to Q15
+                    int16_t Vq_norm = feedback.supply.mv2norm(Vq_mv);  // Convert to Q15
+                    
                     // Store final voltage commands
-                    voltage_dq = Vec2D((int16_t)vd_total, (int16_t)vq_total);
-                    break;
+                    voltage_dq = Vec2D(Vd_norm, Vq_norm);
+                    break;  // Fast exit from switch
                 }
 
                 // Motor calibration in progress - unified motor calibration switch
                 // Handles all calibration sub-states
-                const int32_t curnt_a = motor_selector.get_filtered_a();
-                const int32_t curnt_b = motor_selector.get_filtered_b();
+                Vec2D current_ab_filt = current_dq_filt.rotate(angle_sincos);
+                const int32_t curnt_a = current_ab_filt.a;
+                const int32_t curnt_b = current_ab_filt.b;
 
+                // Correction for sqrt(2)
                 int32_t voltage_corrected = (motor_calib.get_voltage() * 46341) >> 16;
 
                 int16_t measured_current = abs(curnt_a + curnt_b);
@@ -693,24 +682,20 @@ private:
         voltage_ab.sin = feedback.supply.norm2duty(voltage_ab.sin);
         voltage_ab.cos = feedback.supply.norm2duty(voltage_ab.cos);
 
-        int16_t test_sin, test_sin_val, test_sincos, test_sincos_val;
+        // if (compensation_current == 1) {
+        //     int16_t dt_correction_sincos =
+        //         deadtime_compensate_sqrt(current_ab_filt.cos + current_ab_filt.sin, voltage_ab.cos + voltage_ab.sin,
+        //                                  deadzone_sincos, i_deadband_sincos, dead_time_duty);
+        //     int16_t dt_correction_sin =
+        //         deadtime_compensate_sqrt(current_ab_filt.sin, voltage_ab.sin, deadzone, i_deadband, dead_time_duty) +
+        //         dt_correction_sincos;
+        //     int16_t dt_correction_cos =
+        //         deadtime_compensate_sqrt(current_ab_filt.cos, voltage_ab.cos, deadzone, i_deadband, dead_time_duty) +
+        //         dt_correction_sincos;
 
-        int16_t dt_correction_sin = 0;
-        int16_t dt_correction_cos = 0;
-        if (compensation_current == 1) {
-            int16_t dt_correction_sincos =
-                deadtime_compensate_sqrt(current_ab_filt.cos + current_ab_filt.sin, voltage_ab.cos + voltage_ab.sin,
-                                         deadzone_sincos, i_deadband_sincos, dead_time_duty, test_sincos, test_sincos_val);
-            dt_correction_sin = deadtime_compensate_sqrt(current_ab_filt.sin, voltage_ab.sin, deadzone, i_deadband,
-                                                         dead_time_duty, test_sin, test_sin_val) +
-                                dt_correction_sincos;
-            dt_correction_cos = deadtime_compensate_sqrt(current_ab_filt.cos, voltage_ab.cos, deadzone, i_deadband,
-                                                         dead_time_duty, test_state, test_comp_val) +
-                                dt_correction_sincos;
-
-            voltage_ab.sin += dt_correction_sin;
-            voltage_ab.cos += dt_correction_cos;
-        }
+        //     voltage_ab.sin += dt_correction_sin;
+        //     voltage_ab.cos += dt_correction_cos;
+        // }
 
         voltage_ab_ = voltage_ab;
 
@@ -746,13 +731,7 @@ private:
      * @param compensation  Полная величина компенсации (int16_t)
      * @return              Скорректированная компенсация
      */
-    int16_t deadtime_compensate_sqrt(int16_t current,
-                                     int16_t voltage,
-                                     int16_t threshold,
-                                     int16_t i_dband,
-                                     int16_t compensation,
-                                     int16_t& test_val,
-                                     int16_t& test_st) {
+    int16_t deadtime_compensate_sqrt(int16_t current, int16_t voltage, int16_t threshold, int16_t i_dband, int16_t compensation) {
         if (threshold <= 0 || compensation == 0) {
             return 0;
         }
@@ -803,6 +782,49 @@ private:
         // Mark motor calibration as complete (Success = 0)
         motor_calib_status = MotorStatus::Success;  // Calibration complete
         motor.set_status(MotorStatus::Success);     // Update motor status
+
+        // ================================================================
+        // Initialize FOC Current Controller with Motor Parameters
+        // ================================================================
+        // Motor parameters (SI units):
+        // - Phase resistance: 2.4 Ω (measured during calibration)
+        // - Phase inductance: 3.7 mH = 0.0037 H
+        // - Torque at 1.5A: 4.2 kg·cm = 0.042 N·m
+        // - Stepper motor: 50 pole pairs (100 poles, 200 steps/rev)
+        
+        // Convert measured resistance from milliohms to ohms
+        float R_ohm = (float)motor.get_total_resistance() / 1000.0f;  // [Ω]
+        
+        // Convert inductance from microhenries to henries
+        float L_h = (float)motor.get_effective_inductance() / 1000000.0f;  // [H]
+        
+        // Calculate motor parameters for FOC controller
+        // Torque constant: Kt = Torque / Current = 0.042 N·m / 1.5 A = 0.028 N·m/A
+        const float torque_nm = 0.042f;      // Torque at rated current [N·m]
+        const float rated_current_a = 1.5f;  // Rated current [A]
+        
+        // Pole pairs for stepper motor (50 pole pairs = 100 poles)
+        const float pole_pairs = 50.0f;
+        
+        // Desired current loop bandwidth (Hz) - aggressive tuning for fast response
+        const float current_loop_bw_hz = 1200.0f;  // 1.2 kHz bandwidth
+        
+        // Initialize FOC current controller with motor parameters
+        foc_current_ = FocCurrentController(
+            R_ohm,                // Phase resistance [Ω]
+            L_h,                  // Phase inductance [H]
+            torque_nm,            // Max torque [N·m]
+            rated_current_a,      // Current at max torque [A]
+            pole_pairs,           // Number of pole pairs
+            current_loop_bw_hz    // Current loop bandwidth [Hz]
+        );
+        
+        TP_LOG("[FOC] Current controller initialized:");
+        TP_LOG_VAL("  R (Ω): ", (int32_t)(R_ohm * 1000.0f));  // Log in milliohms
+        TP_LOG_VAL("  L (μH): ", motor.get_effective_inductance());
+        TP_LOG_VAL("  Kt (mN·m/A): ", (int32_t)(torque_nm / rated_current_a * 1000.0f));
+        TP_LOG_VAL("  Pole pairs: ", (int32_t)pole_pairs);
+        TP_LOG_VAL("  BW (Hz): ", (int32_t)current_loop_bw_hz);
 
         // Set driver status to Ready (bits 0-3 = 0)
         setup_status.set_driver_status(OperationStatus::Ready);  // Driver now ready

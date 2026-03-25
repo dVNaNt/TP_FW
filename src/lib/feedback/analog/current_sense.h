@@ -126,8 +126,7 @@ private:
                  int16_t ch2_fs_ma,
                  int16_t ch3_fs_ma,
                  ErrorManager& error)  // Constructor: Create and initialize with full-scale ranges and error manager reference
-        : full_scale_ma_((int32_t)ch1_fs_ma, (int32_t)ch2_fs_ma, (int32_t)ch3_fs_ma),
-          error_(error) {
+        : full_scale_ma_((int32_t)ch1_fs_ma, (int32_t)ch2_fs_ma, (int32_t)ch3_fs_ma), error_(error) {
         // Validate and calculate ratios
         if (!(ch1_fs_ma == 0 && ch2_fs_ma == 0 && ch3_fs_ma == 0)) {
             // Find maximum absolute full-scale value among all channels
@@ -159,11 +158,9 @@ private:
         is_changed = true;                   // Mark that new data is available
 
         // Short exit
-        if (!valid) {                 // Check if all sensors are missing (no valid full-scale ranges)
-            out_norm_.a = INT16_MIN;  // Set channel 0 output to sensor missing indicator
-            out_norm_.b = INT16_MIN;  // Set channel 1 output to sensor missing indicator
-            out_norm_.c = INT16_MIN;  // Set channel 2 output to sensor missing indicator
-            return;                   // Exit early since no valid sensors are configured
+        if (!valid) {                                             // Check if all sensors are missing (no valid full-scale ranges)
+            out_norm_.a = out_norm_.b = out_norm_.c = INT16_MIN;  // Set channel 1 2 3 output to sensor missing indicator
+            return;                                               // Exit early since no valid sensors are configured
         }
 
         int8_t oc_error_soft = 0;
@@ -228,7 +225,6 @@ private:
             dac_value = 0;
         if (dac_value > UINT16_MAX)
             dac_value = UINT16_MAX;
-
 
         // Call the callback function if it's set for this channel
         if (comp_oc_callback_[ch] != nullptr) {
@@ -302,22 +298,14 @@ public:
 
     // Get absolute current value in milliamperes for a specific channel
     // Converts from normalized Q15 format to milliamperes only when is_changed is true для уменьшения долгих операций
+    // Lazy initialization optimized using branchless ternary logic
     const Vec3D_i32 get_current_ma() {
-        if (is_changed) {
-            // Convert normalized values to milliamperes for all channels
-            for (uint8_t i = 0u; i < 3u; ++i) {
-                if (out_norm_[i] == INT16_MIN) {
-                    out_ma_[i] = INT32_MIN;  // Sensor missing or not calibrated
-                } else {
-                    // Convert Q15 normalized value to milliamperes
-                    // out_norm is in range [-32767, 32767] representing [-full_scale_max_ma, full_scale_max_ma]
-                    out_ma_[i] = ((int32_t)out_norm_[i] * full_scale_max_ma) >> 15;
-                }
-            }
-            is_changed = false;  // Reset flag after conversion
+        if (is_changed) {  // Only calculate if new ADC data was parsed
+            out_ma_[0] = (out_norm_[0] == INT16_MIN) ? INT32_MIN : (((int32_t)out_norm_[0] * full_scale_max_ma) >> 15);
+            out_ma_[1] = (out_norm_[1] == INT16_MIN) ? INT32_MIN : (((int32_t)out_norm_[1] * full_scale_max_ma) >> 15);
+            out_ma_[2] = (out_norm_[2] == INT16_MIN) ? INT32_MIN : (((int32_t)out_norm_[2] * full_scale_max_ma) >> 15);
+            is_changed = false;
         }
-
-        // Return absolute value
         return out_ma_;
     }
 
@@ -346,7 +334,6 @@ public:
         overcurrent_hard_norm_[ch] = ma2norm(limit);  // Convert milliamps to Q15 and store for specified channel
         update_oc_hard_dac_threshold(ch);             // Recalculate DAC threshold for this channel
     }
-
 
     // =========================================================================
     // COMPARATOR CALLBACK METHODS

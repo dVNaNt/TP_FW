@@ -20,8 +20,8 @@
 
 // Initialize TunePulseHeart with board-specific parameters
 // freq_hz=20000, pwm_res=4250, max_supply, iA_fs, iB_fs, iC_fs
-TunePulseHeart TUNE_HEART(20000,
-                          4250,
+TunePulseHeart TUNE_HEART(PWM_TIMER_FREQ_HZ,
+                          PWM_TIMER_PERIOD,
                           SYS_PARAMS::MAX_SUPPLY_FS,
                           SYS_PARAMS::IA_MAX_CURRENT_FS,
                           SYS_PARAMS::IB_MAX_CURRENT_FS,
@@ -33,7 +33,7 @@ TunePulseHeart* volatile g_heart_ptr = &TUNE_HEART;
 
 // Include target-specific system setup based on build configuration
 #if defined(TARGET_CLN17V3)
-#include "target/cln17_v3/system_setup.h"
+#include "target/cln17_v3/interrupt_setup.h"
 #elif defined(TARGET_RADIX)
 #include "target/radix/system_setup.h"
 #else
@@ -63,6 +63,7 @@ inline void tunepulse_init() {
 #elif defined(TARGET_CLN17V3)
 #include "target/cln17_v3/comp_setup.h"
 #include "target/cln17_v3/interrupt_setup.h"
+#include "target/cln17_v3/cordic_setup.h"  // Include CORDIC hardware accelerator setup
 
 // LED control functions (active LOW - LOW = ON, HIGH = OFF)
 void LED_Red_Control(bool state) {
@@ -98,6 +99,14 @@ inline void tunepulse_init() {
     SerialUSB.flush();
     delay(100);
 
+    SerialUSB.println("0.1. CORDIC_Init...");
+    SerialUSB.flush();
+    delay(100);
+    CORDIC_Init();  // Initialize CORDIC hardware accelerator for fast trigonometry
+    SerialUSB.println("   [OK] CORDIC initialized");
+    SerialUSB.flush();
+    delay(100);
+
     SerialUSB.println("1. IO_Init...");
     SerialUSB.flush();
     delay(100);
@@ -120,13 +129,6 @@ inline void tunepulse_init() {
     SerialUSB.flush();
     delay(100);
 
-    SerialUSB.println("2. DMA_Init...");
-    SerialUSB.flush();
-    delay(100);
-    DMA_Init();  // Initialize DMA for ADC
-    SerialUSB.println("   [OK] DMA initialized");
-    SerialUSB.flush();
-    delay(100);
 
     SerialUSB.println("3. ADC_Init...");
     SerialUSB.flush();
@@ -215,9 +217,14 @@ inline void tunepulse_init() {
 
     // Setup current sensing
     TUNE_HEART.driver.start_current_offset_calibration();
+    SerialUSB.println("Start current calibration");
+    // const int16_t empty_arr[3]= {2000,2000,2000}; 
+    // TIM1_Set_PWM_Values(empty_arr);
     while (TUNE_HEART.driver.get_driver_status() != OperationStatus::Ready) {
         TUNE_HEART.tick();
     }
+
+    
     TUNE_HEART.set_overcurrent_hard_ma(CH1, 4600);  // Phase A: 4.6A
     TUNE_HEART.set_overcurrent_hard_ma(CH2, 4600);  // Phase B: 4.6A
     TUNE_HEART.set_overcurrent_hard_ma(CH3, 6900);  // Phase C: 6.9A

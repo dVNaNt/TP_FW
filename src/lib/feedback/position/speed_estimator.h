@@ -6,7 +6,7 @@
 // Uses position difference over N samples to calculate speed with minimal latency
 
 // Size of circular buffer for position samples (min 2, max 32)
-#define SPEED_ESTIMATOR_SIZE 8  // Define buffer size for speed calculation
+#define SPEED_ESTIMATOR_SIZE 32  // Define buffer size for speed calculation
 
 // SpeedEstimator structure: Calculates speed from position samples
 struct SpeedEstimator {  // Define SpeedEstimator as C++ struct with methods
@@ -39,13 +39,13 @@ public:
     // Parameterized constructor: Initialize with specific position and frequency
     // init_position: Initial position value to fill buffer
     // freq: Sampling frequency in Hz
-    SpeedEstimator(int32_t init_position, uint16_t freq)  // Constructor with parameters
+    SpeedEstimator(uint16_t freq)  // Constructor with parameters
         : freq_(freq),  // Store sampling frequency
           speed_(0),  // Initialize speed to zero
           idx_(0)  // Initialize buffer index to zero
     {
         for (size_t i = 0; i < SPEED_ESTIMATOR_SIZE; ++i) {  // Loop through buffer
-            pos_buffer_[i] = init_position;  // Fill buffer with initial position
+            pos_buffer_[i] = 0;  // Fill buffer with initial position
         }
     }
     

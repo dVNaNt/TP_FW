@@ -26,7 +26,8 @@ enum FatalError {
     Fatal_NoLoad = (1 << 8),            // No load detected
     Fatal_NoCurrentFeedback = (1 << 9), // Current sensor failure
     Fatal_EmergencyStop = (1 << 10),    // Emergency stop triggered
-    Fatal_MotorError = (1 << 11)        // Motor configuration error
+    Fatal_MotorError = (1 << 11),        // Motor configuration error
+    Fatal_DriverError = (1 << 11)
 };
 
 // Alert error types (degraded operation)
@@ -87,6 +88,13 @@ public:
 
     inline void set_fatal_dc_uvlo() {
         fatal_flags_ |= Fatal_DC_UVLO;  // Set undervoltage flag
+    }
+
+        inline void set_fatal_driver() {
+        fatal_flags_ |= Fatal_DriverError;  // Set undervoltage flag
+    }
+        inline void reset_fatal_driver() {
+        fatal_flags_ &= ~Fatal_DriverError;  // Clear undervoltage flag
     }
     
     inline void reset_fatal_dc_uvlo() {
@@ -233,7 +241,7 @@ public:
     inline bool get_fatal_no_current_feedback() const { return (fatal_flags_ & Fatal_NoCurrentFeedback) != 0; }
     inline bool get_fatal_emergency_stop() const { return (fatal_flags_ & Fatal_EmergencyStop) != 0; }
     inline bool get_fatal_motor_error() const { return (fatal_flags_ & Fatal_MotorError) != 0; }
-    
+    inline bool get_fatal_driver_error() const { return (fatal_flags_ & Fatal_DriverError) != 0; }
     // ========================================================================
     // Alert error getters (inline)
     // ========================================================================

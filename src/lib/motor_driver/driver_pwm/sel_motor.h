@@ -78,7 +78,7 @@ public:
                   int16_t current_epsilon = 256)
         : feedback_(parent),
           current_converter_(parent, current_epsilon),
-          voltage_converter_(parent, duty_permille),
+          voltage_converter_(),
           motor_type_(motor_type),
           phase_pattern_(phase_pattern),
           idx0_(0),
@@ -134,10 +134,6 @@ public:
         return phase_pattern_;
     }
 
-    /// Set maximum duty cycle limit for voltage converter
-    /// @param duty_permille Duty cycle in permille (0-995 = 0.0%-99.5%)
-    inline void set_duty(uint16_t duty_permille) { voltage_converter_.set_duty(duty_permille); }
-
     /// Set balance tolerance for current converter
     /// @param epsilon Balance tolerance in Q15 format
     inline void set_current_epsilon(int16_t epsilon) { current_converter_.set_epsilon(epsilon); }
@@ -146,11 +142,9 @@ public:
     /// @param voltage Vec2D voltage (sin=alpha, cos=beta) in Q15 format
     const int16_t* tick_voltage(Vec2D voltage, int16_t sup_norm) {
         // Convert AB to ABC using voltage converter
-        voltage_converter_.tick(voltage, motor_type_);
-        err_voltage_ = voltage_converter_.is_err();
+        Vec3D abc = voltage_converter_.tick(voltage, motor_type_, err_voltage_);
 
         // Apply inline phase remapping (logical ABC -> physical channels)
-        const int16_t* abc = voltage_converter_.get_phase_duty();
         abc_voltages_remapped_.a = abc[idx0_];
         abc_voltages_remapped_.b = abc[idx1_];
         abc_voltages_remapped_.c = abc[idx2_];
@@ -196,16 +190,4 @@ public:
     /// Get AB currents as Vec2D (alpha-beta)
     /// @return Vec2D with sin=alpha, cos=beta in Q15 format
     inline Vec2D get_currents() const { return current_converter_.get_ab(); }
-
-    /// Get filtered phase A current value (transit method)
-    /// @return Filtered phase A current in Q15 format
-    inline int16_t get_filtered_a() const { return current_converter_.get_filtered_a(); }
-
-    /// Get filtered phase B current value (transit method)
-    /// @return Filtered phase B current in Q15 format
-    inline int16_t get_filtered_b() const { return current_converter_.get_filtered_b(); }
-
-    /// Get filtered phase C current value (transit method)
-    /// @return Filtered phase C current in Q15 format
-    inline int16_t get_filtered_c() const { return current_converter_.get_filtered_c(); }
 };

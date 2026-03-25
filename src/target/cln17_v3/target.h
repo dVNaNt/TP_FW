@@ -41,10 +41,10 @@ constexpr PinName ENC_MOSI = PA_7;  // Encoder SPI MOSI
 constexpr PinName ENC_CS = PA_4;    // Encoder Chip Select
 
 // Control SPI
-constexpr PinName CTRL_SCK = PB_3;   // Control SPI Clock
-constexpr PinName CTRL_MISO = PB_4;  // Control SPI MISO
-constexpr PinName CTRL_MOSI = PB_5;  // Control SPI MOSI
-constexpr PinName CTRL_CS = PA_15;   // Control SPI Chip Select
+constexpr PinName CTRL_SCK = PB_3;   // Control SPI Clock / ERR 
+constexpr PinName CTRL_MISO = PB_4;  // Control SPI MISO / STP
+constexpr PinName CTRL_MOSI = PB_5;  // Control SPI MOSI / DIR
+constexpr PinName CTRL_CS = PA_15;   // Control SPI Chip Select / EN
 constexpr PinName CTRL_5V = PC_15;   // Control Interface Power/Signal
 
 // User Interface & Misc
@@ -63,6 +63,7 @@ namespace SYS_PARAMS {
     constexpr int32_t IA_MAX_CURRENT_FS = 11000;
     constexpr int32_t IB_MAX_CURRENT_FS = 11000;
     constexpr int32_t IC_MAX_CURRENT_FS = 16500;
-    constexpr int32_t ADC_DELAY_TICKS_CONST = 350;
+    constexpr int32_t ADC_DELAY_TICKS_CONST = 120;
     constexpr int32_t DEADTIME_TICKS_CONST = 20;
 }
+
