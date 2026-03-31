@@ -16,8 +16,8 @@
 #include "analog/supply_voltage.h"  // Include supply voltage sensing
 #include "analog/current_sense.h"  // Include current sensing
 #include "position.h"  // Include position/encoder tracking
-#include "position/speed_estimator.h"  // Include position/encoder tracking
 #include "analog/power.h"
+#include "encoder.h"
 
 // Forward declaration to allow friend access
 struct Feedback;
@@ -31,7 +31,7 @@ public:
     CurrentSense current;  // 3-channel current sensing with calibration
     Position position;  // Encoder position tracking and integration
     PowerMonitor power;
-    SpeedEstimator speed;
+    Encoder encoder;
 
     // SpeedEstimator speed;
     
@@ -43,6 +43,7 @@ private:
     friend struct Position;
     friend struct PowerMonitor;
     friend struct DriverPWM;  // Allow DriverPWM to access private methods for calibration
+    friend struct Encoder;
     DataInputs data_;  // Private copy of latest sensor data for external access
     uint32_t enabled_modules_;  // Bitmask of enabled modules for conditional tick execution
 
@@ -66,7 +67,6 @@ public:
           data_(),  // Initialize data copy with default constructor
           enabled_modules_(0),  // Initialize enabled modules from mandatory fields
           power(current.full_scale_max_ma, supply_max_mv),
-          speed(20000),
           tick_counter_(0),  // Initialize tick counter to zero
           last_report_time_us_(0)  // Initialize last report time to zero
           
@@ -112,26 +112,26 @@ public:
     // Only processes modules that are enabled via enable_* functions
     // Monitors actual tick() call frequency and reports every 5 seconds
     bool tick() {  // Main processing function called each cycle to update all sensors
-        // Increment tick counter for frequency monitoring
-        tick_counter_++;
+        // // Increment tick counter for frequency monitoring
+        // tick_counter_++;
         
-        // Check if 5 seconds have passed since last report (5,000,000 microseconds)
-        uint32_t current_time_us = micros();  // Get current time in microseconds
-        uint32_t elapsed_us = current_time_us - last_report_time_us_;  // Calculate elapsed time
+        // // Check if 5 seconds have passed since last report (5,000,000 microseconds)
+        // uint32_t current_time_us = micros();  // Get current time in microseconds
+        // uint32_t elapsed_us = current_time_us - last_report_time_us_;  // Calculate elapsed time
         
-        // Report frequency every 5 seconds (5,000,000 microseconds)
-        if (elapsed_us >= 5000000) {  // Check if 5 seconds elapsed
-            // Calculate actual frequency: ticks / seconds
-            float actual_frequency_hz = (float)tick_counter_ / (elapsed_us / 1000000.0f);  // Convert microseconds to seconds
-            float actual_frequency1_hz = (float)tick1 / (elapsed_us / 1000000.0f);  // Convert microseconds to seconds
-            // Log the actual tick frequency
-            TP_LOG_VALS("Feedback F (Hz):", (int32_t)actual_frequency_hz,(int32_t)actual_frequency1_hz);
+        // // Report frequency every 5 seconds (5,000,000 microseconds)
+        // if (elapsed_us >= 5000000) {  // Check if 5 seconds elapsed
+        //     // Calculate actual frequency: ticks / seconds
+        //     float actual_frequency_hz = (float)tick_counter_ / (elapsed_us / 1000000.0f);  // Convert microseconds to seconds
+        //     float actual_frequency1_hz = (float)tick1 / (elapsed_us / 1000000.0f);  // Convert microseconds to seconds
+        //     // Log the actual tick frequency
+        //     TP_LOG_VALS("Feedback F (Hz):", (int32_t)actual_frequency_hz,(int32_t)actual_frequency1_hz);
             
-            // Reset counters for next measurement period
-            tick_counter_ = 0;  // Reset tick counter
-            tick1 = 0;
-            last_report_time_us_ = current_time_us;  // Update last report time
-        }
+        //     // Reset counters for next measurement period
+        //     tick_counter_ = 0;  // Reset tick counter
+        //     tick1 = 0;
+        //     last_report_time_us_ = current_time_us;  // Update last report time
+        // }
         
         if (!inputs.is_updated()) {  // Use private method through friend access
             return false;  // Exit if no new data
@@ -151,11 +151,12 @@ public:
             current.tick(data_.currnt_adc);  // Process current ADC array
         }
         
-        // // Update position integrator only if enabled
-        // if (enabled_modules_ & (uint32_t)DataInputsBit_ANGLE) {  // Check if ANGLE bit is set
-        //     position.tick(data_.angle_raw);  // Process encoder angle value using member function
-        //     speed.tick(position.get_raw_position());
-        // }
+        // Update position integrator only if enabled
+        if (enabled_modules_ & (uint32_t)DataInputsBit_ANGLE) {  // Check if ANGLE bit is set
+            encoder.tick(data_.angle_raw);
+            // position.tick(data_.angle_raw);  // Process encoder angle value using member function
+            // speed.tick(position.get_raw_position());
+        }
         return true;
     }
     

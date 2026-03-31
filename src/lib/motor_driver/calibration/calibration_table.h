@@ -350,8 +350,12 @@ TP_LOG_ARRAY("ECCArr ", ecc_table); // Output the entire calibration array for d
         } // End of bounded segment search
 
         // Compute mechanical angle mapped into one electrical period safely
-        return (uint16_t)(((size_t)result * cal_size) / el_angle_div); // Note: el_angle_div is zero-protected in reset()
-    } // End of correct_el_angle() method
+    uint16_t el = (uint16_t)(((uint32_t)result * (uint32_t)cal_size) / (uint32_t)el_angle_div);
+
+    // Компенсация того, что первый калибровочный сэмпл был снят после +1 electrical step
+    const uint16_t phase_shift = (uint16_t)(0x10000u / (uint32_t)el_angle_div);
+
+    return (uint16_t)(el - phase_shift);    } // End of correct_el_angle() method
 
     /**
      * @brief Fast O(1) raw-angle correction using the ECC table

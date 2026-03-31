@@ -38,11 +38,12 @@ inline int16_t fast_sign_int(int32_t val) {
 #include "dev_log.h"
 
 // Include headers that depend on the utility functions above
-#include "math_integer/controllers/pid.h"
-#include "math_integer/controllers/pid_f.h"
-#include "math_integer/filters/ema.h"
-#include "math_integer/filters/median3.h"
-#include "math_integer/helpers/stability_check.h"
+#include "math/helpers/fifo_buffer.h"
+#include "math/controllers/pid.h"
+#include "math/controllers/pid_f.h"
+#include "math/filters/ema.h"
+#include "math/filters/median3.h"
+#include "math/helpers/stability_check.h"
 #include "motor_driver/types.h"
 #include "vectors.h"
 

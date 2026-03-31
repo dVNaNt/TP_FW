@@ -2,7 +2,7 @@
 #define TIMER_PWM_H
 
 #include <Arduino.h>
-#include "config.h"
+
 #include "stm32g4xx_hal.h"
 #include "stm32g4xx_ll_gpio.h"
 

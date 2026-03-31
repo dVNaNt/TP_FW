@@ -1,6 +1,6 @@
 #pragma once
 #include "common.h"
-#include "math_integer/trigonometry.h"
+#include "math/trigonometry.h"
 
 // Forward declaration for conversion
 struct Pol2D;
@@ -109,7 +109,7 @@ struct Pol2D {
     }
 
     /// Convert polar coordinates to Cartesian (Vec2D)
-    /// Note: This method requires angle2sincos from math_integer/trigonometry.h
+    /// Note: This method requires angle2sincos from math/trigonometry.h
     /// Include trigonometry.h before using this method
     /// @return Cartesian vector (sin, cos)
     Vec2D convert() const {
@@ -117,7 +117,7 @@ struct Pol2D {
         int16_t s, c;
         
         // Use angle2sincos to convert angle to sin/cos components
-        // This function is defined in math_integer/trigonometry.h
+        // This function is defined in math/trigonometry.h
         angle2sincos(angle, &s, &c);
         
         // Scale the sin/cos by amplitude

@@ -84,9 +84,10 @@ public:
      * @return Initialized AngleCalibrator
      */
     AngleCalibrator(uint16_t freq) {
+        frequency = freq;       
         size_t settling_time =
             calculate_settling_time(frequency, ANGLE_CAL_CAL_SETTLING_TIME_US);  // Convert settling time to ticks
-        frequency = freq;                                                        // Store update frequency
+                                                         // Store update frequency
         cal_table = CalibrationTable::create();                                  // Create calibration table
     }
 
@@ -123,7 +124,7 @@ public:
                         dif_max = INT32_MIN;                                                     // Reset max difference
                         dif_min = INT32_MAX;                                                     // Reset min difference
                         ang_el_step = (uint16_t)(UINT16_MAX / ANGLE_CAL_CAL_FIRST_STEP_USTEPS);  // Calculate step size
-                        cal_idx = ANGLE_CAL_CAL_FIRST_STEP_USTEPS;                               // Set number of test steps
+                        cal_idx = ANGLE_CAL_CAL_FIRST_STEP_USTEPS - 1;                               // Set number of test steps
                         calibration_stage = CalStage_Pass0;                                      // Move to Pass0
                         TP_LOG("CALIBRATION: Test single pole motion");                          // Log stage transition
                     }
@@ -155,14 +156,16 @@ public:
                         }
 
                         TP_LOG_VAL("CALIBRATION: Detected motion direction: ", (long)this->direction);  // Log detected direction
-                        calibration_stage = CalStage_Pass1;                                             // Move to Pass1
+                        calibration_stage = CalStage_Pass1;   
+                                                                  // Move to Pass1
                         ang_el_step =
-                            (uint16_t)(UINT16_MAX /
+                            (uint16_t)(65536u /
                                        motor_type_step);  // Calculate step size based on motor type (4 for Stepper, 6 for BLDC)
                         speed = (int32_t)(-speed * this->direction);  // Adjust speed for detected direction
-                        cal_idx = 0;                                  // Reset calibration index
-                        init_pos = stable_pos;                        // Record starting position for Pass1
                         cal_table.reset(motor_type_step);             // Reset calibration table with motor-specific step count
+                        cal_table.fill_first(0, (uint16_t)stable_pos);
+                        cal_idx = 1;                                  // Reset calibration index
+                        init_pos = stable_pos;                        // Record starting position for Pass1
                         TP_LOG("CALIBRATION: Full rotation in positive direction with sampling");  // Log stage transition
                     }
                     break;
@@ -170,7 +173,7 @@ public:
 
                 case CalStage_Pass1: {
                     // Full rotation in positive direction with position sampling
-                    int32_t avg_step = (stable_pos - init_pos) / (int32_t)(cal_idx + 1);  // Calculate average step size
+                    int32_t avg_step = (stable_pos - init_pos) / (int32_t)(cal_idx);  // Calculate average step size
                     if (stable_pos - init_pos > (int32_t)UINT16_MAX + (avg_step / 3)) {
                         // Completed full rotation, move to Pass2
                         calibration_stage = CalStage_Pass2;  // Move to Pass2
@@ -391,3 +394,5 @@ private:
         return INT32_MIN;  // Default return
     }
 };
+
+

@@ -21,7 +21,6 @@ public:
 
     float kp   = 1.0f;    // Proportional gain
     float ki   = 0.0f;    // Integral gain     [1/s]
-    float kd   = 0.0f;    // Derivative gain   [s]
     float kb   = 0.0f;    // Back-calculation anti-windup gain
                           // Recommended: sqrt(ki/kp), or 0 to disable
 
@@ -38,8 +37,8 @@ public:
 
     PID() = default;
 
-    PID(float kp, float ki, float kd, float dt, float kb = 0.0f)
-        : kp(kp), ki(ki), kd(kd), kb(kb), dt(dt) {}
+    PID(float kp, float ki, float dt, float kb = 0.0f)
+        : kp(kp), ki(ki), kb(kb), dt(dt) {}
 
     // =========================================================================
     // Main update — called every control tick
@@ -70,11 +69,10 @@ public:
         float real_f = (float)real;
         float d_raw  = -(real_f - prev_real_) / dt;
         d_filt_      += d_filter_alpha * (d_raw - d_filt_);
-        float d_term  = kd * d_filt_;
         prev_real_    = real_f;
 
-        // -- 4. Unsaturated output (P + I + D) --------------------------------
-        float output_unsat = p_term + integrator_ + d_term;
+        // -- 4. Unsaturated output (P + I) --------------------------------
+        float output_unsat = p_term + integrator_;
 
         // -- 5. Symmetric output clamp ----------------------------------------
         float lim_f      = (float)limit;

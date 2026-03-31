@@ -4,11 +4,10 @@
 
 #include "../../common.h"
 #include "../../feedback/feedback.h"
-#include "../../math_integer/controllers/ladrc1st.h"
-#include "../../math_integer/helpers/frequency_generator.h"  // Frequency generator for HFI
-#include "../../math_integer/helpers/speaker.h"              // Motor speaker for audio feedback
-#include "../../math_integer/helpers/stability_check.h"      // Stability check for current monitoring
-#include "../../math_integer/helpers/timeout_timer.h"        // Timeout timer for countdown operations
+#include "../../math/helpers/frequency_generator.h"  // Frequency generator for HFI
+#include "../../math/helpers/speaker.h"              // Motor speaker for audio feedback
+#include "../../math/helpers/stability_check.h"      // Stability check for current monitoring
+#include "../../math/helpers/timeout_timer.h"        // Timeout timer for countdown operations
 #include "../motor.h"                                        // Motor parameters structure
 #include "hfi_sense.h"                                       // HFI sense for inductance measurement
 #include "sel_motor.h"
@@ -260,20 +259,12 @@ private:
     FilterEMA lpf_id_;
     FilterEMA lpf_iq_;
 
-    LADRC1st ladrc_d = LADRC1st(0.00005f, 4000.0f, 12000.0f, 1.0f / 0.003);
-    LADRC1st ladrc_q = LADRC1st(0.00005f, 4000.0f, 12000.0f, 1.0f / 0.003);
 
     // Adaptive low-pass filter for current measurement from 100hz to 3500hz spin frequency with 20khz base rate
     // Main goal is to adjust Fc to reduce phase delay on high frequency signals. At low speeds it will ensure high filtration to
     // reduce audiable noise caused by current regulators
     FilterAdaptiveAlphaEMA lpf_adaptive_alpha_ = FilterAdaptiveAlphaEMA(20000, 100, 3500);
 
-    // PI controllers for d and q axis current control
-    PID_Int pid_d_ = PID_Int(0, 0, 0, 0);
-    PID_Int pid_q_ = PID_Int(0, 0, 0, 0);
-
-    FocPI pi_d_;
-    FocPI pi_q_;
     
     // FOC current controller with feedforward compensation
     FocCurrentController foc_current_;
@@ -355,7 +346,7 @@ private:
         current_dq = current_dq_raw;
 
         // Step 4: Dynamic scale of filtration to make currents more stable at low speeds
-        uint8_t alpha = lpf_adaptive_alpha_.tick(angular_speed);
+        uint8_t alpha = lpf_adaptive_alpha_.tick(abs(angular_speed));
         lpf_id_.set_alpha(alpha);
         lpf_iq_.set_alpha(alpha);
 
@@ -807,7 +798,7 @@ private:
         const float pole_pairs = 50.0f;
         
         // Desired current loop bandwidth (Hz) - aggressive tuning for fast response
-        const float current_loop_bw_hz = 1200.0f;  // 1.2 kHz bandwidth
+        const float current_loop_bw_hz = 1500.0f;  // 1.2 kHz bandwidth
         
         // Initialize FOC current controller with motor parameters
         foc_current_ = FocCurrentController(

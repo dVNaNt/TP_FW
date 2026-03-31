@@ -9,7 +9,7 @@
 // Uses precomputed scale factor for optimal resolution conversion between normalized and millivolt values.
 
 #include "../../common.h"                          // Include common migration definitions and types
-#include "../../math_integer/filters/ema.h"  // Include first-order filter for smoothing
+#include "../../math/filters/ema.h"  // Include first-order filter for smoothing
 
 // Forward declaration of ErrorManager to avoid circular dependency
 struct ErrorManager;
