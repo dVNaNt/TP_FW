@@ -12,6 +12,7 @@
 #include "math/motion/motion_executor.h"  // Real-time motion trajectory execution
 #include "math/motion/motion_planer.h"    // Motion planning and task management
 #include "motor_driver/calibration/angle_calibrator.h"
+#include "motor_driver/calibration/motor_calibration.h"
 #include "motor_driver/driver_pwm/driver_pwm.h"
 #include "motor_driver/driver_pwm/hfi_sense.h"
 #include "motor_driver/motor.h"
@@ -80,11 +81,13 @@ public:
         PositionControllerLADRC(300.0f, 1000.0f, 10.0f, 0.00005f, 655360);  // Cascaded position-velocity controller
 
     // Outer position loop variables for cascaded control with external encoder
-    // Control rate matches PWM_TIMER_FREQ_HZ (tight coupling)
-    PID outer_pid_controller = PID(10.0f, 0.0f, 1.0f / PWM_TIMER_FREQ_HZ); // Kp=10.0, Ki=0.0
+    // Control rate is decimated to 1kHz to save CPU in fast FOC loop
+    static constexpr uint32_t OUTER_LOOP_DECIMATION = PWM_TIMER_FREQ_HZ / 1000;
+    PID outer_pid_controller = PID(10.0f, 0.0f, (float)OUTER_LOOP_DECIMATION / PWM_TIMER_FREQ_HZ); // Kp=10.0, Ki=0.0
     float target_linear_pos = 0.0f; // To be updated via CAN
     float virtual_target_pos = 0.0f; // Member variable for bumpless transfer and position integration
     bool cascaded_loop_enabled = false;
+    uint32_t outer_loop_counter = 0;
 
     // ========================================================================
     // HFI sensorless control (activated after motor calibration)
@@ -204,6 +207,56 @@ public:
     /// This will trigger the registered DAC callback to update comparator threshold
     /// @param limit_mv Overvoltage limit in millivolts
     void set_overvoltage_hard_mv(int32_t limit_mv) { feedback.supply.set_overvoltage_hard_mv(limit_mv); }
+
+    // ========================================================================
+    // Persistent Calibration Methods
+    // ========================================================================
+    bool load_calibration() {
+        CalibrationData data;
+        if (PersistentCalibration::load_from_eeprom(data)) {
+            motor_params.set_motor_type(data.motor_type);
+            motor_params.set_phase_pattern(data.phase_pattern);
+            motor_params.set_direction(data.direction);
+            motor_params.set_total_resistance(data.total_resistance);
+            motor_params.set_default_inductance(data.default_inductance);
+
+            angle_calibrator.set_direction(data.direction);
+
+            CalibrationTable& cal_table = angle_calibrator.get_cal_table();
+            cal_table.offst_val = data.offst_val;
+            cal_table.el_angle_div = data.el_angle_div;
+            for (size_t i = 0; i < ECC_TABLE_SIZE; ++i) {
+                cal_table.ecc_table[i] = data.ecc_table[i];
+            }
+
+            // Sync status to skip calibration
+            driver.motor_calib_status = MotorStatus::Success;
+            driver.setup_status.motor_type_not_verified = 0;
+            motor_status = MotorStatus::Success;
+            angle_calibrator.set_stage_ready();
+
+            return true;
+        }
+        return false;
+    }
+
+    void save_calibration() {
+        CalibrationData data;
+        data.motor_type = motor_params.get_motor_type();
+        data.phase_pattern = motor_params.get_phase_pattern();
+        data.direction = motor_params.get_direction();
+        data.total_resistance = motor_params.get_total_resistance();
+        data.default_inductance = motor_params.get_effective_inductance();
+
+        CalibrationTable& cal_table = angle_calibrator.get_cal_table();
+        data.offst_val = cal_table.offst_val;
+        data.el_angle_div = cal_table.el_angle_div;
+        for (size_t i = 0; i < ECC_TABLE_SIZE; ++i) {
+            data.ecc_table[i] = cal_table.ecc_table[i];
+        }
+
+        PersistentCalibration::save_to_eeprom(data);
+    }
 
     // ========================================================================
     // LED control methods (platform-independent)
@@ -363,30 +416,38 @@ public:
                 int32_t position_current_ma = 0;
 
                 if (cascaded_loop_enabled) {
-                    // Tightly coupled outer loop PID calculation directly inside the fast tick
-                    extern MT6835Encoder outer_encoder;
-                    float actual_linear_pos = outer_encoder.read_abs_angle() / (2.0f * PI); // Float rotations
+                    // Cache the velocity command to be reused between decimation ticks
+                    static float cached_outer_pid_output_vel = 0.0f;
 
-                    int32_t target_q16 = (int32_t)(target_linear_pos * 65536.0f);
-                    int32_t actual_q16 = (int32_t)(actual_linear_pos * 65536.0f);
-                    int32_t limit_q16 = 5 * 65536; // Limit correction to 5 rev/s
+                    // Decimate outer loop updates (1kHz instead of 20kHz)
+                    if (++outer_loop_counter >= OUTER_LOOP_DECIMATION) {
+                        outer_loop_counter = 0;
 
-                    int32_t target_velocity_q16 = outer_pid_controller.tick(target_q16, actual_q16, limit_q16);
-                    float outer_pid_output_vel = target_velocity_q16 * (1.0f / 65536.0f); // Float velocity
+                        // Tightly coupled outer loop PID calculation directly inside the fast tick
+                        extern MT6835Encoder outer_encoder;
+                        float actual_linear_pos = outer_encoder.read_abs_angle() / (2.0f * PI); // Float rotations
+
+                        int32_t target_q16 = (int32_t)(target_linear_pos * 65536.0f);
+                        int32_t actual_q16 = (int32_t)(actual_linear_pos * 65536.0f);
+                        int32_t limit_q16 = 5 * 65536; // Limit correction to 5 rev/s
+
+                        int32_t target_velocity_q16 = outer_pid_controller.tick(target_q16, actual_q16, limit_q16);
+                        cached_outer_pid_output_vel = target_velocity_q16 * (1.0f / 65536.0f); // Float velocity
+                    }
 
                     // Initialize bumpless transfer for virtual target directly from inner encoder
                     if (position_controller.is_first_tick) {
                         virtual_target_pos = current_pos_q16 * (1.0f / 65536.0f);
                     }
 
-                    // Advance the virtual position target by integrating the velocity command
-                    virtual_target_pos += outer_pid_output_vel * (1.0f / PWM_TIMER_FREQ_HZ);
+                    // Advance the virtual position target continuously at 20kHz using the cached velocity
+                    virtual_target_pos += cached_outer_pid_output_vel * (1.0f / PWM_TIMER_FREQ_HZ);
                     int32_t virtual_target_pos_q16 = (int32_t)(virtual_target_pos * 65536.0f);
 
                     position_current_ma =
                         position_controller.tick(virtual_target_pos_q16,                // Target position (dynamic)
                                                  feedback.position.get_raw_position(),  // Current position from inner encoder
-                                                 outer_pid_output_vel,                  // Target velocity from outer loop
+                                                 cached_outer_pid_output_vel,           // Target velocity from outer loop
                                                  current_vel,                           // Current velocity from estimator
                                                  0.0f, current_acc, current_target_ma_, // target_acc = 0
                                                  current_target_ma_,                    // Maximum current limit

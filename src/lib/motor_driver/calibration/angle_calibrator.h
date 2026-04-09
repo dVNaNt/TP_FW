@@ -242,6 +242,11 @@ public:
         return cal_table.correct_position(pos);  // Apply calibration correction
     }
 
+    CalibrationTable& get_cal_table() { return cal_table; }
+    void set_direction(int32_t dir) { direction = dir; }
+    int32_t get_direction() const { return direction; }
+    void set_stage_ready() { calibration_stage = CalStage_Ready; }
+
 private:
     uint16_t frequency;    // Update frequency in ticks per second
     int32_t position = 0;  // Current encoder position reading
