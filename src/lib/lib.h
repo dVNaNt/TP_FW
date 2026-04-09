@@ -6,6 +6,8 @@
 #include "common.h"
 #include "feedback/feedback.h"
 #include "foc_vector_synthesis.h"  // Position-velocity cascaded controller
+#include "math/controllers/pi.h"
+#include "feedback/MT6835_encoder.h"
 #include "math/helpers/frequency_generator.h"
 #include "math/motion/motion_executor.h"  // Real-time motion trajectory execution
 #include "math/motion/motion_planer.h"    // Motion planning and task management
@@ -76,6 +78,14 @@ public:
     // Cascaded position-velocity controller
     PositionControllerLADRC position_controller =
         PositionControllerLADRC(300.0f, 1000.0f, 10.0f, 0.00005f, 655360);  // Cascaded position-velocity controller
+
+    // Outer position loop variables for cascaded control with external encoder
+    // Control rate matches PWM_TIMER_FREQ_HZ (tight coupling)
+    PID outer_pid_controller = PID(10.0f, 0.0f, 1.0f / PWM_TIMER_FREQ_HZ); // Kp=10.0, Ki=0.0
+    float target_linear_pos = 0.0f; // To be updated via CAN
+    float virtual_target_pos = 0.0f; // Member variable for bumpless transfer and position integration
+    bool cascaded_loop_enabled = false;
+
     // ========================================================================
     // HFI sensorless control (activated after motor calibration)
     // ========================================================================
@@ -345,25 +355,59 @@ public:
                     angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_pos) + phase_shift)* el_sign);
                 // Motion planning and position control integration
 
-                // Execute motion trajectory and get current state (position, velocity, acceleration)
-                MotionState motion_state = motion_executor.tick();
-
                 // Get current position and velocity from feedback in Q16.16 format
                 int32_t current_pos_q16 = feedback.position.get_filtered_position();
                 float current_vel = feedback.position.get_filtered_speed_float();
                 float current_acc = feedback.position.get_acceleration_float();
 
-                // Position controller outputs current command based on trajectory tracking error
-                int32_t position_current_ma =
-                    position_controller.tick(motion_state.pos,                      // Target position from motion planner
-                                             feedback.position.get_raw_position(),  // Current position from encoder
-                                             motion_state.vel,
-                                             current_vel,  // Current velocity from estimator
-                                             motion_state.acc, current_acc, current_target_ma_,
-                                             current_target_ma_,  // Maximum current limit
-                                             0);
+                int32_t position_current_ma = 0;
 
-                POS_ERR = feedback.position.get_raw_position() - motion_state.pos;
+                if (cascaded_loop_enabled) {
+                    // Tightly coupled outer loop PID calculation directly inside the fast tick
+                    extern MT6835Encoder outer_encoder;
+                    float actual_linear_pos = outer_encoder.read_abs_angle() / (2.0f * PI); // Float rotations
+
+                    int32_t target_q16 = (int32_t)(target_linear_pos * 65536.0f);
+                    int32_t actual_q16 = (int32_t)(actual_linear_pos * 65536.0f);
+                    int32_t limit_q16 = 5 * 65536; // Limit correction to 5 rev/s
+
+                    int32_t target_velocity_q16 = outer_pid_controller.tick(target_q16, actual_q16, limit_q16);
+                    float outer_pid_output_vel = target_velocity_q16 * (1.0f / 65536.0f); // Float velocity
+
+                    // Initialize bumpless transfer for virtual target directly from inner encoder
+                    if (position_controller.is_first_tick) {
+                        virtual_target_pos = current_pos_q16 * (1.0f / 65536.0f);
+                    }
+
+                    // Advance the virtual position target by integrating the velocity command
+                    virtual_target_pos += outer_pid_output_vel * (1.0f / PWM_TIMER_FREQ_HZ);
+                    int32_t virtual_target_pos_q16 = (int32_t)(virtual_target_pos * 65536.0f);
+
+                    position_current_ma =
+                        position_controller.tick(virtual_target_pos_q16,                // Target position (dynamic)
+                                                 feedback.position.get_raw_position(),  // Current position from inner encoder
+                                                 outer_pid_output_vel,                  // Target velocity from outer loop
+                                                 current_vel,                           // Current velocity from estimator
+                                                 0.0f, current_acc, current_target_ma_, // target_acc = 0
+                                                 current_target_ma_,                    // Maximum current limit
+                                                 0);
+                    POS_ERR = feedback.position.get_raw_position() - virtual_target_pos_q16;
+                } else {
+                    // Execute standard motion trajectory
+                    MotionState motion_state = motion_executor.tick();
+
+                    // Position controller outputs current command based on trajectory tracking error
+                    position_current_ma =
+                        position_controller.tick(motion_state.pos,                      // Target position from motion planner
+                                                 feedback.position.get_raw_position(),  // Current position from inner encoder
+                                                 motion_state.vel,
+                                                 current_vel,  // Current velocity from estimator
+                                                 motion_state.acc, current_acc, current_target_ma_,
+                                                 current_target_ma_,  // Maximum current limit
+                                                 0);
+                    POS_ERR = feedback.position.get_raw_position() - motion_state.pos;
+                }
+
                 position_controller.set_bandwidth(bw_ladrc, bw_ladrc * 3.0);
 
                 // Use position controller output as amplitude command
