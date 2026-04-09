@@ -2,10 +2,42 @@
 
 #include "tunepulse.h"
 #include "lib/math/motion/ramp_gen.h"  // Include S-curve ramp generator
+#include "lib/math/controllers/pi.h"
+#include "lib/feedback/MT6835_encoder.h"
+#include <SPI.h>
+#include <SimpleCANio.h>
 
 // ============================================================================
 // Motion Pattern Generation - Continuous Loop with S-Curve Ramp Generator
 // ============================================================================
+
+// Global MT6835 encoder instance
+#if defined(TARGET_CLN17V3)
+SPIClass CTRL_SPI(PB5, PB4, PB3);
+MT6835Encoder outer_encoder(CTRL_SPI, PA8);
+#else
+// Ensure these defaults exist, or just fail cleanly for other boards
+SPIClass CTRL_SPI(PB5, PB4, PB3);
+MT6835Encoder outer_encoder(CTRL_SPI, PA8);
+#endif
+
+// Global CAN interface
+#if defined(TARGET_CLN17V3)
+CANio can(PB8, PB9);
+#else
+CANio can(PINOUT::CAN_RX, PINOUT::CAN_TX);
+#endif
+
+uint32_t MY_NODE_ID = 0x101;
+volatile float target_linear_pos = 0.0f;
+
+// Operating Modes
+enum class ControlMode {
+    OptionalSCurve,   // Generate an S-curve internally (current default)
+    DirectCAN         // Follow CAN target linear position directly
+};
+
+ControlMode current_mode = ControlMode::DirectCAN;
 
 // State machine for continuous motion pattern generation
 enum class PatternState {
@@ -96,32 +128,23 @@ void setup() {
     tunepulse_init();
 
     SerialUSB.println("Going LOOP");
+
+    // Initialize the outer MT6835 encoder
+    CTRL_SPI.begin();
+    if (outer_encoder.init()) {
+        SerialUSB.println("MT6835 Encoder Initialized Successfully");
+    } else {
+        SerialUSB.println("Failed to initialize MT6835 Encoder");
+    }
+
+    // Initialize CAN-FD interface
+    if (can.begin(1000000)) {
+        SerialUSB.println("CAN-FD Initialized Successfully");
+    } else {
+        SerialUSB.println("Failed to initialize CAN-FD");
+    }
     
     // Configure position controller (cascaded position-velocity control)
-    // Position loop gains (outer loop) - NEGATIVE for proper error correction
-    float pos_kp = -2.0f;    // Position proportional gain (negative)
-    float pos_ki = -0.1f;    // Position integral gain [1/s] (negative)
-    float pos_kd = -0.05f;   // Position derivative gain [s] (negative)
-    
-    // Velocity loop gains (inner loop) - NEGATIVE for proper error correction
-    float vel_kp = -0.5f;    // Velocity proportional gain (negative)
-    float vel_ki = -5.0f;    // Velocity integral gain [1/s] (negative)
-    float vel_kd = -0.001f;  // Velocity derivative gain [s] (negative)
-    
-    // Control loop parameters
-    float dt = 1.0f / PWM_TIMER_FREQ_HZ; // Control timestep [s] (e.g., 0.00005 for 20kHz)
-    
-    // Maximum velocity limit (5 rev/s in Q16.16 format)
-    const int32_t counts_per_rev = 16384; // Encoder resolution
-    int32_t max_vel_q16 = (int32_t)(5.0f * counts_per_rev * 65536.0f); // 5 rev/s
-    
-    // // Initialize position controller
-    // TUNE_HEART.position_controller = PositionController(
-    //     pos_kp, pos_ki, pos_kd,
-    //     vel_kp, vel_ki, vel_kd,
-    //     dt, max_vel_q16
-    // );
-    
     SerialUSB.println("Position controller configured");
     
     // Enable position control mode
@@ -133,6 +156,7 @@ void setup() {
 }
 
 void loop() {  
+
     // State machine for continuous motion pattern generation
     switch (motion_state) {
         case PatternState::WaitingForCalibration:
@@ -145,35 +169,62 @@ void loop() {
             break;
             
         case PatternState::GeneratingForward:
-            // Generate forward motion pattern
-            generate_forward_pattern();
-            motion_state = PatternState::Running;
-            last_pattern_time = millis();
+            if (current_mode == ControlMode::OptionalSCurve) {
+                generate_forward_pattern();
+                motion_state = PatternState::Running;
+                last_pattern_time = millis();
+            } else {
+                motion_state = PatternState::Running;
+            }
             break;
             
         case PatternState::GeneratingReverse:
-            // Generate reverse motion pattern
-            generate_reverse_pattern();
-            motion_state = PatternState::Running;
-            last_pattern_time = millis();
+            if (current_mode == ControlMode::OptionalSCurve) {
+                generate_reverse_pattern();
+                motion_state = PatternState::Running;
+                last_pattern_time = millis();
+            } else {
+                motion_state = PatternState::Running;
+            }
             break;
             
         case PatternState::Running:
-            // Check if motion pattern has completed
-            // Pattern duration: 15 rev at 5 rev/s = 3s + accel/decel time ≈ 5s total
-            uint32_t pattern_duration_ms = 5000; // 5 seconds with margin
-            
-            if (millis() - last_pattern_time > pattern_duration_ms) {
-                // Pattern completed, switch direction
-                static bool forward = false; // Start with reverse after initial forward
-                if (forward) {
-                    motion_state = PatternState::GeneratingForward;
-                    TP_LOG("Switching to forward pattern");
-                } else {
-                    motion_state = PatternState::GeneratingReverse;
-                    TP_LOG("Switching to reverse pattern");
+            // Handle CAN inputs if in DirectCAN mode
+            if (can.available()) {
+                CanMsg msg = can.read();
+                if (msg.getStandardId() == MY_NODE_ID && msg.data_length == 4) {
+                    memcpy((void*)&target_linear_pos, msg.data, 4);
                 }
-                forward = !forward; // Toggle direction
+            }
+
+            if (current_mode == ControlMode::OptionalSCurve) {
+                // In S-Curve Mode, the inner TunePulseHeart::tick() naturally pulls from
+                // the motion_executor. We disable the cascaded PID so it doesn't interfere.
+                TUNE_HEART.cascaded_loop_enabled = false;
+
+                // Check if motion pattern has completed
+                // Pattern duration: 15 rev at 5 rev/s = 3s + accel/decel time ≈ 5s total
+                uint32_t pattern_duration_ms = 5000; // 5 seconds with margin
+
+                if (millis() - last_pattern_time > pattern_duration_ms) {
+                    // Pattern completed, switch direction
+                    static bool forward = false; // Start with reverse after initial forward
+                    if (forward) {
+                        motion_state = PatternState::GeneratingForward;
+                        TP_LOG("Switching to forward pattern");
+                    } else {
+                        motion_state = PatternState::GeneratingReverse;
+                        TP_LOG("Switching to reverse pattern");
+                    }
+                    forward = !forward; // Toggle direction
+                }
+            } else {
+                // In tightly coupled Cascaded Dual-Loop Control, we simply feed the
+                // `target_linear_pos` straight into the `TunePulseHeart` globally,
+                // and `TunePulseHeart` handles reading the outer encoder and computing the PID
+                // inside its fast tick() interrupt/loop.
+                TUNE_HEART.target_linear_pos = target_linear_pos;
+                TUNE_HEART.cascaded_loop_enabled = true;
             }
             break;
     }
