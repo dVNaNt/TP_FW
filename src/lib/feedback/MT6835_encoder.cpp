@@ -318,7 +318,7 @@ MT6835Encoder::AbsRawAngleType MT6835Encoder::update_abs_raw_angle(int32_t raw_a
 
 // Helper SPI transaction helpers for CS handling and SPI transfer
 void MT6835Encoder::spi_begin_transaction() {
-    spi->beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE3));
+    spi->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE3));
     if (cs_pin >= 0)
         digitalWrite(cs_pin, LOW);
 }

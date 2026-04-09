@@ -385,13 +385,15 @@ uint16_t correct_position(uint16_t position) const {
 
 
 
+public:
+    int16_t ecc_table[ECC_TABLE_SIZE]; // Array storing the compact inverse eccentricity correction table
+    size_t el_angle_div; // Scaling divider representing steps forming one electrical period
+    uint16_t offst_val; // Absolute offset to align raw calibration data to mathematical zero
+
 private: // Restrict direct access to internal state memory and helper routines
     uint16_t cal_table[CAL_TABLE_CAPACITY]; // Array storing sampled encoder data across full physical calibration cycle
-    int16_t ecc_table[ECC_TABLE_SIZE]; // Array storing the compact inverse eccentricity correction table
     size_t cal_size; // Current valid physical number of points actually collected
-    size_t el_angle_div; // Scaling divider representing steps forming one electrical period
     size_t offst_idx; // Physical index of first zero-position value discovered after normalization
-    uint16_t offst_val; // Absolute offset to align raw calibration data to mathematical zero
     uint16_t max_deviation; // Maximum absolute modular deviation tracked from ideal theoretical values
     size_t temp_idx; // Temporary state index used strictly during sequential data collection checks
 

@@ -231,13 +231,25 @@ inline void tunepulse_init() {
 
     SerialUSB.println("Current sensing setup complete");
 
-    // Calibrate motor
-    TUNE_HEART.driver.start_motor_calibration();
-    while (TUNE_HEART.driver.get_motor_status() != MotorStatus::Success) {
-        TUNE_HEART.tick();
-        if (TUNE_HEART.driver.get_motor_status() == MotorStatus::CalibError) {
-            SerialUSB.println("Motor calibration Error");
-            break;
+    // Load or Calibrate motor
+    bool force_calibration = (digitalRead(PINOUT::SW1) == LOW); // Check if user button is held
+
+    if (!force_calibration && TUNE_HEART.load_calibration()) {
+        SerialUSB.println("Loaded valid motor calibration from EEPROM.");
+    } else {
+        SerialUSB.println("Starting full motor calibration sequence...");
+        TUNE_HEART.driver.start_motor_calibration();
+        while (TUNE_HEART.driver.get_motor_status() != MotorStatus::Success) {
+            TUNE_HEART.tick();
+            if (TUNE_HEART.driver.get_motor_status() == MotorStatus::CalibError) {
+                SerialUSB.println("Motor calibration Error");
+                break;
+            }
+        }
+
+        if (TUNE_HEART.driver.get_motor_status() == MotorStatus::Success) {
+            SerialUSB.println("Calibration successful, saving to EEPROM.");
+            TUNE_HEART.save_calibration();
         }
     }
 }
