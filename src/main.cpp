@@ -190,11 +190,41 @@ void loop() {
             
         case PatternState::Running:
             // Handle CAN inputs if in DirectCAN mode
+            static uint32_t last_can_rx_time = millis();
+
             if (can.available()) {
                 CanMsg msg = can.read();
                 if (msg.getStandardId() == MY_NODE_ID && msg.data_length == 4) {
                     memcpy((void*)&target_linear_pos, msg.data, 4);
+                    last_can_rx_time = millis(); // Update timestamp on successful read
                 }
+            }
+
+            // Graceful error handling for CAN timeout
+            if (current_mode == ControlMode::DirectCAN && millis() - last_can_rx_time > 500) {
+                // If 500ms have passed without a CAN target update, disable cascaded loop and hold position
+                target_linear_pos = TUNE_HEART.feedback.position.get_filtered_position_rev();
+            }
+
+            // CAN Telemetry Output (100Hz)
+            static uint32_t last_telemetry_time = 0;
+            if (millis() - last_telemetry_time >= 10) {
+                last_telemetry_time = millis();
+
+                // Pack telemetry data: [4 bytes float position] [1 byte motor_status] [1 byte driver_status] [2 bytes fatal_errors]
+                uint8_t tx_data[8] = {0};
+                float current_actual_pos = TUNE_HEART.feedback.position.get_filtered_position_rev();
+                memcpy(&tx_data[0], &current_actual_pos, 4);
+
+                tx_data[4] = static_cast<uint8_t>(TUNE_HEART.driver.get_motor_status());
+                tx_data[5] = static_cast<uint8_t>(TUNE_HEART.driver.get_driver_status());
+
+                uint16_t fatal_flags = static_cast<uint16_t>(TUNE_HEART.feedback.error.get_fatal_flags());
+                memcpy(&tx_data[6], &fatal_flags, 2);
+
+                // Broadcast telemetry on MY_NODE_ID + 1
+                CanMsg tx_msg(CanStandardId(MY_NODE_ID + 1), 8, tx_data);
+                can.write(tx_msg);
             }
 
             if (current_mode == ControlMode::OptionalSCurve) {

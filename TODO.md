@@ -54,5 +54,5 @@ This document tracks the feature parity, architectural differences, and remainin
     - [x] Verify or adapt the TunePulse `driver_pwm` and `foc_vector_synthesis` to properly handle the specific Stepper motor topology used on the CLN17 hardware (verified: natively supported via 3-half-bridge mapping).
 
 ### Low Priority (Enhancements)
-- [ ] **Telemetry over CAN:** Return current state, errors, and actual position back over the CAN bus.
-- [ ] **Advanced Error Recovery:** Handle CAN timeouts or encoder signal loss gracefully.
+- [x] **Telemetry over CAN:** Return current state, errors, and actual position back over the CAN bus.
+- [x] **Advanced Error Recovery:** Handle CAN timeouts or encoder signal loss gracefully.
