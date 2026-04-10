@@ -90,5 +90,4 @@ public:
         // Convert 32-bit results back to 16-bit outputs
         return Vec3D((int16_t)(voltg_a), (int16_t)(voltg_b), (int16_t)(voltg_c));  // Store phase C result
     }
-
 };

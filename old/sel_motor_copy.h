@@ -6,9 +6,6 @@
 #include "sel_voltage.h"
 
 
-// Forward declaration
-struct Feedback;
-
 // ============================================================================
 // MotorSelector - unified structure combining current, voltage, and phase selection
 // ============================================================================
@@ -37,9 +34,6 @@ struct Feedback;
 
 struct MotorSelector {
 private:
-    // Reference to parent Feedback
-    Feedback& feedback_;
-    
     // Sub-modules
     ABC2AB current_converter_;  // Current: ABC -> AB
     AB2ABC voltage_converter_;  // Voltage: AB -> ABC
@@ -71,13 +65,13 @@ public:
     /// @param control_mode Control mode (VoltageAB or CurrentAB)
     /// @param duty_permille Maximum duty cycle in permille (0-995 = 0.0%-99.5%)
     /// @param current_epsilon Balance tolerance for current in Q15 format
-    MotorSelector(Feedback& parent,
+    MotorSelector(
                   MotorType motor_type = MotorType_STEP,
                   PhasePattern phase_pattern = PhasePattern_ABC,
                   uint16_t duty_permille = 995u,
                   int16_t current_epsilon = 256)
-        : feedback_(parent),
-          current_converter_(parent, current_epsilon),
+        : 
+          current_converter_(current_epsilon),
           voltage_converter_(),
           motor_type_(motor_type),
           phase_pattern_(phase_pattern),
@@ -140,7 +134,7 @@ public:
 
     /// Process voltage path: AB voltages -> ABC voltages with phase remapping
     /// @param voltage Vec2D voltage (sin=alpha, cos=beta) in Q15 format
-    const int16_t* tick_voltage(Vec2D voltage, int16_t sup_norm) {
+    Vec3D tick_voltage(Vec2D voltage) {
         // Convert AB to ABC using voltage converter
         Vec3D abc = voltage_converter_.tick(voltage, motor_type_, err_voltage_);
 
@@ -149,7 +143,7 @@ public:
         abc_voltages_remapped_.b = abc[idx1_];
         abc_voltages_remapped_.c = abc[idx2_];
 
-        return abc_voltages_remapped_.arr;
+        return abc_voltages_remapped_;
     }
 
     /// Process current path: ABC currents -> AB currents
@@ -185,7 +179,7 @@ public:
 
     /// Get pointer to remapped ABC voltages (final output for PWM)
     /// @return Pointer to 3-element array [A, B, C] in Q15 format
-    const int16_t* get_voltages() const { return abc_voltages_remapped_.arr; }
+    Vec3D get_voltages() const { return abc_voltages_remapped_; }
 
     /// Get AB currents as Vec2D (alpha-beta)
     /// @return Vec2D with sin=alpha, cos=beta in Q15 format

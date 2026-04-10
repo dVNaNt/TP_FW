@@ -39,13 +39,25 @@ inline int16_t fast_sign_int(int32_t val) {
 
 // Include headers that depend on the utility functions above
 #include "math/helpers/fifo_buffer.h"
-#include "math/controllers/pid.h"
-#include "math/controllers/pid_f.h"
+#include "math/controllers/pi.h"
 #include "math/filters/ema.h"
 #include "math/filters/median3.h"
 #include "math/helpers/stability_check.h"
 #include "motor_driver/types.h"
 #include "vectors.h"
+
+
+/// @brief Represents the instantaneous kinematic and dynamic state at a specific tick
+struct MotionState {
+    int32_t pos;  // Position (e.g., Q16.16 format for turns/angle)
+    float vel;    // Velocity (RPS)
+    float acc;    // Acceleration (RPS/s)
+    float trq;    // Torque/Current (Amperes)
+
+    MotionState() : pos(0), vel(0.0f), acc(0.0f), trq(0.0f) {}
+
+    MotionState(int32_t p, float v, float a, float q = 0.0f) : pos(p), vel(v), acc(a), trq(q) {}
+};
 
 
 /// Frequency configuration structure

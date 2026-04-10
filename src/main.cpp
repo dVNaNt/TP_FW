@@ -97,32 +97,6 @@ void setup() {
 
     SerialUSB.println("Going LOOP");
     
-    // Configure position controller (cascaded position-velocity control)
-    // Position loop gains (outer loop) - NEGATIVE for proper error correction
-    float pos_kp = -2.0f;    // Position proportional gain (negative)
-    float pos_ki = -0.1f;    // Position integral gain [1/s] (negative)
-    float pos_kd = -0.05f;   // Position derivative gain [s] (negative)
-    
-    // Velocity loop gains (inner loop) - NEGATIVE for proper error correction
-    float vel_kp = -0.5f;    // Velocity proportional gain (negative)
-    float vel_ki = -5.0f;    // Velocity integral gain [1/s] (negative)
-    float vel_kd = -0.001f;  // Velocity derivative gain [s] (negative)
-    
-    // Control loop parameters
-    float dt = 1.0f / PWM_TIMER_FREQ_HZ; // Control timestep [s] (e.g., 0.00005 for 20kHz)
-    
-    // Maximum velocity limit (5 rev/s in Q16.16 format)
-    const int32_t counts_per_rev = 16384; // Encoder resolution
-    int32_t max_vel_q16 = (int32_t)(5.0f * counts_per_rev * 65536.0f); // 5 rev/s
-    
-    // // Initialize position controller
-    // TUNE_HEART.position_controller = PositionController(
-    //     pos_kp, pos_ki, pos_kd,
-    //     vel_kp, vel_ki, vel_kd,
-    //     dt, max_vel_q16
-    // );
-    
-    SerialUSB.println("Position controller configured");
     
     // Enable position control mode
     TUNE_HEART.use_position_control = true;
@@ -159,11 +133,8 @@ void loop() {
             break;
             
         case PatternState::Running:
-            // Check if motion pattern has completed
-            // Pattern duration: 15 rev at 5 rev/s = 3s + accel/decel time ≈ 5s total
-            uint32_t pattern_duration_ms = 5000; // 5 seconds with margin
-            
-            if (millis() - last_pattern_time > pattern_duration_ms) {
+            if (TUNE_HEART.motion_executor.is_empty()) {
+                delay(1000);
                 // Pattern completed, switch direction
                 static bool forward = false; // Start with reverse after initial forward
                 if (forward) {

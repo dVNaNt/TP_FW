@@ -6,6 +6,7 @@
 #include "common.h"
 #include "feedback/feedback.h"
 #include "foc_vector_synthesis.h"  // Position-velocity cascaded controller
+#include "math/filters/ema_encoder.h"
 #include "math/helpers/frequency_generator.h"
 #include "math/motion/motion_executor.h"  // Real-time motion trajectory execution
 #include "math/motion/motion_planer.h"    // Motion planning and task management
@@ -65,7 +66,7 @@ public:
     // ========================================================================
     DriverPWM driver;
     AngleCalibrator angle_calibrator;
-    FilterEMA filter_;
+    // FilterAngleHybridEMA filter_;
 
     // ========================================================================
     // Motion planning and position control
@@ -74,13 +75,20 @@ public:
     MotionPlanner<32> motion_planner;    // High-level motion task manager
     // PositionController position_controller = PositionController(0.01f, 0.0f, 0.0f, 0.1f, 0.00005f, 5000000);  //
     // Cascaded position-velocity controller
-    PositionControllerLADRC position_controller =
-        PositionControllerLADRC(300.0f, 1000.0f, 10.0f, 0.00005f, 655360);  // Cascaded position-velocity controller
-    // ========================================================================
-    // HFI sensorless control (activated after motor calibration)
-    // ========================================================================
-    // Note: HFI components moved to DriverPWM for better encapsulation
-    // Use driver.init_hfi_sdft() to enable HFI sensorless control
+    MotorVectorSynthesis position_controller = MotorVectorSynthesis(
+    /*wc_max*/         200.0f,   // рад/с
+    /*wc_min*/          30.0f,   // рад/с  
+    /*wo*/             1000.0f,   // рад/с (наблюдатель)
+    /*b0*/               5.0f,  // подобрать под мотор
+    /*dt*/               0.00005f, // 20kHz
+    /*max_vel*/          16.6f,   // об/с
+    /*min_curr_ma*/    100.0f,   // мА
+    /*speed_foc*/        3.0f,   // об/с — порог FOC
+    /*load_foc_ma*/    300.0f,   // мА — порог нагрузки
+    /*pole_pairs*/       50.0f,    
+    /*blend_rate*/       5.0f,   // Гц
+    /*hysteresis*/       0.15f   // 15%
+);
 
     // ========================================================================
     // Control state
@@ -137,7 +145,7 @@ public:
           motor_params(),                             // Initialize Motor with default constructor
           driver(feedback, motor_params),             // Pass feedback and motor reference
           angle_calibrator(freq_hz),
-          filter_(0, 0),
+
           motion_executor(freq_hz),          // Initialize motion executor with control frequency
           motion_planner(&motion_executor),  // Initialize motion planner with executor reference
           motor_status(MotorStatus::NotCalibrated),
@@ -162,6 +170,8 @@ public:
         feedback.enable_supply();
 
         reset_buffers();
+        // filter_.configure_zones(8, 50, 2, 1);
+        // filter_.configure_velocity_scaler(0.00005f, pole_pairs, 1.0f);
     }
     // ========================================================================
     // Public API - Hardware callbacks
@@ -234,24 +244,135 @@ public:
         feedback.inputs.set_supply_adc(supply_adc);  // Use Feedback method without underscore
         feedback.inputs.set_temper_adc(temp_adc);    // Use Feedback method without underscore
     }
-
-    int32_t sensor_allign_ticks = 1000;
-    int32_t foc_speed = 0;
+    bool mode = false;
+    bool previous_mode = false;
     float bandwith = 500.0;
     bool is_pos_linear_used = false;
     int16_t d_current = 0;
     int16_t invert_ladrc = -1;
-    float bw_ladrc = 100.0f;
+    float bw_ladrc_min = 50.0f;
+    float bw_ladrc_max = 250.0f;
     int32_t POS_ERR = 0;
     bool is_pos_ctrl_used = true;
-    int32_t start_pos = 0;
     int16_t pole_pairs = 50;
-    uint16_t pos_cal_timer = 0;
-    bool simp_angle = false;
-    int16_t phase_shift = 0;
+    bool is_filt_used = false;
+    bool is_synt_used = true;
+    bool khz10 = true;
     void tick() {
         bool feedback_is_updated = feedback.tick();
+        if (fault_handler())
+            return;
 
+        if (!feedback_is_updated) {
+            return;
+        }
+
+        // ========================================================================
+        // Motor controller tick logic
+        // ========================================================================
+        
+
+        switch (motor_status) {
+            case MotorStatus::Success: {
+                int32_t real_raw_pos = feedback.encoder.get_position();
+
+                if (!angle_calibrator.is_ready()) {
+                    feedback.position.tick(real_raw_pos);
+                    angle_el_ = angle_calibrator.tick(real_raw_pos, (int16_t)driver.motor.get_motor_type());
+                    if (angle_calibrator.is_ready()) {
+                        TP_LOG("Angle Calibration Done. Starting Normal/Cogging operation");
+                        current_target_ma_ = 800;
+                        amplitude_ = feedback.current.ma2norm(current_target_ma_);
+                    }
+                    break;
+                }
+
+                uint16_t corrected_angle =
+                    is_pos_linear_used ? angle_calibrator.get_position_correction(real_raw_pos) : real_raw_pos;
+
+                feedback.position.tick(corrected_angle);
+
+                // Вычисляем электрический угол один раз, так как он нужен в обеих ветках ниже
+                angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_pos)) * el_sign);
+                // Motion planning and position control integration
+
+                // Execute motion trajectory and get current state (position, velocity, acceleration)
+                MotionState motion_state = motion_executor.tick();
+
+                // Get current position and velocity from feedback in Q16.16 format
+                int32_t current_pos_q16 = feedback.position.get_filtered_position();
+                float current_vel = feedback.position.get_filtered_speed_float();
+                float current_acc = feedback.position.get_acceleration_float();
+
+                // if (khz10) {
+                    // Position controller outputs current command based on trajectory tracking error
+                    FOCCommand position_current_ma =
+                        position_controller.tick(motion_state.pos,                      // Target position from motion planner
+                                                 feedback.position.get_raw_position(),  // Current position from encoder
+                                                 motion_state.vel,
+                                                 current_vel,  // Current velocity from estimator
+                                                 motion_state.acc, 0,
+                                                 current_target_ma_,  // Maximum current limit
+                                                 angle_el_);
+
+                    POS_ERR = feedback.position.get_raw_position() - motion_state.pos;
+                    if (previous_mode != mode) {
+                        previous_mode = mode; 
+                        // position_controller.set_mode(mode);
+                    }
+                    position_controller.set_bandwidth(bw_ladrc_max, bw_ladrc_min);
+
+                    // Use position controller output as amplitude command
+                    if (is_pos_ctrl_used) {
+                        amplitude_ = feedback.current.ma2norm(position_current_ma.u_q) * invert_ladrc;
+                        d_current = feedback.current.ma2norm(position_current_ma.u_d) * invert_ladrc;
+                    } else {
+                        amplitude_ = feedback.current.ma2norm(current_target_ma_);
+                    }
+                // }
+                // khz10 = !khz10;
+                // if (is_filt_used)
+                //     angle_el_ = filter_.tick(angle_el_, current_vel);
+                if (is_synt_used)
+                    angle_el_ = position_current_ma.elec_angle;
+                break;
+            }
+            case MotorStatus::CalibError:
+                amplitude_ = 0;
+                break;
+            case MotorStatus::NotCalibrated:
+                if (driver.motor.get_status() == MotorStatus::Success) {
+                    TP_LOG("Going to MotorStatus::ElectricCalibrationDone from MotorStatus::NotCalibrated");
+                    motor_status = MotorStatus::Success;
+                    current_target_ma_ = 300;
+                    amplitude_ = feedback.current.ma2norm(current_target_ma_);
+                }
+                break;
+            default: {
+                pwm_norm_[0] = pwm_norm_[1] = pwm_norm_[2] = INT16_MIN;
+                update_pwm_duty();
+                return;
+            }
+        }
+        driver.tick_control_foc((int16_t)angle_el_, Vec2D(d_current, amplitude_), feedback);
+        pwm_norm_ = driver.get_output();
+        update_pwm_duty();
+    }
+
+    const int16_t* pwm_duty_values() const { return pwm_duty_; }
+
+    // ========================================================================
+    // Clock interface
+    // ========================================================================
+
+    const Frequency& get_clock() const { return clock_; }
+
+    Frequency& get_clock() { return clock_; }
+    int32_t is_cal_used = 1;
+    int32_t el_sign = -1;
+
+private:
+    inline bool fault_handler() {
         // ========================================================================
         // Protection recovery timer logic
         // ========================================================================
@@ -275,7 +396,7 @@ public:
                 if (is_new)
                     TP_LOG("COMPARATOR TRIGGERED: Overvoltage protection (COMP3)");
                 halt_drive(0, false, false, true);
-                return;
+                return true;
             }
             if (feedback.error.get_fatal_oc()) {
                 if (is_new)
@@ -283,7 +404,7 @@ public:
                 else
                     feedback.error.reset_fatal_oc();
                 halt_drive(INT16_MIN, false, true, false);
-                return;
+                return true;
             }
             if (feedback.error.get_fatal_driver_error()) {
                 if (is_new)
@@ -291,124 +412,28 @@ public:
                 else
                     feedback.error.reset_fatal_driver();
                 halt_drive(INT16_MIN, true, false, false);
-                return;
+                return true;
             }
         }
         // 2. Ошибки только что исчезли — запускаем таймер
         else if (prev_has_hard_fault) {
             protection_recovery_timestamp_ = millis();
             TP_LOG("Protection recovery timer started (200ms)");
-            return;
+            return true;
         }
         // 3. Быстрый путь нормальной работы
         else {
             // Если таймер не истек, выходим без лишних вычислений
             if (millis() - protection_recovery_timestamp_ < PROTECTION_RECOVERY_TIMEOUT_MS) {
-                return;
+                return true;
             }
             // Таймер истек — гасим диоды
             led_control(0, false);
             led_control(1, false);
             led_control(2, false);
         }
-
-        if (!feedback_is_updated) {
-            return;
-        }
-
-        // ========================================================================
-        // Motor controller tick logic
-        // ========================================================================
-        amplitude_ = feedback.current.ma2norm(current_target_ma_);
-
-        switch (motor_status) {
-            case MotorStatus::Success: {
-                int32_t real_raw_pos = feedback.encoder.get_position();
-
-
-                if (!angle_calibrator.is_ready()) {
-                    feedback.position.tick(real_raw_pos);
-                    angle_el_ = angle_calibrator.tick(real_raw_pos, (int16_t)driver.motor.get_motor_type());
-                    if (angle_calibrator.is_ready()) {
-                        TP_LOG("Angle Calibration Done. Starting Normal/Cogging operation");
-                        current_target_ma_ = 1000;
-                    }
-                    break;
-                }
-
-                uint16_t corrected_angle =
-                    is_pos_linear_used ? angle_calibrator.get_position_correction(real_raw_pos) : real_raw_pos;
-
-                feedback.position.tick(corrected_angle);
-
-                    // Вычисляем электрический угол один раз, так как он нужен в обеих ветках ниже
-                    angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_pos) + phase_shift)* el_sign);
-                // Motion planning and position control integration
-
-                // Execute motion trajectory and get current state (position, velocity, acceleration)
-                MotionState motion_state = motion_executor.tick();
-
-                // Get current position and velocity from feedback in Q16.16 format
-                int32_t current_pos_q16 = feedback.position.get_filtered_position();
-                float current_vel = feedback.position.get_filtered_speed_float();
-                float current_acc = feedback.position.get_acceleration_float();
-
-                // Position controller outputs current command based on trajectory tracking error
-                int32_t position_current_ma =
-                    position_controller.tick(motion_state.pos,                      // Target position from motion planner
-                                             feedback.position.get_raw_position(),  // Current position from encoder
-                                             motion_state.vel,
-                                             current_vel,  // Current velocity from estimator
-                                             motion_state.acc, current_acc, current_target_ma_,
-                                             current_target_ma_,  // Maximum current limit
-                                             0);
-
-                POS_ERR = feedback.position.get_raw_position() - motion_state.pos;
-                position_controller.set_bandwidth(bw_ladrc, bw_ladrc * 3.0);
-
-                // Use position controller output as amplitude command
-                if (is_pos_ctrl_used)
-                    amplitude_ = feedback.current.ma2norm(position_current_ma) * invert_ladrc;
-                else
-                    amplitude_ = feedback.current.ma2norm(current_target_ma_);
-                // }
-                break;
-            }
-            case MotorStatus::CalibError:
-                amplitude_ = 0;
-                break;
-            case MotorStatus::NotCalibrated:
-                if (driver.motor.get_status() == MotorStatus::Success) {
-                    TP_LOG("Going to MotorStatus::ElectricCalibrationDone from MotorStatus::NotCalibrated");
-                    motor_status = MotorStatus::Success;
-                    current_target_ma_ = 1000;
-                }
-                break;
-            default: {
-                pwm_norm_[0] = pwm_norm_[1] = pwm_norm_[2] = INT16_MIN;
-                update_pwm_duty();
-                return;
-            }
-        }
-
-        driver.tick_control_foc((int16_t)angle_el_, Vec2D(d_current, amplitude_), feedback);
-        pwm_norm_ = driver.get_output();
-        update_pwm_duty();
+        return false;
     }
-
-    const int16_t* pwm_duty_values() const { return pwm_duty_; }
-
-    // ========================================================================
-    // Clock interface
-    // ========================================================================
-
-    const Frequency& get_clock() const { return clock_; }
-
-    Frequency& get_clock() { return clock_; }
-    int32_t is_cal_used = 1;
-    int32_t el_sign = -1;
-
-private:
     // ========================================================================
     // Private methods
     // ========================================================================

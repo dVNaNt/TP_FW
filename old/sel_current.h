@@ -27,8 +27,6 @@ private:
     // LPF filters for phase currents (used for balance validation)
     FilterEMA lpf_;  // LPF filter for phase balance
 
-    // Reference to parent Feedback
-    Feedback& feedback_;
 
     // Configuration
     int32_t epsilon_abs_;  // Absolute balance tolerance in Q15 format
@@ -43,8 +41,8 @@ public:
     /// Constructor: initializes current converter with motor type and balance tolerance
     /// @param parent Reference to parent Feedback instance
     /// @param epsilon Balance tolerance in Q15 format. If |balance| > epsilon => error flag set
-    ABC2AB(Feedback& parent, int16_t epsilon = 0)
-        : feedback_(parent),
+    ABC2AB(int16_t epsilon = 0)
+        : 
           epsilon_abs_(0)  // Will be calculated in set_epsilon()
           ,
           lpf_(0, LPF_ALPHA)  // Initialize LPF for phase A

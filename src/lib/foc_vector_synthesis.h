@@ -1,235 +1,483 @@
 #pragma once
 
-#include "common.h"
 #include <math.h>
+#include "common.h"
 
-struct PositionControllerLADRC {
-public:
-    float wc;        // Controller bandwidth [рад/с]
-    float wo;        // Observer bandwidth [рад/с] (фиксирован, 3-5 * wc)
-    float b0;        // Plant gain [об/с² / мА]
-    float kd_extra;  // Дополнительный демпфер (0 = выкл, 0.5..2.0 = активный гаситель)
-    float dt;
+constexpr float INT16_TO_RAD = (float)(M_PI / 32768.0f);
+constexpr float RAD_TO_INT16 = (float)(32768.0f / M_PI);
 
-    // LESO states
-    float z1 = 0.0f; // Оценка позиции
-    float z2 = 0.0f; // Оценка скорости
-    float z3 = 0.0f; // Оценка суммарного возмущения
-    float u_prev = 0.0f; // Последний выданный и ограниченный ток
+struct FOCCommand {
+    float   u_q;
+    float   u_d;
+    int16_t elec_angle;
+    bool    is_angle_ctrl;
+};
 
-    // Float32 position management
-    float y_local = 0.0f; // Текущая физическая позиция (в оборотах)
-    float r_local = 0.0f; // Текущая целевая позиция (от внешнего планировщика)
-    float r_local_filtered = 0.0f; // Внутренняя (сглаженная) целевая позиция для предотвращения рывков
+enum class MotorMode : uint8_t {
+    ANGLE_CONTROL = 0,
+    FOC           = 1,
+    BLENDING      = 2,
+};
 
-    int32_t prev_current_pos = 0;
-    int32_t prev_target_pos = 0;
-    bool is_first_tick = true;
+struct MotorVectorSynthesis {
 
-    // Максимальная ошибка для ПД-регулятора [об]. 
-    // Если реальная ошибка превышает это значение, система "тянет" как пружина постоянной силы.
-    float max_tracking_error = 0.5f; 
+    // ── LADRC parameters ──────────────────────────────────────────
+    float wc_max, wc_min, wo, b0, kd_extra, dt;
 
-    // Precomputed observer gains
-    float beta1, beta2, beta3;
-    // Precomputed controller gains
-    float kp_ctrl, kd_ctrl;
+    // ── LESO state ────────────────────────────────────────────────
+    float z1 = 0.0f;       
+    float z2 = 0.0f;       
+    float z3 = 0.0f;       
+    float u_prev = 0.0f;   
 
-    int32_t max_velocity_q16;
+    // ── Single integrator with tracking ───────────────────────────
+    float err_integral = 0.0f;
+    float ki_ctrl;
 
-    PositionControllerLADRC(float wc, float wo, float b0, float dt, int32_t max_vel_q16, float kd_extra = 0.0f)
-        : wc(wc), wo(wo), b0(b0), dt(dt), max_velocity_q16(max_vel_q16), kd_extra(kd_extra) {
-        _recompute_gains();
-    }
+    // ── Local coordinate frame ────────────────────────────────────
+    float   y_local = 0.0f, r_local = 0.0f;
+    int32_t prev_current_pos = 0, prev_target_pos = 0;
+    bool    is_first_tick = true;
 
-    int32_t tick(int32_t target_pos,
-                 int32_t current_pos,
-                 float target_vel,
-                 float current_vel,
-                 float targer_acc,
-                 float current_acc,
-                 float target_torque,
-                 int32_t max_current,
-                 int8_t mode) {
-        
-        const float inv_q16 = 1.0f / 65536.0f;
+    // ── Motor parameters ──────────────────────────────────────────
+    float   max_tracking_error = 2.0f;
+    uint8_t motor_pole_pairs;
+    float   beta1, beta2, beta3;
+    float   max_velocity;
+    float   min_current_ma;
+    float   holding_current_ma;
+    float   speed_threshold_foc;
+    float   load_threshold_ma;
+    float   mode_hysteresis;
 
-        // ---------------------------------------------------------
-        // 1. ИНИЦИАЛИЗАЦИЯ (Bumpless Transfer)
-        // ---------------------------------------------------------
-        if (is_first_tick) {
-            prev_current_pos = current_pos;
-            
-            // Bumpless Transfer: При включении мы "замораживаем" начальную 
-            // целевую точку там, где мы находимся физически.
-            prev_target_pos = current_pos; 
+    // ── Mode and blend ────────────────────────────────────────────
+    MotorMode current_mode = MotorMode::ANGLE_CONTROL;
+    float     blend_factor = 0.0f;
+    float     blend_rate;
+    float     blend_rate_fast;
 
-            y_local = 0.0f;
-            r_local = 0.0f;
-            r_local_filtered = 0.0f;
-            
-            // Инициализация наблюдателя реальным положением дел
-            z1 = 0.0f; 
-            z2 = current_vel;
-            
-            // Инициализация z3: оцениваем текущее возмущение (например гравитацию),
-            // чтобы первый выданный ток не вызвал падения или рывка.
-            z3 = (target_torque - u_prev) * b0; 
+    // ── Load estimation ───────────────────────────────────────────
+    float estimated_load_smooth = 0.0f;
+    float load_smooth_alpha;
 
-            is_first_tick = false;
-        }
+    // ── Slew-rate (0 = disabled) ──────────────────────────────────
+    float slew_rate_frac = 0.0f;
 
-        // ---------------------------------------------------------
-        // 2. ОБНОВЛЕНИЕ КООРДИНАТ И БОРЬБА С FLOAT-ПЕРЕПОЛНЕНИЕМ
-        // ---------------------------------------------------------
-        y_local += (float)(current_pos - prev_current_pos) * inv_q16;
-        r_local += (float)(target_pos - prev_target_pos) * inv_q16;
-        
-        prev_current_pos = current_pos;
-        prev_target_pos = target_pos;
-
-        // Нормализация координат (Float32 mantissa protection)
-        // Сдвигаем ВСЕ пространственные переменные синхронно, чтобы не нарушить математику
-        if (fabsf(y_local) > 8.0f) {
-            float shift = y_local;
-            y_local -= shift;
-            r_local -= shift;
-            r_local_filtered -= shift;
-            z1 -= shift;
-        }
-
-        // ---------------------------------------------------------
-        // 3. ПРОФИЛИРОВАНИЕ СКОРОСТИ ВОССТАНОВЛЕНИЯ
-        // Решает проблему рывков при выходе из stall или при скачке target_pos.
-        // ---------------------------------------------------------
-        float r_dot_internal = target_vel * inv_q16; 
-        
-        if (max_velocity_q16 > 0) {
-            float max_v = (float)max_velocity_q16 * inv_q16;
-            
-            // Разница между тем, куда мы хотим (r_local), и тем, 
-            // куда смотрит сейчас наш контроллер (r_local_filtered)
-            float step_error = r_local - r_local_filtered;
-            
-            // Вычисляем, какую скорость нужно развить, чтобы догнать цель
-            // Жесткость этого "догоняния" можно взять равной wc.
-            float recovery_vel = wc * step_error;
-            
-            // Ограничиваем скорость сближения
-            if (recovery_vel > max_v) recovery_vel = max_v;
-            else if (recovery_vel < -max_v) recovery_vel = -max_v;
-            
-            // Плавно подтягиваем внутренний reference к целевому
-            r_local_filtered += recovery_vel * dt;
-            
-            // Внутренний r_dot для контроллера
-            r_dot_internal = recovery_vel; 
-        } else {
-            // Если ограничения нет, внутренний таргет мгновенно равен внешнему
-            r_local_filtered = r_local;
-        }
-
-        const float r_ddot = targer_acc * inv_q16;
-
-        // ---------------------------------------------------------
-        // 4. LESO (Наблюдатель расширенного состояния) с Anti-Windup
-        // ---------------------------------------------------------
-        float e = z1 - y_local; // Ошибка оценки позиции
-
-        // Вычисление сырой производной z3
-        float z3_dot = -beta3 * e;
-        
-        // Лимитер скорости изменения z3 (Rate Limiter).
-        // Чрезвычайно важен для систем с шумным энкодером на низких скоростях.
-        // Разрешаем z3 меняться со скоростью изменения полного момента за 2 мс.
-        float max_z3_dot = ((float)max_current * b0) / 0.002f; 
-        if (z3_dot > max_z3_dot) z3_dot = max_z3_dot;
-        else if (z3_dot < -max_z3_dot) z3_dot = -max_z3_dot;
-
-        // Интегрирование LESO (Полунеявный Эйлер)
-        z3 += z3_dot * dt;
-        
-        // AWC-LESO: Наблюдатель использует u_prev (реально выданный, ОБРЕЗАННЫЙ ток), 
-        // а не "желаемый" ток. Это гарантирует, что LESO "знает" о насыщении инвертора,
-        // предотвращая расхождение состояний z при упоре в препятствие.
-        z2 += (z3 - beta2 * e + b0 * u_prev) * dt; 
-        z1 += (z2 - beta1 * e) * dt;
-
-        // Физический Anti-windup на состояние z3
-        // Возмущение в системе физически не может быть больше, чем максимальная сила мотора.
-        float max_dist = (float)max_current * b0;
-        if (z3 > max_dist) z3 = max_dist;
-        else if (z3 < -max_dist) z3 = -max_dist;
-
-        // ---------------------------------------------------------
-        // 5. ЗАКОН УПРАВЛЕНИЯ (PD Controller)
-        // ---------------------------------------------------------
-        // Используем внутренний, сглаженный reference
-        float ep = r_local_filtered - z1; 
-        
-        // Ограничитель рывка (Tracking Error Limiter):
-        // Если мотор механически заблокирован (stall), ep будет расти бесконечно.
-        // Ограничивая ep, мы превращаем мотор в "пружину с постоянной силой",
-        // которая не копит ветер в D-звене.
-        if      (ep >  max_tracking_error) ep =  max_tracking_error;
-        else if (ep < -max_tracking_error) ep = -max_tracking_error;
-
-        // Вычисляем ошибку скорости на базе внутреннего r_dot
-        float ev = r_dot_internal - z2; 
-
-        // Итоговое номинальное управление U0
-        float u0 = kp_ctrl * ep 
-                 + kd_ctrl * ev 
-                 + r_ddot
-                 - kd_extra * z2;  // Активное демпфирование механических резонансов
-        
-        // Добавление возмущения z3 и feedforward по току
-        float u_unsat = (u0 - z3) / b0 + target_torque;
-
-        // ---------------------------------------------------------
-        // 6. НАСЫЩЕНИЕ (Output Clamping)
-        // ---------------------------------------------------------
-        float max_c = (float)max_current;
-        float u_sat = u_unsat;
-        
-        if (u_sat > max_c) u_sat = max_c;
-        else if (u_sat < -max_c) u_sat = -max_c;
-
-        // Критично важно для AWC-LESO: сохраняем обрезанный ток для следующего такта!
-        u_prev = u_sat;
-        
-        return (int32_t)u_sat;
-    }
-
-    inline void reset(float current_actual_vel = 0.0f) {
-        z1 = 0.0f;
-        z2 = current_actual_vel;
-        z3 = 0.0f;
-        u_prev = 0.0f;
-        y_local = 0.0f;
-        r_local = 0.0f;
-        r_local_filtered = 0.0f;
-        is_first_tick = true;
-    }
-
-    inline void set_bandwidth(float new_wc, float new_wo) {
-        wc = new_wc;
-        wo = new_wo;
-        _recompute_gains();
-    }
-
-    inline float get_disturbance() const { return z3; }
-    inline float get_velocity_est() const { return z2; }
+    float u_spring_track = 0.0f;   
+    float u_foc_track    = 0.0f;   
 
 private:
-    inline void _recompute_gains() {
-        // Коэффициенты наблюдателя (Размещение полюсов по методу Gao)
+    // ── Angle filter state ────────────────────────────────────────
+    int32_t  af_state_  = 0;
+    int16_t  af_output_ = 0;
+    uint8_t  af_alpha_min_ = 1;
+    uint8_t  af_alpha_dyn_ = 1;
+
+    uint16_t af_err_z1_  = 0, af_err_z2_  = 0, af_err_slope_q8_ = 0;
+    uint16_t af_vel_z1_  = 0, af_vel_z2_  = 0, af_vel_slope_q8_ = 0;
+    float    af_vel_mult_ = 0.0f;
+
+    uint16_t af_err_deadband_ = 0;
+    uint16_t af_vel_deadband_ = 0;
+
+    float activity_index_ = 0.0f;
+    float activity_lpf_   = 0.0f;  
+    
+    // [FIX 11] Изолированная активность для фильтра угла (только по скорости)
+    float filter_activity_lpf_ = 0.0f;
+
+    static inline int16_t _angle_diff(int16_t a, int16_t b)
+    {
+        int32_t d = (int32_t)a - (int32_t)b;
+        if (d >  32767) d -= 65536;
+        if (d < -32768) d += 65536;
+        return (int16_t)d;
+    }
+
+    static inline float _smoothstep(float x)
+    {
+        if (x <= 0.0f) return 0.0f;
+        if (x >= 1.0f) return 1.0f;
+        return x * x * (3.0f - 2.0f * x);
+    }
+
+    int16_t _af_tick(int16_t raw, float activity)
+    {
+        int16_t dev = _angle_diff(raw, af_output_);
+
+        int16_t noise_core = (int16_t)(af_err_deadband_ / 2);
+        if (dev > noise_core) {
+            dev -= noise_core;
+        } else if (dev < -noise_core) {
+            dev += noise_core;
+        } else {
+            dev = 0;
+        }
+
+        uint16_t adev = (dev < 0) ? (uint16_t)(-dev) : (uint16_t)dev;
+        float    av   = (z2 < 0.0f) ? -z2 : z2;
+        uint16_t dvel = (uint16_t)(av * af_vel_mult_);
+
+        if (activity < 0.05f && adev == 0) {
+            af_alpha_dyn_ = 0;
+            af_state_ = (int32_t)af_output_ << 16;
+            return af_output_;
+        }
+
+        uint16_t ae = 0;
+        if (adev > af_err_z1_)
+            ae = (adev < af_err_z2_)
+                ? (uint16_t)(((uint32_t)(adev - af_err_z1_) * af_err_slope_q8_) >> 8)
+                : 255u;
+
+        uint16_t av2 = 0;
+        if (dvel > af_vel_z1_)
+            av2 = (dvel < af_vel_z2_)
+                ? (uint16_t)(((uint32_t)(dvel - af_vel_z1_) * af_vel_slope_q8_) >> 8)
+                : 255u;
+
+        uint32_t alpha_dynamic = (uint32_t)ae + (uint32_t)av2;
+        uint32_t alpha_scaled  = (uint32_t)(activity * (float)alpha_dynamic);
+        uint32_t asum          = (uint32_t)af_alpha_min_ + alpha_scaled;
+        uint8_t  adyn          = (asum > 255u) ? 255u : (uint8_t)asum;
+
+        af_alpha_dyn_ = adyn;
+        af_state_ += ((int32_t)dev << 8) * (int32_t)adyn;
+        af_output_ = (int16_t)(af_state_ >> 16);
+
+        if (adyn > 20) {
+            float delay_ticks = (256.0f - (float)adyn) / ((float)adyn + 1e-6f);
+            if (delay_ticks > 8.0f) delay_ticks = 8.0f;
+            float comp_angle = z2 * dt * (float)motor_pole_pairs * 65536.0f * delay_ticks * 0.5f;
+            int32_t comp_i = (int32_t)comp_angle;
+            
+            if (comp_i >  2000) comp_i =  2000;
+            if (comp_i < -2000) comp_i = -2000;
+            
+            int32_t predicted = (int32_t)af_output_ + comp_i;
+            if (predicted >  32767) predicted -= 65536;
+            if (predicted < -32768) predicted += 65536;
+            return (int16_t)predicted;
+        }
+
+        return af_output_;
+    }
+
+    inline void _recompute_observer_gains() {
         beta1 = 3.0f * wo;
         beta2 = 3.0f * wo * wo;
         beta3 = wo * wo * wo;
-        
-        // Коэффициенты контроллера
-        kp_ctrl = wc * wc;
-        kd_ctrl = 2.0f * wc;
     }
+
+public:
+    MotorVectorSynthesis(
+        float   wc_max,
+        float   wc_min,
+        float   wo,
+        float   b0,
+        float   dt,
+        float   max_vel,
+        float   min_curr_ma,
+        float   speed_foc,
+        float   load_foc_ma,
+        float   pole_pairs      = 50.0f,
+        float   blend_rate_hz   = 5.0f,
+        float   hysteresis      = 0.15f,
+        float   holding_curr_ma = 0.0f,
+        float   kd_extra        = 0.0f)
+        : wc_max(wc_max), wc_min(wc_min), wo(wo), b0(b0), kd_extra(kd_extra), dt(dt),
+          max_velocity(max_vel), min_current_ma(min_curr_ma),
+          speed_threshold_foc(speed_foc), load_threshold_ma(load_foc_ma),
+          motor_pole_pairs((uint8_t)pole_pairs),
+          blend_rate(blend_rate_hz),
+          blend_rate_fast(blend_rate_hz * 50.0f),
+          mode_hysteresis(hysteresis)
+    {
+        holding_current_ma = (holding_curr_ma > min_curr_ma)
+                             ? holding_curr_ma : load_foc_ma;
+        ki_ctrl           = wc_min * 5.0f;
+        load_smooth_alpha = dt / (0.005f + dt);
+        _recompute_observer_gains();
+    }
+
+    void configure_angle_filter(uint16_t noise_mech_q15, uint8_t safe_margin,
+                                uint8_t alpha_min, float mech_vel_to_rps)
+    {
+        af_alpha_min_ = alpha_min;
+        uint32_t noise_e = (uint32_t)noise_mech_q15 * motor_pole_pairs;
+        uint32_t eps     = noise_e * safe_margin;
+
+        af_err_z1_ = (uint16_t)(2u * eps);
+        af_err_z2_ = (uint16_t)(4u * eps);
+        {
+            uint32_t d = (uint32_t)af_err_z2_ - (uint32_t)af_err_z1_;
+            af_err_slope_q8_ = (d > 0)
+                ? (uint16_t)(((255UL - alpha_min) << 8) / d) : 0;
+        }
+
+        af_vel_z1_ = (uint16_t)(noise_e / 4u);
+        af_vel_z2_ = (uint16_t)(noise_e);
+        {
+            uint32_t d = (uint32_t)af_vel_z2_ - (uint32_t)af_vel_z1_;
+            af_vel_slope_q8_ = (d > 0)
+                ? (uint16_t)(((255UL - alpha_min) << 8) / d) : 0;
+        }
+
+        af_err_deadband_ = (uint16_t)(eps);
+        af_vel_deadband_ = (uint16_t)(noise_e / 8u);
+        af_vel_mult_     = mech_vel_to_rps * dt * (float)motor_pole_pairs * 65536.0f;
+    }
+
+    FOCCommand tick(int32_t  target_pos,
+                    int32_t  current_pos,
+                    float    target_vel,
+                    float    current_vel,
+                    float    target_acc,
+                    float    target_torque,
+                    int32_t  max_current,
+                    int16_t  raw_elec_angle)
+    {
+        const float inv_q16 = 1.0f / 65536.0f;
+        const float max_c   = (float)max_current;
+
+        if (is_first_tick) {
+            prev_current_pos      = current_pos;
+            prev_target_pos       = target_pos;
+            y_local               = 0.0f;
+            r_local               = (float)(target_pos - current_pos) * inv_q16;
+            z1                    = 0.0f;
+            z2                    = current_vel;
+            z3                    = 0.0f;
+            u_prev                = 0.0f;
+            err_integral          = 0.0f;
+            blend_factor          = 0.0f;
+            estimated_load_smooth = 0.0f;
+            u_spring_track        = 0.0f;
+            u_foc_track           = 0.0f;
+            activity_index_       = 0.0f;
+            activity_lpf_         = 0.0f;
+            filter_activity_lpf_  = 0.0f;
+            af_output_            = raw_elec_angle;
+            af_state_             = (int32_t)raw_elec_angle << 16;
+            is_first_tick         = false;
+        }
+
+        y_local += (float)(current_pos - prev_current_pos) * inv_q16;
+        r_local += (float)(target_pos  - prev_target_pos)  * inv_q16;
+        prev_current_pos = current_pos;
+        prev_target_pos  = target_pos;
+
+        if (fabsf(y_local) > 16.0f) {
+            float sh = floorf(y_local);
+            y_local -= sh;
+            r_local -= sh;
+            z1      -= sh;
+        }
+
+        // ══════════════════════════════════════════════════════════
+        //  3. LESO
+        // ══════════════════════════════════════════════════════════
+        float max_dist = max_c * b0;
+        float e_obs    = z1 - y_local;
+
+        const float obs_core = 8.0f / 65536.0f;
+        if (e_obs > obs_core) e_obs -= obs_core;
+        else if (e_obs < -obs_core) e_obs += obs_core;
+        else e_obs = 0.0f;
+
+        z1 += (z2     - beta1 * e_obs) * dt;
+        z2 += (z3     - beta2 * e_obs + b0 * u_prev) * dt;
+        z3 += (-beta3 * e_obs) * dt;
+
+        if (z3 >  max_dist) z3 =  max_dist;
+        if (z3 < -max_dist) z3 = -max_dist;
+
+        float ep_raw    = r_local - z1;
+        float abs_speed = fabsf(z2);
+        float abs_ep    = fabsf(ep_raw);
+
+        const float sp_foc = speed_threshold_foc;
+        float speed_activity = _smoothstep(abs_speed / (sp_foc * 0.5f));
+        
+        const float pos_noise_floor = 8.0f; 
+        float ep_counts = abs_ep * 65536.0f;
+        float error_activity = 0.0f;
+        if (ep_counts > pos_noise_floor) {
+            error_activity = _smoothstep((ep_counts - pos_noise_floor) / 16.0f);
+        }
+
+        // Control activity учитывает ошибку (чтобы давить моментом), 
+        // Filter activity учитывает только скорость (чтобы не пропускать шум)
+        float raw_activity = (speed_activity > error_activity) ? speed_activity : error_activity;
+        float act_alpha = (raw_activity > activity_lpf_)
+                        ? dt / (0.002f + dt)
+                        : dt / (0.10f  + dt);
+        activity_lpf_ += act_alpha * (raw_activity - activity_lpf_);
+        activity_index_ = activity_lpf_;
+
+        // [FIX 11] Фильтр угла получает активность только от физической скорости
+        float filt_alpha = (speed_activity > filter_activity_lpf_) 
+                         ? dt / (0.002f + dt) 
+                         : dt / (0.05f  + dt);
+        filter_activity_lpf_ += filt_alpha * (speed_activity - filter_activity_lpf_);
+
+        int16_t filtered_angle = _af_tick(raw_elec_angle, filter_activity_lpf_);
+
+        float load_ma = fabsf(z3) / b0;
+        estimated_load_smooth += load_smooth_alpha * (load_ma - estimated_load_smooth);
+
+        float sp_start   = sp_foc * 0.25f;
+        float tb_spd_raw = (abs_speed - sp_start) / (sp_foc - sp_start + 1e-6f);
+        float tb_spd     = _smoothstep(tb_spd_raw);
+
+        float ld_start   = load_threshold_ma * 0.3f;
+        float tb_ld_raw  = (estimated_load_smooth - ld_start)
+                         / (load_threshold_ma - ld_start + 1e-6f);
+        float tb_load    = _smoothstep(tb_ld_raw);
+
+        float target_blend = (tb_spd > tb_load) ? tb_spd : tb_load;
+
+        if (error_activity > target_blend) {
+            target_blend = error_activity;
+        }
+
+        float active_rate;
+        if (target_blend > blend_factor) {
+            active_rate = blend_rate + (blend_rate_fast - blend_rate) * activity_index_;
+        } else {
+            active_rate = blend_rate;
+        }
+
+        float br = active_rate * dt;
+        if (blend_factor < target_blend) {
+            blend_factor += br;
+            if (blend_factor > target_blend) blend_factor = target_blend;
+        } else {
+            blend_factor -= br;
+            if (blend_factor < target_blend) blend_factor = target_blend;
+        }
+        if (blend_factor > 1.0f) blend_factor = 1.0f;
+        if (blend_factor < 0.0f) blend_factor = 0.0f;
+
+        if      (blend_factor >= 1.0f - 1e-4f) current_mode = MotorMode::FOC;
+        else if (blend_factor <= 1e-4f)        current_mode = MotorMode::ANGLE_CONTROL;
+        else                                   current_mode = MotorMode::BLENDING;
+
+        float kp = wc_max * wc_max; 
+        float kd = 2.0f * wc_max; 
+
+        float ep = r_local - z1;
+
+        // [FIX 10] Убрано * inv_q16. target_vel и z2 оба находятся в RPS.
+        float ev = target_vel - z2;
+
+        if (activity_index_ < 0.1f) {
+            const float ep_db = 4.0f / 65536.0f; 
+            if (ep > ep_db) {
+                ep -= ep_db;
+            } else if (ep < -ep_db) {
+                ep += ep_db;
+            } else {
+                ep = 0.0f;
+            }
+        }
+
+        // ── Spring mode output: PD + integrator ───────────────────
+        float u0_spring = kp * ep + kd * ev + target_acc - kd_extra * z2;
+
+        const float eps_spring  = 0.25f / 65536.0f;
+        const float eps_pos_max = 2.0f  / 65536.0f;
+
+        if (abs_ep < eps_spring && abs_speed < sp_foc * 0.10f) {
+            err_integral += ep * dt; 
+            float max_i = (max_c * 0.5f) * b0 / (ki_ctrl + 1e-6f);
+            if (err_integral >  max_i) err_integral =  max_i;
+            if (err_integral < -max_i) err_integral = -max_i;
+        } else if (abs_ep > eps_pos_max || abs_speed > sp_foc * 0.5f) {
+            err_integral *= 0.98f;
+        }
+
+        float u_spring_raw = (u0_spring - ki_ctrl * err_integral) / b0 + target_torque;
+
+        // ── FOC mode output: PD + z3 disturbance rejection ────────
+        float u0_foc = kp * ep + kd * ev + target_acc - kd_extra * z2;
+        float u_foc_raw = (u0_foc - z3) / b0 + target_torque;
+
+        if (blend_factor > 0.01f) {
+            float tracking_target = z3 / (ki_ctrl + 1e-6f);
+            float tracking_rate   = blend_factor * wo * 0.1f * dt;
+            if (tracking_rate > 1.0f) tracking_rate = 1.0f;
+            err_integral += tracking_rate * (tracking_target - err_integral);
+        }
+
+        float u_blended = u_spring_raw * (1.0f - blend_factor)
+                        + u_foc_raw    *         blend_factor;
+
+        if (u_blended >  max_c) u_blended =  max_c;
+        if (u_blended < -max_c) u_blended = -max_c;
+
+        if (slew_rate_frac > 0.0f) {
+            float max_du = max_c * slew_rate_frac;
+            float du     = u_blended - u_prev;
+            if (du >  max_du) du =  max_du;
+            if (du < -max_du) du = -max_du;
+            u_prev += du;
+        } else {
+            u_prev = u_blended;
+        }
+
+        float Iq = u_prev;
+
+        float static_id = holding_current_ma * 0.1f;
+        float active_id = min_current_ma;
+
+        float id_blend = (blend_factor > activity_index_) ? blend_factor : activity_index_;
+        float Id = static_id + id_blend * (active_id - static_id);
+        if (Id < static_id) Id = static_id;
+
+        float amp = sqrtf(Iq * Iq + Id * Id);
+        if (amp > max_c) {
+            float inv_a = max_c / amp;
+            Iq *= inv_a;
+            Id *= inv_a;
+        }
+
+        FOCCommand cmd;
+        cmd.u_q           = Iq;
+        cmd.u_d           = Id;
+        cmd.elec_angle    = filtered_angle;
+        cmd.is_angle_ctrl = false;
+        return cmd;
+    }
+
+    void reset(float current_actual_vel = 0.0f)
+    {
+        z1 = z3 = u_prev = err_integral = 0.0f;
+        y_local = r_local = 0.0f;
+        blend_factor          = 0.0f;
+        estimated_load_smooth = 0.0f;
+        u_spring_track        = 0.0f;
+        u_foc_track           = 0.0f;
+        activity_index_       = 0.0f;
+        activity_lpf_         = 0.0f;
+        filter_activity_lpf_  = 0.0f;
+        current_mode          = MotorMode::ANGLE_CONTROL;
+        z2                    = current_actual_vel;
+        is_first_tick         = true;
+    }
+
+    void set_bandwidth(float new_wc_max, float new_wc_min) {
+        wc_max  = new_wc_max;
+        wc_min  = new_wc_min;
+        ki_ctrl = new_wc_min * 5.0f;
+        _recompute_observer_gains();
+    }
+
+    inline float     get_disturbance()  const { return z3; }
+    inline float     get_velocity_est()   const { return z2; }
+    inline MotorMode get_mode()           const { return current_mode; }
+    inline float     get_blend_factor()   const { return blend_factor; }
+    inline float     get_load_est_ma()    const { return fabsf(z3) / b0; }
+    inline int16_t   get_filtered_angle() const { return af_output_; }
+    inline uint8_t   get_angle_alpha()    const { return af_alpha_dyn_; }
 };

@@ -2,17 +2,7 @@
 
 #include "../../common.h"  // Includes common project definitions and hardware dependencies
 
-/// @brief Represents the instantaneous kinematic and dynamic state at a specific tick
-struct MotionState {
-    int32_t pos;  // Position (e.g., Q16.16 format for turns/angle)
-    float vel;    // Velocity (RPS)
-    float acc;    // Acceleration (RPS/s)
-    float trq;    // Torque/Current (Amperes)
 
-    MotionState() : pos(0), vel(0.0f), acc(0.0f), trq(0.0f) {}
-
-    MotionState(int32_t p, float v, float a, float q = 0.0f) : pos(p), vel(v), acc(a), trq(q) {}
-};
 
 /// @brief Represents a mathematical piece of a curve (spline or S-curve phase)
 struct MotionSegment {
@@ -125,6 +115,10 @@ public:
         freq = static_cast<float>(freq_hz);
         dt = 1.0f / freq;
         us_to_ticks = freq / 1000000.0f; // Обязательно обновляем коэффициент при смене частоты
+    }
+
+    bool is_empty() {
+        return buffer.is_empty();
     }
 
     MotionState get_current_state() const { return inst_state; }
