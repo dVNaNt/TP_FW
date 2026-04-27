@@ -157,7 +157,7 @@ inline void tunepulse_init() {
     SerialUSB.println("6. SPI1_Init...");
     SerialUSB.flush();
     delay(100);
-    SPI1_Init();  // Initialize SPI1 for encoder
+    SPI3_Init();  // Initialize SPI1 for encoder
     SerialUSB.println("   [OK] SPI1 initialized");
     SerialUSB.flush();
     delay(100);
@@ -165,7 +165,7 @@ inline void tunepulse_init() {
     SerialUSB.println("7. SPI1_Start...");
     SerialUSB.flush();
     delay(100);
-    SPI1_Start();  // Start SPI communication
+    SPI3_Start();  // Start SPI communication
     SerialUSB.println("   [OK] SPI1 started");
     SerialUSB.flush();
     delay(100);

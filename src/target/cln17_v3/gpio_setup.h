@@ -98,8 +98,9 @@ void IO_Init() {
     LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     // PC4 (LED_GRN)
-    GPIO_InitStruct.Pin = LL_GPIO_PIN_4;
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_4 | LL_GPIO_PIN_15;
     LL_GPIO_SetOutputPin(GPIOC, LL_GPIO_PIN_4);  // LED off (high)
+    LL_GPIO_ResetOutputPin(GPIOC, LL_GPIO_PIN_15);  // LED off (high)
     LL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
     // SW1 (PC6) - Button input with pull-up

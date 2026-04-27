@@ -13,6 +13,11 @@ enum class MotorStatus : uint8_t {
     InductanceMeasure = 5,  // Measuring inductance using HFI
     CalibError = 6,         // Calibration error
     ElectricCalibrationDone = 7,
+    InductanceMeasureWarmup = 8,
+    InductanceMeasureD  = 9,
+    InductanceMeasureQ = 10,
+        InductanceMeasureD2  = 11,
+    InductanceMeasureQ2 = 12,
     // MechanicalCalibration = 8,
     NotCalibrated = 0xFF
 };

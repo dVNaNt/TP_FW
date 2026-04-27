@@ -1,7 +1,8 @@
 #pragma once
 
 #include <math.h>
-#include "common.h"
+#include <stdint.h>
+#include "common.h" // Убедитесь, что M_PI определен здесь, если его нет в math.h
 
 constexpr float INT16_TO_RAD = (float)(M_PI / 32768.0f);
 constexpr float RAD_TO_INT16 = (float)(32768.0f / M_PI);
@@ -19,19 +20,107 @@ enum class MotorMode : uint8_t {
     BLENDING      = 2,
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Adaptive Type-2 PLL for electrical angle tracking.
+// Zero steady-state phase error at constant speed.
+// ─────────────────────────────────────────────────────────────────────────────
+struct AngleTrackingPLL {
+    float wn_min, wn_max, wn_urgent, zeta, dt;
+    float urgency_lo, urgency_hi, max_elec_hz;
+
+    float   theta_       = 0.0f;
+    float   omega_       = 0.0f;
+    int16_t out_         = 0;
+    bool    initialized_ = false;
+
+private:
+    static inline int16_t _diff(int16_t a, int16_t b) {
+        int32_t d = (int32_t)a - (int32_t)b;
+        if (d >  32767) d -= 65536;
+        if (d < -32768) d += 65536;
+        return (int16_t)d;
+    }
+
+    static inline float _smoothstep(float x) {
+        if (x <= 0.0f) return 0.0f;
+        if (x >= 1.0f) return 1.0f;
+        return x * x * (3.0f - 2.0f * x);
+    }
+
+public:
+    AngleTrackingPLL(float bw_min_hz = 15.0f, float bw_max_hz = 200.0f, float bw_urgent_hz = 500.0f,
+                     float dt = 0.0001f, float max_elec_hz = 1200.0f, float zeta = 0.707f,
+                     float urgency_lo_counts = 4096.0f,   // π/8
+                     float urgency_hi_counts = 12288.0f)  // 3π/8
+        : wn_min(2.0f * (float)M_PI * bw_min_hz)
+        , wn_max(2.0f * (float)M_PI * bw_max_hz)
+        , wn_urgent(2.0f * (float)M_PI * bw_urgent_hz)
+        , zeta(zeta), dt(dt)
+        , urgency_lo(urgency_lo_counts), urgency_hi(urgency_hi_counts)
+        , max_elec_hz(max_elec_hz)
+    {}
+
+    int16_t tick(int16_t raw, float activity, float vel_ff_counts_sec = 0.0f) {
+        if (!initialized_) {
+            theta_       = (float)raw;
+            omega_       = vel_ff_counts_sec; 
+            out_         = raw;
+            initialized_ = true;
+            return raw;
+        }
+
+        const int16_t theta_i = (int16_t)(int32_t)theta_;
+        const float   e       = (float)_diff(raw, theta_i);
+        const float   abs_e   = (e < 0.0f) ? -e : e;
+
+        // Anti-stall urgency boost
+        const float urgency = _smoothstep((abs_e - urgency_lo) / (urgency_hi - urgency_lo + 1e-6f));
+        const float wn = wn_min + (wn_max - wn_min) * activity + (wn_urgent - wn_max) * urgency;
+
+        const float kp = 2.0f * zeta * wn;
+        const float ki = wn * wn;
+
+        omega_ += ki * e * dt;
+
+        const float max_omega = 65536.0f * max_elec_hz;
+        if (omega_ >  max_omega) omega_ =  max_omega;
+        if (omega_ < -max_omega) omega_ = -max_omega;
+
+        theta_ += (kp * e + omega_) * dt;
+
+        if (theta_ >  32767.0f) theta_ -= 65536.0f;
+        if (theta_ < -32768.0f) theta_ += 65536.0f;
+
+        out_ = (int16_t)(int32_t)theta_;
+        return out_;
+    }
+
+    void reset(int16_t initial_angle = 0, float initial_omega_counts_per_sec = 0.0f) {
+        theta_       = (float)initial_angle;
+        omega_       = initial_omega_counts_per_sec;
+        out_         = initial_angle;
+        initialized_ = false;
+    }
+
+    inline float freq_hz() const { return omega_ / 65536.0f; }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Synthesis Controller
+// ─────────────────────────────────────────────────────────────────────────────
 struct MotorVectorSynthesis {
 
     // ── LADRC parameters ──────────────────────────────────────────
     float wc_max, wc_min, wo, b0, kd_extra, dt;
 
     // ── LESO state ────────────────────────────────────────────────
-    float z1 = 0.0f;       
-    float z2 = 0.0f;       
-    float z3 = 0.0f;       
-    float u_prev = 0.0f;   
+    float z1 = 0.0f;      
+    float z2 = 0.0f;      
+    float z3 = 0.0f;      
+    float u_prev = 0.0f;  
 
-    // ── Single integrator with tracking ───────────────────────────
-    float err_integral = 0.0f;
+    // ── Disturbance Memory (formerly err_integral) ────────────────
+    float disturbance_mem = 0.0f;
     float ki_ctrl;
 
     // ── Local coordinate frame ────────────────────────────────────
@@ -62,105 +151,19 @@ struct MotorVectorSynthesis {
 
     // ── Slew-rate (0 = disabled) ──────────────────────────────────
     float slew_rate_frac = 0.0f;
-
-    float u_spring_track = 0.0f;   
-    float u_foc_track    = 0.0f;   
+    
+    // ── Angle PLL ─────────────────────────────────────────────────
+    AngleTrackingPLL angle_pll_;
 
 private:
-    // ── Angle filter state ────────────────────────────────────────
-    int32_t  af_state_  = 0;
-    int16_t  af_output_ = 0;
-    uint8_t  af_alpha_min_ = 1;
-    uint8_t  af_alpha_dyn_ = 1;
-
-    uint16_t af_err_z1_  = 0, af_err_z2_  = 0, af_err_slope_q8_ = 0;
-    uint16_t af_vel_z1_  = 0, af_vel_z2_  = 0, af_vel_slope_q8_ = 0;
-    float    af_vel_mult_ = 0.0f;
-
-    uint16_t af_err_deadband_ = 0;
-    uint16_t af_vel_deadband_ = 0;
-
     float activity_index_ = 0.0f;
     float activity_lpf_   = 0.0f;  
-    
-    // [FIX 11] Изолированная активность для фильтра угла (только по скорости)
     float filter_activity_lpf_ = 0.0f;
 
-    static inline int16_t _angle_diff(int16_t a, int16_t b)
-    {
-        int32_t d = (int32_t)a - (int32_t)b;
-        if (d >  32767) d -= 65536;
-        if (d < -32768) d += 65536;
-        return (int16_t)d;
-    }
-
-    static inline float _smoothstep(float x)
-    {
+    static inline float _smoothstep(float x) {
         if (x <= 0.0f) return 0.0f;
         if (x >= 1.0f) return 1.0f;
         return x * x * (3.0f - 2.0f * x);
-    }
-
-    int16_t _af_tick(int16_t raw, float activity)
-    {
-        int16_t dev = _angle_diff(raw, af_output_);
-
-        int16_t noise_core = (int16_t)(af_err_deadband_ / 2);
-        if (dev > noise_core) {
-            dev -= noise_core;
-        } else if (dev < -noise_core) {
-            dev += noise_core;
-        } else {
-            dev = 0;
-        }
-
-        uint16_t adev = (dev < 0) ? (uint16_t)(-dev) : (uint16_t)dev;
-        float    av   = (z2 < 0.0f) ? -z2 : z2;
-        uint16_t dvel = (uint16_t)(av * af_vel_mult_);
-
-        if (activity < 0.05f && adev == 0) {
-            af_alpha_dyn_ = 0;
-            af_state_ = (int32_t)af_output_ << 16;
-            return af_output_;
-        }
-
-        uint16_t ae = 0;
-        if (adev > af_err_z1_)
-            ae = (adev < af_err_z2_)
-                ? (uint16_t)(((uint32_t)(adev - af_err_z1_) * af_err_slope_q8_) >> 8)
-                : 255u;
-
-        uint16_t av2 = 0;
-        if (dvel > af_vel_z1_)
-            av2 = (dvel < af_vel_z2_)
-                ? (uint16_t)(((uint32_t)(dvel - af_vel_z1_) * af_vel_slope_q8_) >> 8)
-                : 255u;
-
-        uint32_t alpha_dynamic = (uint32_t)ae + (uint32_t)av2;
-        uint32_t alpha_scaled  = (uint32_t)(activity * (float)alpha_dynamic);
-        uint32_t asum          = (uint32_t)af_alpha_min_ + alpha_scaled;
-        uint8_t  adyn          = (asum > 255u) ? 255u : (uint8_t)asum;
-
-        af_alpha_dyn_ = adyn;
-        af_state_ += ((int32_t)dev << 8) * (int32_t)adyn;
-        af_output_ = (int16_t)(af_state_ >> 16);
-
-        if (adyn > 20) {
-            float delay_ticks = (256.0f - (float)adyn) / ((float)adyn + 1e-6f);
-            if (delay_ticks > 8.0f) delay_ticks = 8.0f;
-            float comp_angle = z2 * dt * (float)motor_pole_pairs * 65536.0f * delay_ticks * 0.5f;
-            int32_t comp_i = (int32_t)comp_angle;
-            
-            if (comp_i >  2000) comp_i =  2000;
-            if (comp_i < -2000) comp_i = -2000;
-            
-            int32_t predicted = (int32_t)af_output_ + comp_i;
-            if (predicted >  32767) predicted -= 65536;
-            if (predicted < -32768) predicted += 65536;
-            return (int16_t)predicted;
-        }
-
-        return af_output_;
     }
 
     inline void _recompute_observer_gains() {
@@ -185,47 +188,23 @@ public:
         float   hysteresis      = 0.15f,
         float   holding_curr_ma = 0.0f,
         float   kd_extra        = 0.0f)
-        : wc_max(wc_max), wc_min(wc_min), wo(wo), b0(b0), kd_extra(kd_extra), dt(dt),
-          max_velocity(max_vel), min_current_ma(min_curr_ma),
-          speed_threshold_foc(speed_foc), load_threshold_ma(load_foc_ma),
-          motor_pole_pairs((uint8_t)pole_pairs),
-          blend_rate(blend_rate_hz),
-          blend_rate_fast(blend_rate_hz * 50.0f),
-          mode_hysteresis(hysteresis)
+        : wc_max(wc_max), wc_min(wc_min), wo(wo), b0(b0), kd_extra(kd_extra), dt(dt)
+        , max_velocity(max_vel), min_current_ma(min_curr_ma)
+        , speed_threshold_foc(speed_foc), load_threshold_ma(load_foc_ma)
+        , motor_pole_pairs((uint8_t)pole_pairs)
+        , blend_rate(blend_rate_hz)
+        , mode_hysteresis(hysteresis)
+        , angle_pll_(15.0f, 200.0f, 500.0f, dt) // Default PLL bandwidths
     {
-        holding_current_ma = (holding_curr_ma > min_curr_ma)
-                             ? holding_curr_ma : load_foc_ma;
-        ki_ctrl           = wc_min * 5.0f;
+        holding_current_ma = (holding_curr_ma > 0.0f) ? holding_curr_ma : load_foc_ma;
+        ki_ctrl = wc_min * 5.0f;
         load_smooth_alpha = dt / (0.005f + dt);
+        
+        // Safety clamp for fast blend rate to avoid torque jumps
+        float max_blend_fast = blend_rate_hz * 20.0f;
+        blend_rate_fast = (max_blend_fast > 100.0f) ? 100.0f : max_blend_fast;
+        
         _recompute_observer_gains();
-    }
-
-    void configure_angle_filter(uint16_t noise_mech_q15, uint8_t safe_margin,
-                                uint8_t alpha_min, float mech_vel_to_rps)
-    {
-        af_alpha_min_ = alpha_min;
-        uint32_t noise_e = (uint32_t)noise_mech_q15 * motor_pole_pairs;
-        uint32_t eps     = noise_e * safe_margin;
-
-        af_err_z1_ = (uint16_t)(2u * eps);
-        af_err_z2_ = (uint16_t)(4u * eps);
-        {
-            uint32_t d = (uint32_t)af_err_z2_ - (uint32_t)af_err_z1_;
-            af_err_slope_q8_ = (d > 0)
-                ? (uint16_t)(((255UL - alpha_min) << 8) / d) : 0;
-        }
-
-        af_vel_z1_ = (uint16_t)(noise_e / 4u);
-        af_vel_z2_ = (uint16_t)(noise_e);
-        {
-            uint32_t d = (uint32_t)af_vel_z2_ - (uint32_t)af_vel_z1_;
-            af_vel_slope_q8_ = (d > 0)
-                ? (uint16_t)(((255UL - alpha_min) << 8) / d) : 0;
-        }
-
-        af_err_deadband_ = (uint16_t)(eps);
-        af_vel_deadband_ = (uint16_t)(noise_e / 8u);
-        af_vel_mult_     = mech_vel_to_rps * dt * (float)motor_pole_pairs * 65536.0f;
     }
 
     FOCCommand tick(int32_t  target_pos,
@@ -249,16 +228,13 @@ public:
             z2                    = current_vel;
             z3                    = 0.0f;
             u_prev                = 0.0f;
-            err_integral          = 0.0f;
+            disturbance_mem       = 0.0f;
             blend_factor          = 0.0f;
             estimated_load_smooth = 0.0f;
-            u_spring_track        = 0.0f;
-            u_foc_track           = 0.0f;
             activity_index_       = 0.0f;
             activity_lpf_         = 0.0f;
             filter_activity_lpf_  = 0.0f;
-            af_output_            = raw_elec_angle;
-            af_state_             = (int32_t)raw_elec_angle << 16;
+            angle_pll_.reset(raw_elec_angle, current_vel * (float)motor_pole_pairs * 65536.0f);
             is_first_tick         = false;
         }
 
@@ -267,16 +243,13 @@ public:
         prev_current_pos = current_pos;
         prev_target_pos  = target_pos;
 
-        if (fabsf(y_local) > 16.0f) {
-            float sh = floorf(y_local);
-            y_local -= sh;
+        if (fabsf(r_local) > 16.0f) {
+            float sh = floorf(r_local);
             r_local -= sh;
+            y_local -= sh;
             z1      -= sh;
         }
 
-        // ══════════════════════════════════════════════════════════
-        //  3. LESO
-        // ══════════════════════════════════════════════════════════
         float max_dist = max_c * b0;
         float e_obs    = z1 - y_local;
 
@@ -299,15 +272,13 @@ public:
         const float sp_foc = speed_threshold_foc;
         float speed_activity = _smoothstep(abs_speed / (sp_foc * 0.5f));
         
-        const float pos_noise_floor = 8.0f; 
+        const float pos_noise_floor = 8.0f;
         float ep_counts = abs_ep * 65536.0f;
         float error_activity = 0.0f;
         if (ep_counts > pos_noise_floor) {
             error_activity = _smoothstep((ep_counts - pos_noise_floor) / 16.0f);
         }
 
-        // Control activity учитывает ошибку (чтобы давить моментом), 
-        // Filter activity учитывает только скорость (чтобы не пропускать шум)
         float raw_activity = (speed_activity > error_activity) ? speed_activity : error_activity;
         float act_alpha = (raw_activity > activity_lpf_)
                         ? dt / (0.002f + dt)
@@ -315,13 +286,14 @@ public:
         activity_lpf_ += act_alpha * (raw_activity - activity_lpf_);
         activity_index_ = activity_lpf_;
 
-        // [FIX 11] Фильтр угла получает активность только от физической скорости
-        float filt_alpha = (speed_activity > filter_activity_lpf_) 
-                         ? dt / (0.002f + dt) 
+        float filt_alpha = (speed_activity > filter_activity_lpf_)
+                         ? dt / (0.002f + dt)
                          : dt / (0.05f  + dt);
         filter_activity_lpf_ += filt_alpha * (speed_activity - filter_activity_lpf_);
 
-        int16_t filtered_angle = _af_tick(raw_elec_angle, filter_activity_lpf_);
+        // ── Execute Type-2 Angle PLL ──────────────────────────────────────────
+        float vel_ff_counts_sec = z2 * (float)motor_pole_pairs * 65536.0f;
+        int16_t filtered_angle = angle_pll_.tick(raw_elec_angle, filter_activity_lpf_, vel_ff_counts_sec);
 
         float load_ma = fabsf(z3) / b0;
         estimated_load_smooth += load_smooth_alpha * (load_ma - estimated_load_smooth);
@@ -331,22 +303,15 @@ public:
         float tb_spd     = _smoothstep(tb_spd_raw);
 
         float ld_start   = load_threshold_ma * 0.3f;
-        float tb_ld_raw  = (estimated_load_smooth - ld_start)
-                         / (load_threshold_ma - ld_start + 1e-6f);
+        float tb_ld_raw  = (estimated_load_smooth - ld_start) / (load_threshold_ma - ld_start + 1e-6f);
         float tb_load    = _smoothstep(tb_ld_raw);
 
         float target_blend = (tb_spd > tb_load) ? tb_spd : tb_load;
+        if (error_activity > target_blend) target_blend = error_activity;
 
-        if (error_activity > target_blend) {
-            target_blend = error_activity;
-        }
-
-        float active_rate;
-        if (target_blend > blend_factor) {
-            active_rate = blend_rate + (blend_rate_fast - blend_rate) * activity_index_;
-        } else {
-            active_rate = blend_rate;
-        }
+        float active_rate = (target_blend > blend_factor) 
+                            ? blend_rate + (blend_rate_fast - blend_rate) * activity_index_
+                            : blend_rate;
 
         float br = active_rate * dt;
         if (blend_factor < target_blend) {
@@ -356,84 +321,100 @@ public:
             blend_factor -= br;
             if (blend_factor < target_blend) blend_factor = target_blend;
         }
-        if (blend_factor > 1.0f) blend_factor = 1.0f;
+        
+          if (blend_factor > 1.0f) blend_factor = 1.0f;
         if (blend_factor < 0.0f) blend_factor = 0.0f;
 
         if      (blend_factor >= 1.0f - 1e-4f) current_mode = MotorMode::FOC;
         else if (blend_factor <= 1e-4f)        current_mode = MotorMode::ANGLE_CONTROL;
         else                                   current_mode = MotorMode::BLENDING;
 
-        float kp = wc_max * wc_max; 
-        float kd = 2.0f * wc_max; 
-
+        float kp = wc_max * wc_max;
+        float kd = 2.0f * wc_max;
         float ep = r_local - z1;
 
-        // [FIX 10] Убрано * inv_q16. target_vel и z2 оба находятся в RPS.
-        float ev = target_vel - z2;
+        // 1. ИСПРАВЛЕНИЕ: Ограничение ошибки положения (Anti-Windup)
+        // Используем забытый параметр max_tracking_error
+        if (ep > max_tracking_error) ep = max_tracking_error;
+        if (ep < -max_tracking_error) ep = -max_tracking_error;
 
+        // 2. Зона нечувствительности (Deadband)
         if (activity_index_ < 0.1f) {
-            const float ep_db = 4.0f / 65536.0f; 
-            if (ep > ep_db) {
-                ep -= ep_db;
-            } else if (ep < -ep_db) {
-                ep += ep_db;
-            } else {
-                ep = 0.0f;
-            }
+            const float ep_db = 4.0f / 65536.0f;
+            if (ep > ep_db) ep -= ep_db;
+            else if (ep < -ep_db) ep += ep_db;
+            else ep = 0.0f;
         }
 
-        // ── Spring mode output: PD + integrator ───────────────────
-        float u0_spring = kp * ep + kd * ev + target_acc - kd_extra * z2;
+        float vel_est = target_vel * (1.0f - blend_factor) + z2 * blend_factor;
+        float ev = target_vel - vel_est; 
+        
+        // 3. ИСПРАВЛЕНИЕ: Защита производной (опционально, но рекомендуется при больших инерциях)
+        // Ограничиваем влияние ошибки скорости, чтобы избежать резких бросков тока
+        const float max_ev = max_velocity * 1.5f;
+        if (ev > max_ev) ev = max_ev;
+        if (ev < -max_ev) ev = -max_ev;
+
+        float u0 = kp * ep + kd * ev + target_acc - kd_extra * vel_est;
 
         const float eps_spring  = 0.25f / 65536.0f;
         const float eps_pos_max = 2.0f  / 65536.0f;
 
+        // ── Disturbance Memory Tracking (formerly err_integral) ───────────────
         if (abs_ep < eps_spring && abs_speed < sp_foc * 0.10f) {
-            err_integral += ep * dt; 
+            disturbance_mem += ep * dt;
             float max_i = (max_c * 0.5f) * b0 / (ki_ctrl + 1e-6f);
-            if (err_integral >  max_i) err_integral =  max_i;
-            if (err_integral < -max_i) err_integral = -max_i;
+            if (disturbance_mem >  max_i) disturbance_mem =  max_i;
+            if (disturbance_mem < -max_i) disturbance_mem = -max_i;
         } else if (abs_ep > eps_pos_max || abs_speed > sp_foc * 0.5f) {
-            err_integral *= 0.98f;
+            disturbance_mem *= 0.98f;
         }
 
-        float u_spring_raw = (u0_spring - ki_ctrl * err_integral) / b0 + target_torque;
-
-        // ── FOC mode output: PD + z3 disturbance rejection ────────
-        float u0_foc = kp * ep + kd * ev + target_acc - kd_extra * z2;
-        float u_foc_raw = (u0_foc - z3) / b0 + target_torque;
+        float u_spring_raw = (u0 - ki_ctrl * disturbance_mem) / b0 + target_torque;
+        float u_foc_raw    = (u0 - z3) / b0 + target_torque;
 
         if (blend_factor > 0.01f) {
             float tracking_target = z3 / (ki_ctrl + 1e-6f);
             float tracking_rate   = blend_factor * wo * 0.1f * dt;
             if (tracking_rate > 1.0f) tracking_rate = 1.0f;
-            err_integral += tracking_rate * (tracking_target - err_integral);
+            disturbance_mem += tracking_rate * (tracking_target - disturbance_mem);
         }
 
-        float u_blended = u_spring_raw * (1.0f - blend_factor)
-                        + u_foc_raw    *         blend_factor;
+        float u_blended = u_spring_raw * (1.0f - blend_factor) + u_foc_raw * blend_factor;
 
         if (u_blended >  max_c) u_blended =  max_c;
         if (u_blended < -max_c) u_blended = -max_c;
 
+        float u_target = u_blended;
+
+        if (activity_index_ < 0.3f) {
+            float smooth_alpha = activity_index_ * dt / (0.005f + dt)
+                               + (1.0f - activity_index_) * dt / (0.020f + dt);
+            u_target = u_prev + smooth_alpha * (u_blended - u_prev);
+        }
+
         if (slew_rate_frac > 0.0f) {
             float max_du = max_c * slew_rate_frac;
-            float du     = u_blended - u_prev;
+            float du     = u_target - u_prev;
             if (du >  max_du) du =  max_du;
             if (du < -max_du) du = -max_du;
             u_prev += du;
         } else {
-            u_prev = u_blended;
+            u_prev = u_target;
         }
 
         float Iq = u_prev;
-
         float static_id = holding_current_ma * 0.1f;
         float active_id = min_current_ma;
 
         float id_blend = (blend_factor > activity_index_) ? blend_factor : activity_index_;
         float Id = static_id + id_blend * (active_id - static_id);
-        if (Id < static_id) Id = static_id;
+        
+        if (active_id >= static_id) {
+            if (Id < static_id) Id = static_id;
+        } else {
+            if (Id < active_id) Id = active_id;
+        }
 
         float amp = sqrtf(Iq * Iq + Id * Id);
         if (amp > max_c) {
@@ -450,20 +431,18 @@ public:
         return cmd;
     }
 
-    void reset(float current_actual_vel = 0.0f)
-    {
-        z1 = z3 = u_prev = err_integral = 0.0f;
+    void reset(float current_actual_vel = 0.0f) {
+        z1 = z3 = u_prev = disturbance_mem = 0.0f;
         y_local = r_local = 0.0f;
         blend_factor          = 0.0f;
         estimated_load_smooth = 0.0f;
-        u_spring_track        = 0.0f;
-        u_foc_track           = 0.0f;
         activity_index_       = 0.0f;
         activity_lpf_         = 0.0f;
         filter_activity_lpf_  = 0.0f;
         current_mode          = MotorMode::ANGLE_CONTROL;
         z2                    = current_actual_vel;
         is_first_tick         = true;
+        // PLL will be reset automatically on next tick via is_first_tick
     }
 
     void set_bandwidth(float new_wc_max, float new_wc_min) {
@@ -474,10 +453,12 @@ public:
     }
 
     inline float     get_disturbance()  const { return z3; }
-    inline float     get_velocity_est()   const { return z2; }
-    inline MotorMode get_mode()           const { return current_mode; }
-    inline float     get_blend_factor()   const { return blend_factor; }
-    inline float     get_load_est_ma()    const { return fabsf(z3) / b0; }
-    inline int16_t   get_filtered_angle() const { return af_output_; }
-    inline uint8_t   get_angle_alpha()    const { return af_alpha_dyn_; }
+    inline float     get_velocity_est() const { return z2; }
+    inline MotorMode get_mode()         const { return current_mode; }
+    inline float     get_blend_factor() const { return blend_factor; }
+    inline float     get_load_est_ma()  const { return fabsf(z3) / b0; }
+    
+    // Updated getters for the new PLL architecture
+    // inline int16_t   get_filtered_angle() const { return angle_pll_.output(); }
+    inline float     get_angle_pll_freq() const { return angle_pll_.freq_hz(); }
 };

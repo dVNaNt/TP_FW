@@ -5,7 +5,6 @@
 /// MotorType enumeration with predefined motor types
 typedef enum : int8_t {
     MotorType_Invalid = 0,
-    MotorType_DC = 1,
     MotorType_STEP = 4,
     MotorType_BLDC = 6,
 } MotorType;

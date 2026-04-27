@@ -45,7 +45,7 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
 
 inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA completion
 
-    TUNE_HEART.on_encoder_raw(SPI1_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
+    TUNE_HEART.on_encoder_raw(SPI3_GetAngleU16());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
     TUNE_HEART.tick();
 
 }  // End of POSITION_Callback function
@@ -69,7 +69,7 @@ inline void NVIC_Init() {  // Define the initialization function for the Nested 
 inline void FOC_TimTrig_Callback() {  // Define custom inline callback for the timer trigger event
     ADC1_StartDMAConversion();  // Trigger hardware dual ADC conversion (ADC1 and ADC2 start synchronously)
 
-    SPI1_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading
+    SPI3_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading
 
     TIM1_Set_PWM_Values(
         TUNE_HEART.pwm_duty_values());  // Request new duty cycles from FOC core and write them to hardware registers

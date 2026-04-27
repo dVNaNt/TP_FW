@@ -76,18 +76,18 @@ public:
     // PositionController position_controller = PositionController(0.01f, 0.0f, 0.0f, 0.1f, 0.00005f, 5000000);  //
     // Cascaded position-velocity controller
     MotorVectorSynthesis position_controller = MotorVectorSynthesis(
-    /*wc_max*/         200.0f,   // рад/с
-    /*wc_min*/          30.0f,   // рад/с  
-    /*wo*/             1000.0f,   // рад/с (наблюдатель)
-    /*b0*/               5.0f,  // подобрать под мотор
-    /*dt*/               0.00005f, // 20kHz
-    /*max_vel*/          16.6f,   // об/с
-    /*min_curr_ma*/    100.0f,   // мА
-    /*speed_foc*/        3.0f,   // об/с — порог FOC
-    /*load_foc_ma*/    300.0f,   // мА — порог нагрузки
-    /*pole_pairs*/       50.0f,    
-    /*blend_rate*/       5.0f,   // Гц
-    /*hysteresis*/       0.15f   // 15%
+    /*wc_max*/         50.0f,    // Снижено для плавной динамики
+    /*wc_min*/         15.0f,    
+    /*wo*/             200.0f,   // Снижено для фильтрации шумов
+    /*b0*/             5.5f,     // Снижено (J вырос -> b0 упал)
+    /*dt*/             0.00005f, 
+    /*max_vel*/        16.6f,    
+    /*min_curr_ma*/    100.0f,   
+    /*speed_foc*/      3.0f,     
+    /*load_foc_ma*/    300.0f,   
+    /*pole_pairs*/     50.0f,    
+    /*blend_rate*/     2.0f,     // Более плавный переход
+    /*hysteresis*/     0.15f     
 );
 
     // ========================================================================

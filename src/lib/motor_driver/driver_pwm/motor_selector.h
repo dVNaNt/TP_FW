@@ -28,8 +28,6 @@
 // Phase remapping is integrated directly for zero-overhead abstraction
 // ============================================================================
 
-
-
 struct MotorSelector {
 private:
     // --- State variables for Current processing (formerly ABC2AB) ---
@@ -76,17 +74,6 @@ private:
             // Phase A = alpha input (coil A) by default
             // Phase B = beta input (coil B) by default
             voltg_c = 0;                          // Phase C: unused for stepper
-        } else if (motor_type == MotorType_DC) {  // Handle DC motor type (differential drive on two channels)
-            // Check for disabled state (INT16_MIN) or brake (0)
-            voltg_c = INT16_MIN;  // Phase C: unused for DC motor
-            if (voltg_a == INT16_MIN || voltg_a == 0) {
-                voltg_b = voltg_a;  // Set all outputs to reference
-            } else {
-                constexpr static int32_t MIDPOINT = (int32_t)(INT16_MAX / 2);  // Calculate PWM midpoint
-                voltg_a = (int16_t)(MIDPOINT - neg_voltg_a_div2);              // Phase A: midpoint + half duty (forward)
-                voltg_b = (int16_t)(MIDPOINT + neg_voltg_a_div2);              // Phase B: midpoint - half duty (reverse)
-            }
-            return Vec3D((int16_t)(voltg_a), (int16_t)(voltg_b), (int16_t)(voltg_c));
         } else {  // Handle unexpected invalid motor type
             error = true;
             return Vec3D(INT16_MIN, INT16_MIN, INT16_MIN);  // Store phase C result
@@ -129,7 +116,7 @@ private:
     // ============================================================================
     // Internal method: ABC to AB current converter with sensor recombination (formerly ABC2AB::tick)
     // ============================================================================
-       // ============================================================================
+    // ============================================================================
     // Internal method: ABC to AB current converter with sensor recombination (formerly ABC2AB::tick)
     // ============================================================================
     void abc2ab_tick(Vec3D abc, MotorType mt) {
@@ -139,9 +126,9 @@ private:
 
         const int32_t present_cnt = (int32_t)valid_a + (int32_t)valid_b + (int32_t)valid_c;
 
-        // Validate motor type is supported or no current sense or we have only C current for DC or we have only 1 current for
+        // Validate motor type is supported or no current sense we have only 1 current for
         // BLDC/STEP (short exit)
-        if (!(valid_a || valid_b) or (mt != MotorType_DC and present_cnt == 1)) {
+        if (present_cnt == 1) {
             ab_currents_ = Vec2D(INT16_MIN, INT16_MIN);
             err_current_ = true;
             return;  // Exit early on invalid motor type
@@ -173,9 +160,6 @@ private:
             alpha = ia;
             // Calculate beta: I_beta = (I_B - I_C) *  1/sqrt(3)
             beta = clamp_i32(((ib - ic) * INV_SQRT3_Q15) >> 15, INT16_MAX);  // Shift right to convert to Q15
-        } else if (mt == MotorType_DC) {
-            alpha = (ib - ia) >> 1;  // if we have only one sensor it will be recongured so less math branches
-            beta = 0;                // Beta = 0 for DC motor
         } else if (mt == MotorType_STEP) {
             alpha = ia;
             beta = ib;
@@ -188,7 +172,7 @@ private:
         ab_currents_ = {alpha, beta};
         err_current_ = false;  // Clear error flag
 
-        if (present_cnt + (mt == MotorType_DC) >= 3) {  // Handle motor phase balance
+        if (present_cnt == 3) {  // Handle motor phase balance
             // Calibration mode uses stepper-style current sensing (direct alpha-beta mapping)
             // Filter updated only when enough sensors for motor balance (2 for DC and 3 for rest). Using real sum of sensors
             const int16_t bal = lpf_.tick_lpf(sum);

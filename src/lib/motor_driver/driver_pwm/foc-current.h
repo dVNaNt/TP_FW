@@ -287,55 +287,47 @@ struct FocCurrentController {
         const float err_q = iq_target_a - iq_measured_a;  // [А]
 
         // --------------------------------------------------------
-        // 6) PI коррекция
+        // 6) PI коррекция и суммирование с FF
         // --------------------------------------------------------
-        //
-        // PI компенсирует то, что не покрыла модель:
-        // - ошибка R/L/Ke,
-        // - шум,
-        // - deadtime,
-        // - насыщение,
-        // - паразитные нелинейности.
-        //
-        const float ud_pi = kp * err_d + integrator_d;  // [В]
-        const float uq_pi = kp * err_q + integrator_q;  // [В]
+        const float ud_pi = kp * err_d + integrator_d;
+        const float uq_pi = kp * err_q + integrator_q;
 
-        // Полное напряжение в dq до лимитера.
-        float ud = K_ff * ud_ff + ud_pi;
-        float uq = K_ff * uq_ff + uq_pi;
+        // Желаемое напряжение (до лимитера)
+        const float ud_unlimited = K_ff * ud_ff + ud_pi;
+        const float uq_unlimited = K_ff * uq_ff + uq_pi;
+
+        float ud_out = ud_unlimited;
+        float uq_out = uq_unlimited;
 
         // --------------------------------------------------------
         // 7) Круговой лимит по напряжению
         // --------------------------------------------------------
-        //
-        // Ограничиваем не по осям отдельно, а по модулю вектора,
-        // чтобы сохранить угол напряжения.
-        //
-        const float u_sq = ud * ud + uq * uq;
+        const float u_sq = ud_unlimited * ud_unlimited + uq_unlimited * uq_unlimited;
 
-        bool saturated = false;
         if (u_sq > u_max_sq) {
-            saturated = true;
             const float scale = u_max / std::sqrt(u_sq);
-            ud *= scale;
-            uq *= scale;
+            ud_out *= scale;
+            uq_out *= scale;
         }
 
         // --------------------------------------------------------
-        // 8) Anti-windup
+        // 8) Anti-windup (Back-calculation)
         // --------------------------------------------------------
-        //
-        // Простейший и надёжный вариант:
-        // интегрируем только если не упёрлись в предел по напряжению.
-        //
-        if (!saturated) {
-            integrator_d += ki * err_d * kDt;
-            integrator_q += ki * err_q * kDt;
-        }
+        // Вычисляем, какую часть напряжения "срезал" лимитер
+        const float ud_err_aw = ud_out - ud_unlimited; // Будет < 0 при насыщении
+        const float uq_err_aw = uq_out - uq_unlimited; 
+
+        // Коэффициент разрядки интегратора (обратное время интегрирования)
+        // Защита от деления на ноль, если kp не задан
+        const float k_aw = (kp > 0.0f) ? (ki / kp) : 0.0f; 
+
+        // Интегратор накапливает ошибку по току, но разряжается обрезанным напряжением
+        integrator_d += (ki * err_d + k_aw * ud_err_aw) * kDt;
+        integrator_q += (ki * err_q + k_aw * uq_err_aw) * kDt;
 
         VoltageDQ out;
-        out.u_d = ud;  // [В]
-        out.u_q = uq;  // [В]
+        out.u_d = ud_out;  // [В]
+        out.u_q = uq_out;  // [В]
 
         return out;
     }
