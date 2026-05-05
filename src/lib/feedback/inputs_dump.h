@@ -22,7 +22,7 @@ struct DataInputs {
     uint16_t supply_adc;     // Supply voltage ADC reading (0..65535)
     uint16_t temper_adc;     // Temperature ADC reading (0..65535)
     uint16_t currnt_adc[3];  // Phase current ADC readings (0..65535 each)
-    uint16_t angle_raw;      // Raw encoder/sensor angle measurement (0..65535)
+    uint32_t angle_raw;      // Raw encoder/sensor angle measurement (0..65535)
     
     // Default constructor: Zero-initializes all fields
     DataInputs() : supply_adc(0), temper_adc(0), currnt_adc{0, 0, 0}, angle_raw(0) {}
@@ -176,7 +176,7 @@ public:
     }
     
     // Pushes raw encoder/sensor angle into the active buffer
-    inline void set_angle_raw(uint16_t value) {
+    inline void set_angle_raw(uint32_t value) {
         uint32_t idx = idx2update_.load(std::memory_order_acquire);
         buffers_[idx].angle_raw = value;
         uint32_t new_flags = atomic_clear_field_bit(idx, DataInputsBit_ANGLE);

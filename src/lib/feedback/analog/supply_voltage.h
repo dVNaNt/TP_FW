@@ -8,7 +8,7 @@
 // The filter smooths ADC readings to reduce noise and provide stable voltage measurements.
 // Uses precomputed scale factor for optimal resolution conversion between normalized and millivolt values.
 
-#include "../../common.h"                          // Include common migration definitions and types
+#include "../../common.h"            // Include common migration definitions and types
 #include "../../math/filters/ema.h"  // Include first-order filter for smoothing
 
 // Forward declaration of ErrorManager to avoid circular dependency
@@ -25,7 +25,7 @@ private:
     // Private data members
     // ---------------------------------------------------------------------------
     ErrorManager& error_;  // Reference to error manager for reporting voltage faults
-    
+
     // Callback function pointer for updating comparator threshold
     DAC_SET_COMP_OV_Callback comp_ov_callback_;  // Callback pointer for overvoltage comparator threshold updates
 
@@ -43,8 +43,6 @@ private:
     int16_t undervoltage_soft_norm;  // Soft undervoltage limit in Q15 format
 
     bool is_updated;
-
-    
 
     // Main processing function: Update filter and calculate normalized/millivolt outputs
     // raw_adc: Raw ADC reading (0..65535, where 65535 represents max_voltage_mv)
@@ -75,21 +73,22 @@ private:
 
     friend struct Feedback;
 
-
     // Constructor: Initialize with filter alpha, maximum voltage, and error manager reference
     // alpha: Filter coefficient (0..255, where 0=infinite filtering, 255=no filtering)
     // max_voltage_mv: Maximum expected voltage in millivolts
     // error: Reference to error manager for reporting voltage faults
-    SupplyVoltage(uint8_t alpha, int32_t max_voltage_mv, ErrorManager& error)  // Constructor: Create and initialize with filter settings and error manager
-        : comp_ov_callback_(nullptr),                     // Initialize callback pointer to null
-          filter_(0, alpha),                              // Initialize filter with zero input and specified alpha
-          max_voltage_mv_(max_voltage_mv),                // Store maximum voltage for scaling
-          scale_(0),                                      // Initialize scale factor (will be calculated)
-          voltage_norm_(0),                               // Initialize normalized voltage to zero
-          voltage_mv_(0),                                 // Initialize millivolt voltage to zero
-          overvoltage_soft_norm(INT16_MAX),               // Initialize soft overvoltage limit to maximum
-          undervoltage_soft_norm(INT16_MIN),              // Initialize soft undervoltage limit to minimum
-          is_updated(false),                              // Initialize update flag to false
+    SupplyVoltage(uint8_t alpha,
+                  int32_t max_voltage_mv,
+                  ErrorManager& error)        // Constructor: Create and initialize with filter settings and error manager
+        : comp_ov_callback_(nullptr),         // Initialize callback pointer to null
+          filter_(0, alpha),                  // Initialize filter with zero input and specified alpha
+          max_voltage_mv_(max_voltage_mv),    // Store maximum voltage for scaling
+          scale_(0),                          // Initialize scale factor (will be calculated)
+          voltage_norm_(0),                   // Initialize normalized voltage to zero
+          voltage_mv_(0),                     // Initialize millivolt voltage to zero
+          overvoltage_soft_norm(INT16_MAX),   // Initialize soft overvoltage limit to maximum
+          undervoltage_soft_norm(INT16_MIN),  // Initialize soft undervoltage limit to minimum
+          is_updated(false),                  // Initialize update flag to false
           error_(error) {
         // Calculate optimal scale factor for norm<->mv conversion
         // scale = (max_voltage_mv << shift) >> 15
@@ -101,7 +100,7 @@ private:
         scale_ = max_voltage_mv_ >> 5;  // Precompute scale with 10-bit shift for precision, divide by 32768 using >> 15
     }
 
-    public:
+public:
     // Convert normalized Q15 value to millivolts with minimal precision loss
     // norm: Normalized voltage in Q15 format (-32768..32767)
     // Returns: Voltage in millivolts
@@ -124,14 +123,11 @@ private:
         // Since scale = (max_voltage_mv << 10) / 32768
         // Therefore: norm = (mv << 10) * 32768 / (max_voltage_mv << 10)
         //                 = (mv * 32768) / max_voltage_mv
-        
 
-        
         if (scale_ == 0) {
-
-            return 0;                             // Avoid division by zero
+            return 0;  // Avoid division by zero
         }
-        
+
         int32_t norm_calc = (mv << 10) / scale_;  // Calculate normalized value using scale
 
         return clamp_i32(norm_calc, INT16_MAX);  // Return clamped normalized value
@@ -171,9 +167,11 @@ private:
     }
 
     // Get voltage in millivolts
-    inline int32_t get_voltage_mv() {        // Get voltage in millivolts
-        if (!is_updated)                           // Convert normalized value to millivolts using precomputed scale
+    inline int32_t get_voltage_mv() {              // Get voltage in millivolts
+        if (is_updated) {                          // Convert normalized value to millivolts using precomputed scale
             voltage_mv_ = norm2mv(voltage_norm_);  // Scale to millivolts with optimal precision
+            is_updated = false;
+        }
         return voltage_mv_;                        // Return voltage in millivolts
     }
 

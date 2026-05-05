@@ -45,7 +45,7 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
 
 inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA completion
 
-    TUNE_HEART.on_encoder_raw(SPI3_GetAngleU16());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
+    TUNE_HEART.on_encoder_raw(SPI3_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
     TUNE_HEART.tick();
 
 }  // End of POSITION_Callback function

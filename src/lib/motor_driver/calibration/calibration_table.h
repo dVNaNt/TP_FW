@@ -189,7 +189,7 @@ public: // Make the following methods public for external module access
         } // End of validation loop
 
         build_ecc_table(); // Construct the compact inverse eccentricity table upon successful validation
-TP_LOG_ARRAY("ECCArr ", ecc_table); // Output the entire calibration array for debugging
+        TP_LOG_ARRAY("ECCArr ", ecc_table); // Output the entire calibration array for debugging
 
         return true; // Validation successful: all deviations are within acceptable physical bounds
     } // End of check() method
@@ -305,57 +305,84 @@ TP_LOG_ARRAY("ECCArr ", ecc_table); // Output the entire calibration array for d
     } // End of build_ecc_table() method
 
     /**
-     * @brief Corrects encoder position using calibration table
-     * @param position Raw encoder position
-     * @return Corrected electrical angle mapped to the electrical period
+     * @brief Corrects encoder position using calibration table with 32-bit precision
+     * @param position Raw encoder position (32-bit high resolution)
+     * @return Corrected electrical angle mapped to the electrical period (16-bit)
      *
-     * Uses interpolation to map real encoder positions to corrected angles,
+     * Uses 32-bit interpolation to map real encoder positions to corrected angles,
      * compensating for non-linearities detected during calibration.
+     * Avoids 64-bit arithmetic to maintain fast performance on 32-bit MCUs.
      */
-    uint16_t correct_el_angle(uint16_t position) const { // Hot path: corrects raw sensor data continuously
+    uint16_t correct_el_angle(uint32_t position) const { // Hot path: corrects raw sensor data continuously
         if (cal_size == 0) { // CRITICAL SAFETY: Prevent division by zero and garbage output if uncalibrated
             return 0; // Fallback: default electrical angle to zero
         } // End of safety abort
 
-        // Align position so zero aligns with table's zero-offset point
-        uint16_t real_pos = (uint16_t)(position - offst_val); // Shift input into the normalized table domain
+        // Align position so zero aligns with table's zero-offset point in 32-bit domain
+        uint32_t offst_val_32 = (uint32_t)offst_val << 16;
+        uint32_t real_pos_32 = position - offst_val_32; // Shift input into the normalized table domain
 
-        // Estimate starting index by scaling real_pos down. Subtract max_deviation to bracket search correctly.
-        size_t idx = ((size_t)(uint16_t)(real_pos - max_deviation) * cal_size) >> 16; // Fast division by 65536 using shift
+        // Estimate starting index by scaling real_pos down.
+        uint16_t real_pos_16 = (uint16_t)(real_pos_32 >> 16); // Extract top 16 bits for rough estimation
+        size_t idx = ((size_t)(uint16_t)(real_pos_16 - max_deviation) * cal_size) >> 16; // Fast division by 65536 using shift
 
         // Get initial comparison points to prepare for linear segment search
-        uint16_t cal_pos1 = get_val_by_idx(idx); // Fetch calibration value at estimated current index
-        uint16_t idl_pos1 = get_ideal(idx, cal_size); // Fetch theoretical ideal value at estimated current index
+        uint16_t cp1 = get_val_by_idx(idx);
+        uint16_t ip1 = get_ideal(idx, cal_size);
+        uint32_t cal_pos1_32 = (uint32_t)cp1 << 16; // Fetch calibration value and shift to 32-bit
+        uint32_t idl_pos1_32 = (uint32_t)ip1 << 16; // Fetch theoretical ideal value and shift to 32-bit
 
-        uint16_t result = idl_pos1; // Initialize result to the best available estimate
+        uint32_t result_32 = idl_pos1_32; // Initialize result to the best available estimate
 
         // Iterate up to 8 steps to find precise segment where real_pos physically falls
         for (int iter = 0; iter < 8; ++iter) { // Search loop with strict deterministic bounded execution
             idx = (idx + 1) % cal_size; // Move to next index circularly
-            uint16_t cal_pos2 = get_val_by_idx(idx); // Calibration value at next index boundary
-            uint16_t idl_pos2 = get_ideal(idx, cal_size); // Ideal value at next index boundary
+            uint16_t cp2 = get_val_by_idx(idx);
+            uint16_t ip2 = get_ideal(idx, cal_size);
+            uint32_t cal_pos2_32 = (uint32_t)cp2 << 16; // Calibration value at next index boundary
+            uint32_t idl_pos2_32 = (uint32_t)ip2 << 16; // Ideal value at next index boundary
 
-            int16_t diff1 = (int16_t)(real_pos - cal_pos1); // Signed difference from left bound
-            int16_t diff2 = (int16_t)(real_pos - cal_pos2); // Signed difference from right bound
+            int32_t diff1 = (int32_t)(real_pos_32 - cal_pos1_32); // Signed difference from left bound
+            int32_t diff2 = (int32_t)(real_pos_32 - cal_pos2_32); // Signed difference from right bound
 
             // Find boundary where diff changes sign, meaning real_pos is bracketed between cal_pos1 and cal_pos2
             if ((diff1 >= 0) && (diff2 < 0)) { // Verify zero-crossing logic
-                result = interpolate(cal_pos1, idl_pos1, cal_pos2, idl_pos2, real_pos); // Compute exact sub-segment position
+                uint32_t c1_ofst_32 = (uint32_t)diff1; // Exact 32-bit offset from left boundary
+                uint16_t ref_range_16 = (uint16_t)(cp2 - cp1); // Calculate true reference range in physical 16-bit domain
+                uint16_t trgt_range_16 = (uint16_t)(ip2 - ip1); // Calculate target ideal 16-bit range
+                
+                if (ref_range_16 == 0) {
+                    result_32 = idl_pos1_32; // Prevent division-by-zero if encoder is stuck
+                } else {
+                    // Precise 32-bit interpolation without 64-bit math (safe fractional projection)
+                    uint32_t q = c1_ofst_32 / ref_range_16; // Quotient
+                    uint32_t r = c1_ofst_32 % ref_range_16; // Remainder
+                    uint32_t c2_ofst_32 = q * trgt_range_16 + (r * trgt_range_16) / ref_range_16; 
+                    result_32 = idl_pos1_32 + c2_ofst_32; // Compute exact sub-segment position in 32-bit
+                }
                 break; // Exit loop after finding the correct segment
             } // End of bracketing condition
 
             // Move to next segment window
-            cal_pos1 = cal_pos2; // Left bound calibration becomes old right bound
-            idl_pos1 = idl_pos2; // Left bound ideal becomes old right bound
+            cal_pos1_32 = cal_pos2_32; // Left bound calibration becomes old right bound
+            idl_pos1_32 = idl_pos2_32; // Left bound ideal becomes old right bound
+            cp1 = cp2;
+            ip1 = ip2;
         } // End of bounded segment search
 
-        // Compute mechanical angle mapped into one electrical period safely
-    uint16_t el = (uint16_t)(((uint32_t)result * (uint32_t)cal_size) / (uint32_t)el_angle_div);
+        // Compute mechanical angle mapped into one electrical period safely using 32-bit division logic
+        uint32_t q = result_32 / (uint32_t)el_angle_div;
+        uint32_t r = result_32 % (uint32_t)el_angle_div;
+        
+        // Distributive modulo avoids 64-bit math. Natural 32-bit overflow handles electrical rotation wrapping natively!
+        uint32_t el_32 = q * (uint32_t)cal_size + (r * (uint32_t)cal_size) / (uint32_t)el_angle_div;
+        uint16_t el = (uint16_t)(el_32 >> 16); // Extract wrapped 16-bit electrical angle
 
-    // Компенсация того, что первый калибровочный сэмпл был снят после +1 electrical step
-    const uint16_t phase_shift = (uint16_t)(0x10000u / (uint32_t)el_angle_div);
+        // Компенсация того, что первый калибровочный сэмпл был снят после +1 electrical step
+        const uint16_t phase_shift = (uint16_t)(0x10000u / (uint32_t)el_angle_div);
 
-    return (uint16_t)(el - phase_shift);    } // End of correct_el_angle() method
+        return (uint16_t)(el - phase_shift);
+    } // End of correct_el_angle() method
 
     /**
      * @brief Fast O(1) raw-angle correction using the ECC table
@@ -365,25 +392,23 @@ TP_LOG_ARRAY("ECCArr ", ecc_table); // Output the entire calibration array for d
      * The ECC table stores inverse error as a function of raw encoder angle.
      * Linear interpolation between neighboring bins provides a smooth correction.
      */
-// Финальная и самая точная версия коррекции:
-uint16_t correct_position(uint16_t position) const {
-    if (cal_size == 0) return position;
+    // Финальная и самая точная версия коррекции:
+    uint16_t correct_position(uint16_t position) const {
+        if (cal_size == 0) return position;
 
-    // Сдвиг на 11 бит для ECC_TABLE_SIZE = 32 (работает быстрее деления)
-    uint16_t idx = position >> 11; 
-    uint16_t next_idx = (idx + 1) & 31; // Маска для 32
-    uint16_t fraction = position & 2047; // Маска остатка
-    
-    int16_t offset1 = ecc_table[idx];
-    int16_t offset2 = ecc_table[next_idx];
-    
-    // Интерполяция (сдвиг обратно на 11 бит)
-    int32_t interp_error = offset1 + (((offset2 - offset1) * (int32_t)fraction) >> 11);
-    
-    return (uint16_t)(position - interp_error); 
-}
-
-
+        // Сдвиг на 11 бит для ECC_TABLE_SIZE = 32 (работает быстрее деления)
+        uint16_t idx = position >> 11; 
+        uint16_t next_idx = (idx + 1) & 31; // Маска для 32
+        uint16_t fraction = position & 2047; // Маска остатка
+        
+        int16_t offset1 = ecc_table[idx];
+        int16_t offset2 = ecc_table[next_idx];
+        
+        // Интерполяция (сдвиг обратно на 11 бит)
+        int32_t interp_error = offset1 + (((offset2 - offset1) * (int32_t)fraction) >> 11);
+        
+        return (uint16_t)(position - interp_error); 
+    }
 
 private: // Restrict direct access to internal state memory and helper routines
     uint16_t cal_table[CAL_TABLE_CAPACITY]; // Array storing sampled encoder data across full physical calibration cycle

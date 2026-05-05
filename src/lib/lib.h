@@ -36,16 +36,150 @@ typedef void (*LED_Control_Callback)(bool state);
 #define PWM_TIMER_PERIOD 170000000 / 40000
 #endif
 
+struct OpenLoopController {
+public:
+    // Параметры
+    int16_t pole_pairs = 50;  // Количество пар полюсов
+    int32_t target_rpm = 60;  // Целевая скорость, об/мин (знак = направление)
+    int32_t iq_ma = 800;      // Фиксированный ток Iq в mA (момент)
+    int32_t id_ma = 0;        // Ток Id (обычно 0)
+
+private:
+    int32_t control_freq_hz_;  // Частота вызова tick() в Гц
+    uint32_t angle_accum_;     // Накопленный угол (переполнение = 1 эл. оборот)
+    uint16_t el_angle_;        // Текущий электрический угол [0..65535]
+
+public:
+    explicit OpenLoopController(int32_t control_freq_hz) : control_freq_hz_(control_freq_hz), angle_accum_(0), el_angle_(0) {}
+
+    // Вызывать каждый тик управления.
+    // Возвращает текущий электрический угол для передачи в driver.tick_control_foc().
+    uint16_t tick() {
+        // Инкремент за один тик:
+        // 1 электрический оборот = 2^32 в накопителе.
+        int64_t delta = (int64_t)target_rpm * pole_pairs;
+        delta = (delta << 32) / ((int64_t)60 * control_freq_hz_);
+
+        angle_accum_ += (uint32_t)delta;
+        el_angle_ = (uint16_t)(angle_accum_ >> 16);
+        return el_angle_;
+    }
+
+    uint16_t get_el_angle() const { return el_angle_; }
+
+    void reset() {
+        angle_accum_ = 0;
+        el_angle_ = 0;
+    }
+
+    // Синхронизировать фазу с реальным энкодером при переключении режимов
+    void sync_angle(uint16_t real_el_angle) {
+        el_angle_ = real_el_angle;
+        angle_accum_ = (uint32_t)real_el_angle << 16;
+    }
+};
+
+struct ElecAnglePLL {
+    // ── Параметры ──────────────────────────────────────────────────────────
+    float dt;
+    float fc_min = 40.0f;    // Гц, сильная фильтрация в покое (убирает шум)
+    float fc_max = 2000.0f;  // Гц, полное пропускание сигнала без фильтрации
+
+    // Настройка влияния скорости на полосу (Hz полосы на 1 Hz эл. скорости)
+    float vel_to_fc = 1.5f;
+
+    // Лимит ошибки 10 градусов (в Q16 это: 65536 * 10 / 360 = 1820.4)
+    float max_err_ticks = 1820.0f;
+
+    // ── Состояние ─────────────────────────────────────────────────────────
+    float theta_est = 0.0f;  // Оценка угла (float для точности интегрирования)
+    float vel_est = 0.0f;    // Оценка эл. скорости (тиков/сек)
+    bool is_initialized = false;
+
+private:
+    static inline float clampf(float x, float lo, float hi) { return (x < lo) ? lo : ((x > hi) ? hi : x); }
+
+public:
+    ElecAnglePLL(float dt = 0.00005f) : dt(dt) {}
+
+    void reset(uint16_t initial_angle) {
+        theta_est = (float)initial_angle;
+        vel_est = 0.0f;
+        is_initialized = true;
+    }
+
+    uint16_t tick(uint16_t raw_elec_angle) {
+        if (!is_initialized) {
+            reset(raw_elec_angle);
+            return raw_elec_angle;
+        }
+
+        // 1. Штатное переполнение для получения кратчайшей ошибки [-32768...32767]
+        uint16_t est_u16 = (uint16_t)theta_est;
+        int16_t err_ticks = (int16_t)(raw_elec_angle - est_u16);
+        float err_f = (float)err_ticks;
+        float err_abs = fabsf(err_f);
+
+        // 2. Оценка текущей эл. скорости в Герцах (1 оборот = 65536 тиков)
+        float vel_hz = fabsf(vel_est) * (1.0f / 65536.0f);
+
+        // 3. Формирование динамической полосы пропускания (Fc)
+        // Базовая полоса от скорости
+        float fc = fc_min + vel_hz * vel_to_fc;
+
+        // Взрывообразная реакция при приближении к 10 градусам ошибки
+        float err_ratio = err_abs / max_err_ticks;
+        if (err_ratio > 0.1f) {
+            // Возводим в 4-ю степень.
+            // При 5° (ratio 0.5) добавка будет слабой (~0.06 от максимума).
+            // При 10° (ratio 1.0) добавка 100% пробивает фильтр в максимум.
+            float err_boost = err_ratio * err_ratio;
+            err_boost *= err_boost;
+            fc += (fc_max - fc_min) * err_boost;
+        }
+
+        fc = clampf(fc, fc_min, fc_max);
+
+        // 4. Коэффициенты PLL (Критическое демпфирование zeta = 1.0)
+        float wc = 2.0f * (float)M_PI * fc;
+        float kp = 2.0f * wc;
+        float ki = wc * wc;
+
+        // 5. Интегрирование Type-2 Loop
+        vel_est += ki * err_f * dt;
+        theta_est += (vel_est + kp * err_f) * dt;
+
+        // 6. Нормализация аккумулятора в пределах [0.0, 65536.0)
+        // Использование float до 65536 безопасно, точность мантиссы ~0.003 тика
+        if (theta_est >= 65536.0f) {
+            theta_est -= 65536.0f;
+        } else if (theta_est < 0.0f) {
+            theta_est += 65536.0f;
+        }
+
+        return (uint16_t)theta_est;
+    }
+
+    // Полезный бонус: PLL сам вычисляет идеально гладкую эл. скорость
+    float get_velocity_hz() const { return vel_est * (1.0f / 65536.0f); }
+};
+
 // ============================================================================
 // TunePulseHeart - Complete motor control system
 // ============================================================================
-// Core control object that glues migrated motor-control logic with
-// hardware-facing callbacks. Interrupts push fresh ADC/encoder data into
-// the internal InputsDump, while the tick() method (called from loop)
-// performs heavy math only when a complete, ready dataset is available.
 
 struct TunePulseHeart {
 public:
+    OpenLoopController open_loop_controller;  // Open-loop FOC без обратной связи
+    bool use_open_loop = false;
+
+    // ========================================================================
+    // Настройки энкодера для трекинга ошибки в Open-loop
+    // ========================================================================
+    int32_t encoder_cpr = 16384;  // Укажите CPR вашего энкодера (напр. 16384 для 14-bit)
+    int64_t virtual_pos_ = 0;     // Интегратор идеальной механической позиции (в тиках)
+    uint16_t freq_hz_;            // Сохраненная частота контура управления
+
     // ========================================================================
     // Clock and timing
     // ========================================================================
@@ -73,22 +207,8 @@ public:
     // ========================================================================
     MotionExecutor<32> motion_executor;  // Real-time trajectory executor (16 segment buffer)
     MotionPlanner<32> motion_planner;    // High-level motion task manager
-    // PositionController position_controller = PositionController(0.01f, 0.0f, 0.0f, 0.1f, 0.00005f, 5000000);  //
-    // Cascaded position-velocity controller
-    MotorVectorSynthesis position_controller = MotorVectorSynthesis(
-    /*wc_max*/         50.0f,    // Снижено для плавной динамики
-    /*wc_min*/         15.0f,    
-    /*wo*/             200.0f,   // Снижено для фильтрации шумов
-    /*b0*/             5.5f,     // Снижено (J вырос -> b0 упал)
-    /*dt*/             0.00005f, 
-    /*max_vel*/        16.6f,    
-    /*min_curr_ma*/    100.0f,   
-    /*speed_foc*/      3.0f,     
-    /*load_foc_ma*/    300.0f,   
-    /*pole_pairs*/     50.0f,    
-    /*blend_rate*/     2.0f,     // Более плавный переход
-    /*hysteresis*/     0.15f     
-);
+
+    MotorVectorSynthesis position_controller = MotorVectorSynthesis();
 
     // ========================================================================
     // Control state
@@ -101,7 +221,7 @@ public:
     int32_t ticker_ = 0;
     size_t sup_check_;
     int32_t speed_incr_;
-
+    ElecAnglePLL angle_pll = ElecAnglePLL(0.00005f);
     // ========================================================================
     // PWM output
     // ========================================================================
@@ -119,15 +239,14 @@ public:
     // ========================================================================
     // LED control callbacks (platform-independent)
     // ========================================================================
-    LED_Control_Callback led_callbacks_[3] = {nullptr, nullptr,
-                                              nullptr};  // Array of LED control callbacks: [0]=Red, [1]=Green, [2]=Blue
+    LED_Control_Callback led_callbacks_[3] = {nullptr, nullptr, nullptr};
 
     // ========================================================================
     // Protection recovery timer (200ms timeout after ALL hard faults cleared)
     // ========================================================================
-    uint32_t protection_recovery_timestamp_;                          // Timestamp when ALL hard faults cleared (millis)
-    bool protection_recovery_active_;                                 // Recovery timer active flag
-    static constexpr uint32_t PROTECTION_RECOVERY_TIMEOUT_MS = 200U;  // 200ms recovery timeout
+    uint32_t protection_recovery_timestamp_;
+    bool protection_recovery_active_;
+    static constexpr uint32_t PROTECTION_RECOVERY_TIMEOUT_MS = 200U;
 
     // ========================================================================
     // Internal state
@@ -140,7 +259,9 @@ public:
 public:
     // Constructor
     TunePulseHeart(uint16_t freq_hz, uint16_t pwm_res, int32_t max_sup_mv, int32_t iA_fs, int32_t iB_fs, int32_t iC_fs)
-        : clock_(170000000, freq_hz),
+        : open_loop_controller(freq_hz),
+          freq_hz_(freq_hz),
+          clock_(170000000, freq_hz),
           feedback(max_sup_mv, iA_fs, iB_fs, iC_fs),  // Initialize unified feedback with all modules enabled
           motor_params(),                             // Initialize Motor with default constructor
           driver(feedback, motor_params),             // Pass feedback and motor reference
@@ -176,74 +297,44 @@ public:
     // ========================================================================
     // Public API - Hardware callbacks
     // ========================================================================
+    bool prev_use_open_loop_ = true;  // для sync при переключении режимов
 
-    // DAC callback setters for hardware protection thresholds
-    // These methods allow external code to register DAC update callbacks
-    // that are called when protection thresholds change
-
-    /// Set overcurrent hard protection callback for specific phase
-    /// @param channel Current sense channel (CH1, CH2, or CH3)
-    /// @param callback Function pointer to DAC update callback (receives threshold in ADC units)
     void set_overcurrent_hard_callback(Channel channel, void (*callback)(uint16_t)) {
         feedback.current.set_overcurrent_hard_callback(channel, callback);
     }
 
-    /// Set overvoltage hard protection callback
-    /// @param callback Function pointer to DAC update callback (receives threshold in ADC units)
     void set_overvoltage_hard_callback(void (*callback)(uint16_t)) { feedback.supply.set_overvoltage_hard_callback(callback); }
 
-    /// Set overcurrent hard protection limit in milliamps for specific phase
-    /// This will trigger the registered DAC callback to update comparator threshold
-    /// @param channel Current sense channel (CH1, CH2, or CH3)
-    /// @param limit_ma Overcurrent limit in milliamps
     void set_overcurrent_hard_ma(Channel channel, int32_t limit_ma) {
         feedback.current.set_overcurrent_hard_ma(channel, limit_ma);
     }
 
-    /// Set overvoltage hard protection limit in millivolts
-    /// This will trigger the registered DAC callback to update comparator threshold
-    /// @param limit_mv Overvoltage limit in millivolts
     void set_overvoltage_hard_mv(int32_t limit_mv) { feedback.supply.set_overvoltage_hard_mv(limit_mv); }
 
-    // ========================================================================
-    // LED control methods (platform-independent)
-    // ========================================================================
-
-    /// Set LED control callback for specific LED channel
-    /// @param led_index LED index (0=Red, 1=Green, 2=Blue)
-    /// @param callback Function pointer to LED control callback (nullptr to clear)
     void set_led_callback(uint8_t led_index, LED_Control_Callback callback) {
-        if (led_index < 3) {                       // Validate index range
-            led_callbacks_[led_index] = callback;  // Store callback pointer
+        if (led_index < 3) {
+            led_callbacks_[led_index] = callback;
         }
     }
 
-    /// Control LED state (calls registered callback if available)
-    /// @param led_index LED index (0=Red, 1=Green, 2=Blue)
-    /// @param state LED state (true=ON, false=OFF)
     void led_control(uint8_t led_index, bool state) {
-        if (led_index < 3 && led_callbacks_[led_index] != nullptr) {  // Check index and callback validity
-            led_callbacks_[led_index](state);                         // Call LED control callback
+        if (led_index < 3 && led_callbacks_[led_index] != nullptr) {
+            led_callbacks_[led_index](state);
         }
     }
 
-    /// Get pointer to LED callbacks array for direct access
-    /// @return Pointer to LED callbacks array [R, G, B]
-    LED_Control_Callback* get_led_callbacks() {
-        return led_callbacks_;  // Return pointer to callbacks array
-    }
+    LED_Control_Callback* get_led_callbacks() { return led_callbacks_; }
 
     void set_current_target_ma(int32_t value_ma) { current_target_ma_ = clamp_i32(value_ma, INT16_MAX); }
 
-    inline void on_encoder_raw(uint16_t angle_raw) {
-        feedback.inputs.set_angle_raw(angle_raw);  // Use Feedback method without underscore
-    }
+    inline void on_encoder_raw(uint32_t angle_raw) { feedback.inputs.set_angle_raw(angle_raw); }
 
     inline void on_adc_values(const uint16_t currents[3], uint16_t supply_adc, uint16_t temp_adc) {
-        feedback.inputs.set_current_adc(currents);   // Use Feedback method without underscore
-        feedback.inputs.set_supply_adc(supply_adc);  // Use Feedback method without underscore
-        feedback.inputs.set_temper_adc(temp_adc);    // Use Feedback method without underscore
+        feedback.inputs.set_current_adc(currents);
+        feedback.inputs.set_supply_adc(supply_adc);
+        feedback.inputs.set_temper_adc(temp_adc);
     }
+
     bool mode = false;
     bool previous_mode = false;
     float bandwith = 500.0;
@@ -258,6 +349,10 @@ public:
     bool is_filt_used = false;
     bool is_synt_used = true;
     bool khz10 = true;
+    int32_t is_cal_used = 1;
+    int32_t el_sign = -1;
+    int16_t prev_el_angle = 0;
+
     void tick() {
         bool feedback_is_updated = feedback.tick();
         if (fault_handler())
@@ -270,71 +365,75 @@ public:
         // ========================================================================
         // Motor controller tick logic
         // ========================================================================
-        
 
         switch (motor_status) {
             case MotorStatus::Success: {
+                int32_t real_raw_ang = feedback.encoder.get_angle();
                 int32_t real_raw_pos = feedback.encoder.get_position();
 
                 if (!angle_calibrator.is_ready()) {
-                    feedback.position.tick(real_raw_pos);
                     angle_el_ = angle_calibrator.tick(real_raw_pos, (int16_t)driver.motor.get_motor_type());
                     if (angle_calibrator.is_ready()) {
                         TP_LOG("Angle Calibration Done. Starting Normal/Cogging operation");
-                        current_target_ma_ = 800;
+                        current_target_ma_ = 1500;
                         amplitude_ = feedback.current.ma2norm(current_target_ma_);
+                        // Синхронизируем open-loop фазу с реальным углом сразу после калибровки
+                        open_loop_controller.sync_angle(angle_el_);
+                        virtual_pos_ = real_raw_pos;  // Инициализируем виртуальную позицию
                     }
                     break;
                 }
 
-                uint16_t corrected_angle =
-                    is_pos_linear_used ? angle_calibrator.get_position_correction(real_raw_pos) : real_raw_pos;
-
-                feedback.position.tick(corrected_angle);
-
-                // Вычисляем электрический угол один раз, так как он нужен в обеих ветках ниже
-                angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_pos)) * el_sign);
-                // Motion planning and position control integration
-
-                // Execute motion trajectory and get current state (position, velocity, acceleration)
-                MotionState motion_state = motion_executor.tick();
-
-                // Get current position and velocity from feedback in Q16.16 format
-                int32_t current_pos_q16 = feedback.position.get_filtered_position();
-                float current_vel = feedback.position.get_filtered_speed_float();
-                float current_acc = feedback.position.get_acceleration_float();
-
-                // if (khz10) {
-                    // Position controller outputs current command based on trajectory tracking error
-                    FOCCommand position_current_ma =
-                        position_controller.tick(motion_state.pos,                      // Target position from motion planner
-                                                 feedback.position.get_raw_position(),  // Current position from encoder
-                                                 motion_state.vel,
-                                                 current_vel,  // Current velocity from estimator
-                                                 motion_state.acc, 0,
-                                                 current_target_ma_,  // Maximum current limit
-                                                 angle_el_);
-
-                    POS_ERR = feedback.position.get_raw_position() - motion_state.pos;
-                    if (previous_mode != mode) {
-                        previous_mode = mode; 
-                        // position_controller.set_mode(mode);
+                // Реальный электрический угол (нужен для closed-loop и для sync)
+                uint16_t real_el = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_ang)) * el_sign);
+                // uint16_t real_el_filt = angle_pll.tick(real_el);
+                // ================================================================
+                // РЕЖИМ ВЫБОРА: open-loop vs position_controller
+                // ================================================================
+                if (use_open_loop) {
+                    // --- OPEN-LOOP: вращаем виртуальный вектор тока ---
+                    if (!prev_use_open_loop_) {
+                        open_loop_controller.sync_angle(real_el);
+                        virtual_pos_ = real_raw_pos;  // Синхронизация при возврате в open-loop
                     }
-                    position_controller.set_bandwidth(bw_ladrc_max, bw_ladrc_min);
+                    angle_el_ = open_loop_controller.tick();
 
-                    // Use position controller output as amplitude command
+                    int16_t diff = prev_el_angle - angle_el_;
+                    prev_el_angle = angle_el_;
+
+                    // Умножаем на el_sign, чтобы направление роста позиции совпадало с энкодером
+                    virtual_pos_ += diff;
+
+                    // Обновляем ошибку положения (Реальная позиция минус Идеальная позиция)
+                    POS_ERR = real_raw_pos - (int32_t)(virtual_pos_ / 50);
+
+                    amplitude_ = feedback.current.ma2norm(open_loop_controller.iq_ma);
+                    d_current = feedback.current.ma2norm(open_loop_controller.id_ma);
+
+                } else {
+                    // --- CLOSED-LOOP: position_controller (прежний путь) ---
+                    angle_el_ = real_el;
+
+                    MotionState motion_state = motion_executor.tick();
+
+                    FOCCommand position_current_ma = position_controller.tick(motion_state.pos, real_raw_pos, motion_state.vel,
+                                                                              motion_state.acc, 0, current_target_ma_, real_el, feedback.supply.get_voltage_mv());
+
+                    POS_ERR = real_raw_pos - motion_state.pos;
+
+                    if (previous_mode != mode) {
+                        previous_mode = mode;
+                    }
+
                     if (is_pos_ctrl_used) {
                         amplitude_ = feedback.current.ma2norm(position_current_ma.u_q) * invert_ladrc;
                         d_current = feedback.current.ma2norm(position_current_ma.u_d) * invert_ladrc;
                     } else {
                         amplitude_ = feedback.current.ma2norm(current_target_ma_);
                     }
-                // }
-                // khz10 = !khz10;
-                // if (is_filt_used)
-                //     angle_el_ = filter_.tick(angle_el_, current_vel);
-                if (is_synt_used)
-                    angle_el_ = position_current_ma.elec_angle;
+                }
+
+                prev_use_open_loop_ = use_open_loop;  // запомним для следующего тика
                 break;
             }
             case MotorStatus::CalibError:
@@ -361,29 +460,17 @@ public:
 
     const int16_t* pwm_duty_values() const { return pwm_duty_; }
 
-    // ========================================================================
-    // Clock interface
-    // ========================================================================
-
     const Frequency& get_clock() const { return clock_; }
-
     Frequency& get_clock() { return clock_; }
-    int32_t is_cal_used = 1;
-    int32_t el_sign = -1;
 
 private:
     inline bool fault_handler() {
-        // ========================================================================
-        // Protection recovery timer logic
-        // ========================================================================
         bool prev_has_hard_fault = has_hard_fault;
         has_hard_fault = feedback.error.has_fatal();
 
-        // 1. Обработка активной ошибки (сгруппировано для исключения дублирования)
         if (has_hard_fault) {
             bool is_new = !prev_has_hard_fault;
 
-            // Локальная inline-лямбда для устранения копипасты управления ШИМ и LED
             auto halt_drive = [&](int16_t pwm_val, bool r, bool g, bool b) {
                 led_control(0, r);
                 led_control(1, g);
@@ -414,29 +501,20 @@ private:
                 halt_drive(INT16_MIN, true, false, false);
                 return true;
             }
-        }
-        // 2. Ошибки только что исчезли — запускаем таймер
-        else if (prev_has_hard_fault) {
+        } else if (prev_has_hard_fault) {
             protection_recovery_timestamp_ = millis();
             TP_LOG("Protection recovery timer started (200ms)");
             return true;
-        }
-        // 3. Быстрый путь нормальной работы
-        else {
-            // Если таймер не истек, выходим без лишних вычислений
+        } else {
             if (millis() - protection_recovery_timestamp_ < PROTECTION_RECOVERY_TIMEOUT_MS) {
                 return true;
             }
-            // Таймер истек — гасим диоды
             led_control(0, false);
             led_control(1, false);
             led_control(2, false);
         }
         return false;
     }
-    // ========================================================================
-    // Private methods
-    // ========================================================================
 
     void reset_buffers() {
         for (size_t i = 0; i < 3; ++i) {
@@ -446,14 +524,9 @@ private:
     }
 
     void update_pwm_duty() {
-        // -period = hiz, 0 = brake, +period = 100%
         const int32_t period = pwm_resolution_;
-
         for (size_t i = 0; i < 3; ++i) {
             int32_t val = pwm_norm_[i];
-
-            // Арифметический сдвиг: (val * period) / 32768
-            // Если val == 32767, сдвиг дает (period - 1). Логическое сравнение добавляет недостающую 1.
             pwm_duty_[i] = (int16_t)(((val * period) >> 15) + (val == INT16_MAX));
         }
     }

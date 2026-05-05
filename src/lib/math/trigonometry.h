@@ -2,67 +2,79 @@
 
 #include "../common.h"
 
-/// Array representing the sine values of the first quarter wave (0 to 90 degrees in radians) as i1.15
-/// This quarter-wave sine table allows for easy computation of sine and cosine values for any angle.
-/// The array has 257 values, including the endpoint, to accommodate interpolation if necessary.
-static const int16_t TUNEPULSE_SINE_QUARTER_WAVE[257] = {
-    0x0000, 0x00C9, 0x0192, 0x025B, 0x0324, 0x03ED, 0x04B6, 0x057E, 0x0647, 0x0710, 0x07D9, 0x08A1,
-    0x096A, 0x0A32, 0x0AFB, 0x0BC3, 0x0C8B, 0x0D53, 0x0E1B, 0x0EE3, 0x0FAB, 0x1072, 0x1139, 0x1200,
-    0x12C7, 0x138E, 0x1455, 0x151B, 0x15E1, 0x16A7, 0x176D, 0x1833, 0x18F8, 0x19BD, 0x1A82, 0x1B46,
-    0x1C0B, 0x1CCF, 0x1D93, 0x1E56, 0x1F19, 0x1FDC, 0x209F, 0x2161, 0x2223, 0x22E4, 0x23A6, 0x2467,
-    0x2527, 0x25E7, 0x26A7, 0x2767, 0x2826, 0x28E5, 0x29A3, 0x2A61, 0x2B1E, 0x2BDB, 0x2C98, 0x2D54,
-    0x2E10, 0x2ECC, 0x2F86, 0x3041, 0x30FB, 0x31B4, 0x326D, 0x3326, 0x33DE, 0x3496, 0x354D, 0x3603,
-    0x36B9, 0x376F, 0x3824, 0x38D8, 0x398C, 0x3A3F, 0x3AF2, 0x3BA4, 0x3C56, 0x3D07, 0x3DB7, 0x3E67,
-    0x3F16, 0x3FC5, 0x4073, 0x4120, 0x41CD, 0x4279, 0x4325, 0x43D0, 0x447A, 0x4523, 0x45CC, 0x4674,
-    0x471C, 0x47C3, 0x4869, 0x490E, 0x49B3, 0x4A57, 0x4AFA, 0x4B9D, 0x4C3F, 0x4CE0, 0x4D80, 0x4E20,
-    0x4EBF, 0x4F5D, 0x4FFA, 0x5097, 0x5133, 0x51CE, 0x5268, 0x5301, 0x539A, 0x5432, 0x54C9, 0x555F,
-    0x55F4, 0x5689, 0x571D, 0x57B0, 0x5842, 0x58D3, 0x5963, 0x59F3, 0x5A81, 0x5B0F, 0x5B9C, 0x5C28,
-    0x5CB3, 0x5D3D, 0x5DC6, 0x5E4F, 0x5ED6, 0x5F5D, 0x5FE2, 0x6067, 0x60EB, 0x616E, 0x61F0, 0x6271,
-    0x62F1, 0x6370, 0x63EE, 0x646B, 0x64E7, 0x6562, 0x65DD, 0x6656, 0x66CE, 0x6745, 0x67BC, 0x6831,
-    0x68A5, 0x6919, 0x698B, 0x69FC, 0x6A6C, 0x6ADB, 0x6B4A, 0x6BB7, 0x6C23, 0x6C8E, 0x6CF8, 0x6D61,
-    0x6DC9, 0x6E30, 0x6E95, 0x6EFA, 0x6F5E, 0x6FC0, 0x7022, 0x7082, 0x70E1, 0x7140, 0x719D, 0x71F9,
-    0x7254, 0x72AE, 0x7306, 0x735E, 0x73B5, 0x740A, 0x745E, 0x74B1, 0x7503, 0x7554, 0x75A4, 0x75F3,
-    0x7640, 0x768D, 0x76D8, 0x7722, 0x776B, 0x77B3, 0x77F9, 0x783F, 0x7883, 0x78C6, 0x7908, 0x7949,
-    0x7989, 0x79C7, 0x7A04, 0x7A41, 0x7A7C, 0x7AB5, 0x7AEE, 0x7B25, 0x7B5C, 0x7B91, 0x7BC4, 0x7BF7,
-    0x7C29, 0x7C59, 0x7C88, 0x7CB6, 0x7CE2, 0x7D0E, 0x7D38, 0x7D61, 0x7D89, 0x7DB0, 0x7DD5, 0x7DF9,
-    0x7E1C, 0x7E3E, 0x7E5E, 0x7E7E, 0x7E9C, 0x7EB9, 0x7ED4, 0x7EEF, 0x7F08, 0x7F20, 0x7F37, 0x7F4C,
-    0x7F61, 0x7F74, 0x7F86, 0x7F96, 0x7FA6, 0x7FB4, 0x7FC1, 0x7FCD, 0x7FD7, 0x7FE0, 0x7FE8, 0x7FEF,
-    0x7FF5, 0x7FF9, 0x7FFC, 0x7FFE, 0x7FFF,
-};
-
-/// Computes the sine and cosine values for a given normalized angle.
+/// @brief Compute sine and cosine for a normalized angle using a 64-point
+///        quarter-wave lookup table with 8-bit linear interpolation.
 ///
-/// ### Arguments
-/// * `angle` - The input angle represented in i1.31 format, normalized to the range `[-Pi, Pi]`
-///             using `[i32::MIN, i32::MAX]`. This allows for higher precision angle representation.
+/// The 16-bit input angle is treated as an unsigned bit field:
+/// @code
+///   bits [15:14]  quadrant index        (0 = Q1, 1 = Q2, 2 = Q3, 3 = Q4)
+///   bits [13:8]   LUT index             (0..63, selects two adjacent samples)
+///   bits [7:0]    interpolation fraction (0..255, sub-sample position)
+/// @endcode
 ///
-/// ### Returns
-/// * A tuple `(sine, cosine)` - The sine and cosine values as `i1.15`.
+/// The LUT stores sin(i * PI/2 / 64) * 32767 for i in [0..64], covering the
+/// first quarter wave (0° to 90°). All values are non-negative [0, 32767].
+/// Cosine is derived from the same table via the mirrored index (64 - idx),
+/// exploiting the identity cos(x) = sin(PI/2 - x).
 ///
-/// ### Notes
-/// * The function uses a quarter-wave lookup table for computational efficiency.
-/// * The lookup is performed in 4 quadrants, reducing the memory footprint while allowing
-///   for full 360-degree coverage.
+/// @param angle    Input angle in i1.15 format. Full range [-32768, 32767]
+///                 maps linearly to [-PI, PI). Passed as signed int16_t but
+///                 internally reinterpreted as uint16_t for bit extraction.
+/// @param out_sin  Output: sine value in i1.15 format, range [-32767, 32767].
+/// @param out_cos  Output: cosine value in i1.15 format, range [-32767, 32767].
+///
+/// @note INT16_MIN (-32768 / 0x8000) is architecturally impossible on output:
+///       - LUT values are strictly in [0, 32767] (no negatives by construction).
+///       - Linear interpolation of two non-negative values stays in [0, 32767].
+///       - Negating a value in [0, 32767] produces [-32767, 0]. Never -32768.
+///       Therefore no runtime clamp is required inside this function.
+///
+/// @note Array bounds are safe by construction:
+///       - idx in [0..63]  → idx+1 in [1..64]     → both within _LUT[65].
+///       - idx_c = 64-idx in [1..64] → idx_c-1 in [0..63] → no underflow.
 static inline void angle2sincos(int16_t angle, int16_t* out_sin, int16_t* out_cos) {
-    // Get the top 10 bits (1024 points resolution per full wave)
-    uint16_t angle_uint = ((uint16_t)angle) >> 6;
 
-    // Map the normalized angle to the index of the quarter wave array (0 to 255)
-    uint16_t index = angle_uint & 0xFFu;
+    // Quarter-wave sine LUT: 65 entries covering sin(0°) to sin(90°) in i1.15.
+    // Generated offline: round(sin(i * PI/2 / 64) * 32767) for i in [0..64].
+    // All values in [0x0000, 0x7FFF]. 0x8000 (INT16_MIN) is provably absent.
+    // Placed in .rodata as a function-local static constexpr: single instance,
+    // zero runtime initialisation cost, 130 bytes of Flash.
+    static constexpr int16_t _LUT[65] = {
+        0x0000, 0x0324, 0x0648, 0x096A, 0x0C8C, 0x0FAB, 0x12C8, 0x15E2, // idx  0.. 7
+        0x18F9, 0x1C0B, 0x1F1A, 0x2223, 0x2528, 0x2826, 0x2B1F, 0x2E11, // idx  8..15
+        0x30FB, 0x33DF, 0x36BA, 0x398C, 0x3C56, 0x3F17, 0x41CE, 0x447A, // idx 16..23
+        0x471C, 0x49B4, 0x4C3F, 0x4EBF, 0x5133, 0x539B, 0x55F5, 0x5842, // idx 24..31
+        0x5A82, 0x5CB3, 0x5ED7, 0x60EB, 0x62F1, 0x64E8, 0x66CF, 0x68A6, // idx 32..39
+        0x6A6D, 0x6C23, 0x6DC9, 0x6F5E, 0x70E2, 0x7254, 0x73B5, 0x7504, // idx 40..47
+        0x7641, 0x776B, 0x7884, 0x7989, 0x7A7C, 0x7B5C, 0x7C29, 0x7CE3, // idx 48..55
+        0x7D89, 0x7E1D, 0x7E9C, 0x7F09, 0x7F61, 0x7FA6, 0x7FD8, 0x7FF5, // idx 56..63
+        0x7FFF                                                             // idx 64 = sin(90°)
+    };
 
-    // Retrieve sine values from the quarter-wave sine lookup table
-    int16_t a = TUNEPULSE_SINE_QUARTER_WAVE[index];
-    int16_t b = TUNEPULSE_SINE_QUARTER_WAVE[256 - index];
+    const uint16_t u     = (uint16_t)angle;   // Reinterpret i1.15 bits as unsigned for slicing
+    const uint16_t quad  = u >> 14;            // Top 2 bits: quadrant selector (0..3)
+    const uint16_t sub   = u & 0x3FFFu;        // Lower 14 bits: position within quadrant
+    const uint16_t idx   = sub >> 8;           // Upper 6 of 14 bits: LUT index (0..63)
+    const uint16_t frac  = sub & 0xFFu;        // Lower 8 of 14 bits: interpolation weight (0..255)
+    const uint16_t idx_c = 64u - idx;          // Mirrored index for cosine via cos(x)=sin(PI/2-x)
 
-    // Determine the quadrant from the top 2 bits of the angle
-    uint16_t quadrant = angle_uint >> 8;
+    const int32_t a0 = _LUT[idx];              // sin sample at idx     (for sin interpolation)
+    const int32_t a1 = _LUT[idx + 1];          // sin sample at idx+1   (next adjacent point)
+    const int32_t b0 = _LUT[idx_c];            // cos sample at idx_c   (for cos interpolation)
+    const int32_t b1 = _LUT[idx_c - 1];        // cos sample at idx_c-1 (next adjacent point, descending)
 
-    // Based on the quadrant, determine the correct sine and cosine values
-    switch (quadrant) {
-        case 0: *out_sin = a; *out_cos = b; break;   // First quadrant: 0 to PI/2
-        case 1: *out_sin = b; *out_cos = (int16_t)-a; break;  // Second quadrant: PI/2 to PI
-        case 2: *out_sin = (int16_t)-a; *out_cos = (int16_t)-b; break; // Third quadrant: PI to 3*PI/2
-        default: *out_sin = (int16_t)-b; *out_cos = a; break;  // Fourth quadrant: 3*PI/2 to 2*PI
+    // Linear interpolation in 32-bit to avoid overflow.
+    // Result range: [0, 32767] since both endpoints and frac are non-negative.
+    const int32_t a = a0 + (((a1 - a0) * int32_t(frac)) >> 8); // Interpolated sin magnitude
+    const int32_t b = b0 + (((b1 - b0) * int32_t(frac)) >> 8); // Interpolated cos magnitude
+
+    // Apply quadrant sign mapping. Both a and b are in [0, 32767], so
+    // negation produces at most -32767 — safe to cast directly to int16_t.
+    switch (quad) {
+        case 0: *out_sin = int16_t( a); *out_cos = int16_t( b); break; // Q1: sin+, cos+
+        case 1: *out_sin = int16_t( b); *out_cos = int16_t(-a); break; // Q2: sin+, cos-
+        case 2: *out_sin = int16_t(-a); *out_cos = int16_t(-b); break; // Q3: sin-, cos-
+        default:*out_sin = int16_t(-b); *out_cos = int16_t( a); break; // Q4: sin-, cos+
     }
 }
 

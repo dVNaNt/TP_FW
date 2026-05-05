@@ -159,13 +159,6 @@ static inline void SPI3_ChipSelect(bool select) {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Optional helper: convert 21-bit angle to 16-bit mechanical angle
-// convenient if the rest of FOC code expects uint16_t 0..65535
-// -----------------------------------------------------------------------------
-static inline uint16_t MT6835_Raw21_To_U16(uint32_t raw21) {
-    return (uint16_t)(raw21 >> 5);  // 21-bit -> 16-bit
-}
 
 // -----------------------------------------------------------------------------
 // GPIO init for SPI3:
@@ -312,12 +305,8 @@ static inline void SPI3_StartTransfer() {
 // -----------------------------------------------------------------------------
 // Accessors
 // -----------------------------------------------------------------------------
-static inline uint32_t SPI3_GetAngleRaw21() {
+static inline uint32_t SPI3_GetAngle() {
     return POSITION_ENCODER_RAW;
-}
-
-static inline uint16_t SPI3_GetAngleU16() {
-    return MT6835_Raw21_To_U16(POSITION_ENCODER_RAW);
 }
 
 static inline uint8_t SPI3_GetStatus() {
@@ -347,6 +336,7 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
             ((uint32_t)SPI3_RX_BUF[2] << 13) |
             ((uint32_t)SPI3_RX_BUF[3] << 5)  |
             ((uint32_t)SPI3_RX_BUF[4] >> 3);
+        POSITION_ENCODER_RAW <<= 11;
 
         POSITION_STATUS = (uint8_t)(SPI3_RX_BUF[4] & 0x07U);
         POSITION_CRC    = SPI3_RX_BUF[5];

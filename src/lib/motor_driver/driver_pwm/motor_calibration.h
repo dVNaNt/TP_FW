@@ -306,7 +306,8 @@ public:
 
             case MotorStatus::InductanceMeasureQ: {
                 hfi_gen_.set_frequency_target(HFI_FREQ_1);
-                process_hfi_axis(current_dq_raw.torque, false, true, status_tracker, motor, setup_status, feedback,
+                // Изменено false, true -> false, false
+                process_hfi_axis(current_dq_raw.torque, false, false, status_tracker, motor, setup_status, feedback,
                                  "Q-axis F1 complete, switching to Q-axis F2", MotorStatus::InductanceMeasureQ2,
                                  INDUCTANCE_MEASURE_CYCLES_F2, &Lq_f1_, HFI_FREQ_1);
                 break;

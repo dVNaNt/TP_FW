@@ -233,7 +233,7 @@ public:
      * @param pos Raw encoder position
      * @param mech_angle Output: mechanical angle
      */
-    uint16_t get_el_angle_correction(uint16_t pos) const {
+    uint16_t get_el_angle_correction(uint32_t pos) const {
         return cal_table.correct_el_angle(pos);  // Apply calibration correction
     }
 
