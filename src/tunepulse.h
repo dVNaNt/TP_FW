@@ -8,7 +8,6 @@
 #include "lib/feedback/inputs_dump.h"
 #include "lib/lib.h"
 
-
 #include "target.h"
 
 #undef SupplyVoltage
@@ -29,7 +28,6 @@ TunePulseHeart TUNE_HEART(PWM_TIMER_FREQ_HZ,
 
 // Global pointer for comparator interrupt handlers to access error manager
 TunePulseHeart* volatile g_heart_ptr = &TUNE_HEART;
-
 
 // Include target-specific system setup based on build configuration
 #if defined(TARGET_CLN17V3)
@@ -62,8 +60,8 @@ inline void tunepulse_init() {
 }
 #elif defined(TARGET_CLN17V3)
 #include "target/cln17_v3/comp_setup.h"
-#include "target/cln17_v3/interrupt_setup.h"
 #include "target/cln17_v3/cordic_setup.h"  // Include CORDIC hardware accelerator setup
+#include "target/cln17_v3/interrupt_setup.h"
 
 // LED control functions (active LOW - LOW = ON, HIGH = OFF)
 void LED_Red_Control(bool state) {
@@ -129,7 +127,6 @@ inline void tunepulse_init() {
     SerialUSB.flush();
     delay(100);
 
-
     SerialUSB.println("3. ADC_Init...");
     SerialUSB.flush();
     delay(100);
@@ -157,16 +154,8 @@ inline void tunepulse_init() {
     SerialUSB.println("6. SPI1_Init...");
     SerialUSB.flush();
     delay(100);
-    SPI3_Init();  // Initialize SPI1 for encoder
-    SerialUSB.println("   [OK] SPI1 initialized");
-    SerialUSB.flush();
-    delay(100);
-
-    SerialUSB.println("7. SPI1_Start...");
-    SerialUSB.flush();
-    delay(100);
-    SPI3_Start();  // Start SPI communication
-    SerialUSB.println("   [OK] SPI1 started");
+    Encoder_SmartInit();  // Initialize SPI1 for encoder
+    SerialUSB.println("   [OK] SPI initialized");
     SerialUSB.flush();
     delay(100);
 
@@ -218,13 +207,12 @@ inline void tunepulse_init() {
     // Setup current sensing
     TUNE_HEART.driver.start_current_offset_calibration();
     SerialUSB.println("Start current calibration");
-    // const int16_t empty_arr[3]= {2000,2000,2000}; 
+    // const int16_t empty_arr[3]= {2000,2000,2000};
     // TIM1_Set_PWM_Values(empty_arr);
     while (TUNE_HEART.driver.get_driver_status() != OperationStatus::Ready) {
         TUNE_HEART.tick();
     }
 
-    
     TUNE_HEART.set_overcurrent_hard_ma(CH1, 4600);  // Phase A: 4.6A
     TUNE_HEART.set_overcurrent_hard_ma(CH2, 4600);  // Phase B: 4.6A
     TUNE_HEART.set_overcurrent_hard_ma(CH3, 6900);  // Phase C: 6.9A
@@ -240,6 +228,7 @@ inline void tunepulse_init() {
             break;
         }
     }
+    SerialUSB.println("Going motion");
 }
 #else
 #error "No target defined! Define TARGET_RADIX or TARGET_CLN17V3"

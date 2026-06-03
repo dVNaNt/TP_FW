@@ -18,7 +18,7 @@
  */
 
 #pragma once
-#include <cmath>      // For floating-point math operations
+#include <cmath>  // For floating-point math operations
 #include "../../common.h"
 
 struct FocCurrentController {
@@ -28,6 +28,7 @@ struct FocCurrentController {
     struct VoltageDQ {
         float u_d = 0.0f;  // D-axis voltage [V]
         float u_q = 0.0f;  // Q-axis voltage [V]
+        bool is_saturated = false;
     };
 
     // ============================================================
@@ -39,19 +40,15 @@ struct FocCurrentController {
     // ============================================================
     //                 Motor Model Parameters
     // ============================================================
-    float R = 0.0f;      // Phase resistance [Ω]
-    float L = 0.0f;      // Phase inductance [H]
-    float Ke_el = 0.0f;  // Electrical back-EMF constant [V/(rad_el/s)]
-    
-    // Коэффициент участия Feedforward (0.0 = выключен, 1.0 = 100% включен)
-    float K_ff = 1.0f;   
+    float R = 0.0f;  // Phase resistance [Ω]
+    float L = 0.0f;  // Phase inductance [H]
 
     // ============================================================
     //                 Dynamic Bandwidth (Gain Scheduling)
     // ============================================================
-    float bw_min_hz = 0.0f;              
-    float bw_max_hz = 0.0f;             
-    float bw_slope_hz_per_rads = 0.0f; 
+    float bw_min_hz = 0.0f;
+    float bw_max_hz = 0.0f;
+    float bw_slope_hz_per_rads = 0.0f;
 
     // ============================================================
     //                 PI Controller Gains
@@ -71,11 +68,8 @@ struct FocCurrentController {
     // ============================================================
     float prev_id_target = 0.0f;  // Previous D-axis target current [A]
     float prev_iq_target = 0.0f;  // Previous Q-axis target current [A]
-
 private:
-    static inline float clampf(float x, float lo, float hi) {
-        return (x < lo) ? lo : ((x > hi) ? hi : x);
-    }
+    static inline float clampf(float x, float lo, float hi) { return (x < lo) ? lo : ((x > hi) ? hi : x); }
 
 public:
     // ============================================================
@@ -83,9 +77,7 @@ public:
     // ============================================================
 
     // Default constructor
-    FocCurrentController() {
-        reset();
-    }
+    FocCurrentController() { reset(); }
 
     // Parameterized constructor with default values for dynamic bandwidth
     FocCurrentController(float phase_resistance_ohm,
@@ -95,24 +87,17 @@ public:
                          float pole_pairs,
                          float bw_min = 150.0f,
                          float bw_max = 1500.0f,
-                         float bw_slope = 1.59155f, // N = 10 (10 / 2pi)
-                         float k_feedforward = 1.0f) {
-        
+                         float bw_slope = 1.59155f /* N = 10 (10 / 2pi) */) {
         R = phase_resistance_ohm;
         L = phase_inductance_h;
-
-        // Расчет константы противо-ЭДС
-        const float kt_mech = max_torque_nm / max_current_a;
-        Ke_el = kt_mech / pole_pairs;
 
         bw_min_hz = bw_min;
         bw_max_hz = bw_max;
         bw_slope_hz_per_rads = bw_slope;
-        K_ff = k_feedforward;
 
         // Предрасчет anti-windup коэффициента.
         // Отношение ki/kp математически не зависит от текущей ширины полосы (Wc).
-        k_aw = (L > 0.0f) ? ((R * 0.3f) / L) : 0.0f;
+        k_aw = (L > 0.0f) ? ((R * 0.25f) / L) : 0.0f;
 
         reset();
     }
@@ -135,8 +120,7 @@ public:
                    float voltage_limit_fraction,
                    float theta_el_rad,
                    float omega_el_rad_s) {
-        
-        (void)theta_el_rad; // Подавление warning
+        (void)theta_el_rad;  // Подавление warning
 
         const float id_target_a = (float)id_target_ma * 0.001f;
         const float iq_target_a = (float)iq_target_ma * 0.001f;
@@ -151,10 +135,10 @@ public:
         current_bw = clampf(current_bw, bw_min_hz, bw_max_hz);
 
         const float omega_c = 2.0f * 3.14159265358979f * current_bw;
-        
+
         // Обновляем коэффициенты PI для текущего такта
-        kp = L * omega_c ;
-        ki = R * omega_c * 0.3f;
+        kp = L * omega_c;
+        ki = R * omega_c * 0.25f;
 
         // --------------------------------------------------------
         // 2) Вычисляем максимально допустимый модуль вектора напряжения
@@ -178,17 +162,12 @@ public:
         const float ud_ff_dynamic = L * did_target_dt;
         const float ud_ff_cross = -omega_el_rad_s * L * iq_target_a;
 
-        const float ud_ff_other = ud_ff_cross;
-
         // --------------------------------------------------------
         // 5) Feedforward модель по оси q
         // --------------------------------------------------------
         const float uq_ff_resistive = R * iq_target_a;
         const float uq_ff_dynamic = L * diq_target_dt;
         const float uq_ff_cross = omega_el_rad_s * L * id_target_a;
-        const float uq_ff_bemf = omega_el_rad_s * Ke_el;
-
-        const float uq_ff_other = uq_ff_cross + uq_ff_bemf;
 
         // --------------------------------------------------------
         // 6) Ошибки тока для PI
@@ -202,8 +181,8 @@ public:
         const float ud_pi = kp * err_d + integrator_d;
         const float uq_pi = kp * err_q + integrator_q;
 
-        const float ud_unlimited = ud_ff_resistive + ud_ff_dynamic + (K_ff * ud_ff_other) + ud_pi;
-        const float uq_unlimited = uq_ff_resistive + uq_ff_dynamic + (K_ff * uq_ff_other) + uq_pi;
+        const float ud_unlimited = ud_ff_resistive + ud_ff_dynamic + ud_ff_cross + ud_pi;
+        const float uq_unlimited = uq_ff_resistive + uq_ff_dynamic + uq_ff_cross + uq_pi;
 
         float ud_out = ud_unlimited;
         float uq_out = uq_unlimited;
@@ -212,11 +191,12 @@ public:
         // 8) Круговой лимит по напряжению
         // --------------------------------------------------------
         const float u_sq = ud_unlimited * ud_unlimited + uq_unlimited * uq_unlimited;
-
+        VoltageDQ out;
         if (u_sq > u_max_sq) {
             const float scale = u_max / sqrtf(u_sq + 1e-9f);
             ud_out *= scale;
             uq_out *= scale;
+            out.is_saturated = true;
         }
 
         // --------------------------------------------------------
@@ -228,7 +208,6 @@ public:
         integrator_d += (ki * err_d + k_aw * ud_err_aw) * kDt;
         integrator_q += (ki * err_q + k_aw * uq_err_aw) * kDt;
 
-        VoltageDQ out;
         out.u_d = ud_out;
         out.u_q = uq_out;
 

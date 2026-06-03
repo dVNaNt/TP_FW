@@ -1,184 +1,198 @@
 #pragma once
 
-#include <math.h>
 #include <stdint.h>
+#include <cmath>  // для fabsf, sinf, sqrtf и т.д.
 #include "common.h"
 
 struct FOCCommand {
-    float u_q;
-    float u_d;
+    float i_q;
+    float i_d;
 };
 
 struct MotorVectorSynthesis {
     // ── Параметры Epsilon-Пружины ─────────────────────────────────
-    float epsilon_rev = 0.01f;
+    float epsilon_rev = 0.0075f;
     float min_current_ma = 100.0f;
-    int32_t ov_start_mv = 52000;
-    int32_t ov_end_mv = 56000;
 
-    // ── Параметры α-β observer ────────────────────────────────────
-    float dt = 0.00005f;             // Период вызова системы (напр. 50 мкс = 20 кГц)
-    float obs_freq_min_hz = 40.0f;
-    float obs_freq_max_hz = 300.0f;
-    float obs_freq_per_rev_s = 40.0f;
+    // ── Защита от перенапряжения (Regen Dump) ─────────────────────
+    int32_t ov_start_mv = 50000;
+    int32_t ov_end_mv = 55000;
+    float max_regen_brake = 4000.0f;  // Максимальный ток Id в mA для сброса мощности (приоритет над max_current)
+
+    // ── Параметры ABY observer с переменной полосой ───────────────
+    float dt = 0.00005f;  // 20 kHz
+    float obs_fc_min_hz = 50.0f;
+    float obs_fc_max_hz = 300.0f;
+    float obs_fc_per_rev_s = 150.0f;   // +120 Гц на 1 rev/s target_vel
+    float obs_fc_slew_hz_s = 2000.0f;  // ограничение скорости изменения Fc
+    float b0_ff_rev_s2_per_ma = 0.0f;  // feedforward accel per mA, может быть 0
+    float obs_acc_limit_rev_s2 = 200000.0f;
 
     // ── Параметры демпфирования ───────────────────────────────────
-    float damping_gain = 100.0f;
-    float v_soft_rev_s = 0.25f;
-    float max_damping_ratio = 0.4f;
+    float damping_gain = 0.25f;  // Vel controller limit
+    float v_soft_rev_s = 0.25f;  // Target speed epsilon (% of target speed)
 
 private:
-    // α-β observer state
-    float ab_pos_rev = 0.0f;
-    float ab_vel_rev_s = 0.0f;
+    static inline float clampf(float x, float lo, float hi) { return (x < lo) ? lo : ((x > hi) ? hi : x); }
+    static inline float signf(float x) { return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f); }
+
+    // ABY state
+    float obs_pos_rev = 0.0f;
+    float obs_vel_rev_s = 0.0f;
+    float obs_acc_rev_s2 = 0.0f;
+    float obs_fc_hz = 50.0f;
+
+    // Последний реально примененный ток для FF в предикторе
+    float last_applied_iq_ma = 0.0f;
+
     bool is_first_tick = true;
-
-    // Внутренние переменные для разделения тактов
-    bool tick_toggle = false;        // Переключатель логики
-    float last_Iq_base = 0.0f;       // Сохраненный Iq до применения защит
-    float last_Id_base = 0.0f;       // Сохраненный Id до применения защит
-
-    static inline float clampf(float x, float lo, float hi) {
-        return (x < lo) ? lo : ((x > hi) ? hi : x);
-    }
-
-    static inline float signf(float x) {
-        return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f);
-    }
 
 public:
     MotorVectorSynthesis() {}
 
-    float getEstimatedVelocityRevS() const { return ab_vel_rev_s; }
-    float getEstimatedPositionRev()  const { return ab_pos_rev; }
+    float getEstimatedPositionRev() const { return obs_pos_rev; }
+    float getEstimatedVelocityRevS() const { return obs_vel_rev_s; }
+    float getEstimatedAccelerationRevS2() const { return obs_acc_rev_s2; }
+    float getObserverFcHz() const { return obs_fc_hz; }
 
-    FOCCommand tick(int32_t target_pos,
-                    int32_t current_pos,
+    FOCCommand tick(int32_t current_pos,
+                    int32_t target_pos,
                     float target_vel,
-                    float target_acc,
-                    float target_torque,
                     int32_t max_current,
-                    int16_t raw_elec_angle,
-                    int32_t supply_voltage_mv) {
-
-        (void)target_acc;
-        (void)raw_elec_angle;
-
+                    int32_t supply_voltage_mv,
+                    bool is_volt_saturated) {
         const float inv_q16 = 1.0f / 65536.0f;
         const float max_c = ((float)max_current < min_current_ma) ? min_current_ma : (float)max_current;
+        const float meas_pos_rev = (float)current_pos * inv_q16;
 
-        // Переключаем такт (false -> true -> false)
-        tick_toggle = !tick_toggle;
-
-        // Инициализация при первом запуске
+        // ====================================================================
+        // 0. Инициализация
+        // ====================================================================
         if (is_first_tick) {
-            ab_pos_rev = (float)current_pos * inv_q16;
-            ab_vel_rev_s = 0.0f;
-            last_Iq_base = 0.0f;
-            last_Id_base = 0.0f;
+            obs_pos_rev = meas_pos_rev;
+            obs_vel_rev_s = 0.0f;
+            obs_acc_rev_s2 = 0.0f;
+            obs_fc_hz = obs_fc_min_hz;
+            last_applied_iq_ma = 0.0f;
             is_first_tick = false;
         }
 
         // ====================================================================
-        // ЧЕРЕДОВАНИЕ ЛОГИКИ (РАЗГРУЗКА ЦПУ НА 50%)
+        // 1. Dynamic ABY observer (Кинематическое ядро)
         // ====================================================================
-        if (tick_toggle) {
-            // ── ТАКТ А: Dynamic α-β observer ─────────────────────────────────
-            // Так как наблюдатель вызывается раз в 2 такта, его эффективный dt = 2 * dt
-            float dt_obs = 2.0f * dt;
-            float meas_pos_rev = (float)current_pos * inv_q16;
+        float fc_target_hz = obs_fc_min_hz + obs_fc_per_rev_s * fabsf(target_vel);
+        fc_target_hz = clampf(fc_target_hz, obs_fc_min_hz, obs_fc_max_hz);
 
-            float obs_freq_hz = obs_freq_min_hz + obs_freq_per_rev_s * fabsf(target_vel);
-            obs_freq_hz = clampf(obs_freq_hz, obs_freq_min_hz, obs_freq_max_hz);
+        float max_df = obs_fc_slew_hz_s * dt;
+        float df = clampf(fc_target_hz - obs_fc_hz, -max_df, max_df);
+        obs_fc_hz += df;
 
-            float w = 2.0f * (float)M_PI * obs_freq_hz;
+        const float w = 2.0f * (float)M_PI * obs_fc_hz;
+        const float l1 = 3.0f * w;
+        const float l2 = 3.0f * w * w;
+        const float l3 = w * w * w;
 
-            float ab_alpha = 2.0f * w * dt_obs;
-            float ab_beta  = (w * dt_obs) * (w * dt_obs);
+        const float acc_ff = b0_ff_rev_s2_per_ma * last_applied_iq_ma;
+        const float err = meas_pos_rev - obs_pos_rev;
 
-            ab_alpha = clampf(ab_alpha, 0.0f, 1.0f);
-            ab_beta  = clampf(ab_beta,  0.0f, 0.25f);
+        obs_pos_rev += dt * (obs_vel_rev_s + l1 * err);
+        obs_vel_rev_s += dt * (obs_acc_rev_s2 + acc_ff + l2 * err);
+        obs_acc_rev_s2 += dt * (l3 * err);
 
-            float pred_pos = ab_pos_rev + dt_obs * ab_vel_rev_s;
-            float pred_vel = ab_vel_rev_s;
+        obs_acc_rev_s2 = clampf(obs_acc_rev_s2, -obs_acc_limit_rev_s2, obs_acc_limit_rev_s2);
 
-            float resid = meas_pos_rev - pred_pos;
+        // ====================================================================
+        // 2. Управление: Пружина + Демпфер
+        // ====================================================================
+        float ep = (float)(target_pos - current_pos) * inv_q16;
 
-            ab_pos_rev   = pred_pos + ab_alpha * resid;
-            ab_vel_rev_s = pred_vel + (ab_beta * resid / (dt_obs + 1e-12f));
-        } 
-        else {
-            // ── ТАКТ Б: Расчет ошибки, пружины и демпфера ────────────────────
-            int32_t pos_err = target_pos - current_pos;
-            float ep = (float)pos_err * inv_q16;
-            float ep_abs = fabsf(ep);
+        float t_linear = clampf(ep / (epsilon_rev + 1e-9f), -1.0f, 1.0f);
+        // Approx smooth function of sign(x) * sin(x)^2
+        float sin_pow2_fast = t_linear * fabs(t_linear) * (3.0f - 2.0f * t_linear);
 
-            // 1. Пружина с ИСПРАВЛЕННОЙ жесткостью (убрано лишнее * t_linear)
-            float t_linear = clampf(ep_abs / (epsilon_rev + 1e-9f), 0.0f, 1.0f);
-            float theta = signf(ep) * t_linear * (float)(M_PI / 2.0);
-            float sin_err = sinf(theta);
-            float Iq_spring = signf(ep) * max_c * sinf(theta) * t_linear;
+        float Iq_spring = max_c * sin_pow2_fast;
 
-            // 2. Демпфер с БЫСТРОЙ аппроксимацией вместо тяжелого tanhf()
-            // x / (1 + |x|) работает так же как tanh, но в 10 раз быстрее
-            float vel_err = ab_vel_rev_s - target_vel;
-            float norm_vel = vel_err / (v_soft_rev_s + 1e-9f);
-            float fast_tanh = norm_vel / (1.0f + fabsf(norm_vel)); 
-            
-            float Iq_damp = -damping_gain * fast_tanh;
-            float damp_limit = max_c * max_damping_ratio;
-            Iq_damp = clampf(Iq_damp, -damp_limit, damp_limit);
+        float vel_err = obs_vel_rev_s - target_vel;
 
-            // Сохраняем базовые значения токов
-            last_Iq_base = Iq_spring + target_torque + Iq_damp;
-            last_Id_base = 0.0f;
+        float norm_vel = vel_err / (v_soft_rev_s + 0.05f);
+        float fast_tanh = norm_vel / (1.0f + fabsf(norm_vel));
 
-            float Iq_abs = fabsf(last_Iq_base);
-            if (Iq_abs < min_current_ma) {
-                last_Id_base = sqrtf(min_current_ma * min_current_ma - last_Iq_base * last_Iq_base);
+        float Iq_damp = -max_c * damping_gain * fast_tanh * fast_tanh * signf(fast_tanh);
+
+        // Предварительно вычисляем запрошенный момент
+        float Iq_unlimited = Iq_spring + Iq_damp;
+        float Iq = Iq_unlimited;
+
+        // ====================================================================
+        // 2.5 CASCADE ANTI-WINDUP (Clamping) по флагу от FocCurrentController
+        // ====================================================================
+        if (is_volt_saturated) {
+            // Если напряжение уже на пределе, мы не можем увеличивать модуль требуемого тока.
+            // Clamping разрешает уменьшать ток (чтобы затормозить или скорректировать перелет),
+            // но запрещает наращивать его в сторону еще большего насыщения.
+            if ((Iq_unlimited > 0.0f && Iq_unlimited > last_applied_iq_ma) ||
+                (Iq_unlimited < 0.0f && Iq_unlimited < last_applied_iq_ma)) {
+                // Если мы пытаемся продавить больший ток, чем на прошлом шаге, обрезаем его
+                Iq = last_applied_iq_ma;
             }
         }
 
-        // ====================================================================
-        // ОБЩАЯ ЛОГИКА (ВЫПОЛНЯЕТСЯ КАЖДЫЙ ТАКТ ДЛЯ БЕЗОПАСНОСТИ)
-        // ====================================================================
-        
-        // Берем базовые значения токов (они обновляются в такте Б)
-        float Iq = last_Iq_base;
-        float Id = last_Id_base;
+        float Id = 0.0f;
+        float Iq_abs = fabsf(Iq);
+        if (Iq_abs < min_current_ma) {
+            Id = sqrtf(min_current_ma * min_current_ma - Iq_abs * Iq_abs);
+        }
 
-        // ── Защита от перенапряжения и сброс энергии ────────────────────────
+        // ====================================================================
+        // 3. Защита от перенапряжения (Гладкий Regen Dump)
+        // ====================================================================
         float ov_factor = 0.0f;
         if (supply_voltage_mv > ov_start_mv) {
             ov_factor = (float)(supply_voltage_mv - ov_start_mv) / (float)(ov_end_mv - ov_start_mv);
             ov_factor = clampf(ov_factor, 0.0f, 1.0f);
         }
 
-        bool is_regenerating = (Iq * ab_vel_rev_s < 0.0f);
+        if (ov_factor > 0.0f) {
+            // 1. Плавно уменьшаем доступный лимит для момента (Iq)
+            float current_max_iq = max_c * (1.0f - ov_factor);
 
-        if (is_regenerating && ov_factor > 0.0f) {
-            Iq *= (1.0f - ov_factor);
+            // Ограничиваем запрошенный момент новым уменьшенным лимитом
+            Iq = signf(Iq) * clampf(fabsf(Iq), 0.0f, current_max_iq);
 
-            float available_id = sqrtf(max_c * max_c - Iq * Iq);
-            float id_dump = -available_id * ov_factor;
+            // 2. Вычисляем динамический лимит общего тока
+            float current_max_total = max_c + (max_regen_brake - max_c) * ov_factor;
 
-            if (fabsf(id_dump) > fabsf(Id)) {
-                Id = id_dump;
+            // 3. Вычисляем доступное место для Id
+            float available_id_sq = current_max_total * current_max_total - Iq * Iq;
+            float available_id = (available_id_sq > 0.0f) ? sqrtf(available_id_sq) : 0.0f;
+
+            // 4. Дамп-ток
+            float target_id_dump = -max_regen_brake * ov_factor;
+            if (fabsf(target_id_dump) > available_id) {
+                target_id_dump = signf(target_id_dump) * available_id;
+            }
+
+            if (fabsf(target_id_dump) > fabsf(Id)) {
+                Id = target_id_dump;
+            }
+        } else {
+            // ====================================================================
+            // 4. Ограничение амплитуды кругового вектора (Нормальный режим)
+            // ====================================================================
+            float amp_sq = Iq * Iq + Id * Id;
+            if (amp_sq > max_c * max_c) {
+                float k = max_c / sqrtf(amp_sq + 1e-9f);
+                Iq *= k;
+                Id *= k;
             }
         }
 
-        // ── Защита от превышения амплитуды ──────────────────────────────────
-        float amp_sq = Iq * Iq + Id * Id;
-        if (amp_sq > max_c * max_c) {
-            // fast inverse sqrt (если доступен) здесь был бы кстати
-            float k = max_c / sqrtf(amp_sq + 1e-9f);
-            Iq *= k;
-            Id *= k;
-        }
+        // Сохраняем реально примененный Iq для FF наблюдателя и для Clamping на следующем шаге
+        last_applied_iq_ma = Iq;
 
         FOCCommand cmd;
-        cmd.u_q = Iq;
-        cmd.u_d = Id;
+        cmd.i_q = Iq;
+        cmd.i_d = Id;
         return cmd;
     }
 };

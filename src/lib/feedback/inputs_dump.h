@@ -17,15 +17,18 @@
 #include <atomic>       // C++ atomic operations support
 
 /// Data structure holding various ADC readings and raw angle measurements.
-/// Aligns well to 4-byte boundaries naturally (12 bytes total).
+/// OPTIMIZATION: 32-bit variables are placed first to eliminate internal compiler padding.
+/// Total size is exactly 20 bytes (perfectly aligned to 4-byte boundaries).
 struct DataInputs {
+    uint32_t clock;
+    uint32_t angle_raw;      // Raw encoder/sensor angle measurement (full 32-bit)
+    uint32_t angle_ref;      // Reference angle measurement (full 32-bit)
+    uint16_t currnt_adc[3];  // Phase current ADC readings (0..65535 each)
     uint16_t supply_adc;     // Supply voltage ADC reading (0..65535)
     uint16_t temper_adc;     // Temperature ADC reading (0..65535)
-    uint16_t currnt_adc[3];  // Phase current ADC readings (0..65535 each)
-    uint32_t angle_raw;      // Raw encoder/sensor angle measurement (0..65535)
     
     // Default constructor: Zero-initializes all fields
-    DataInputs() : supply_adc(0), temper_adc(0), currnt_adc{0, 0, 0}, angle_raw(0) {}
+    DataInputs() : clock(0), angle_raw(0), angle_ref(0), currnt_adc{0, 0, 0}, supply_adc(0), temper_adc(0) {}
 };
 
 /// Enum defining bit masks for each data field and a lock bit.
@@ -35,14 +38,16 @@ enum DataInputsBit : uint32_t {
     DataInputsBit_TEMP      = 1u << 1,  // Temperature ADC completed flag
     DataInputsBit_CURRENT   = 1u << 2,  // Current ADC array completed flag
     DataInputsBit_ANGLE     = 1u << 3,  // Angle measurement completed flag
+    DataInputsBit_REF_ANGLE = 1u << 4,  // Reference angle measurement completed flag
+    DataInputsBit_CLOCK     = 1u << 5,  // Clock/Timestamp completed flag
     DataInputsBit_LOCK      = 1u << 31, // Reader lock flag (prevents writer from overwriting)
-    DataInputsBit_ALL_MASK  = 0x0000000Fu // Mask covering all sensor data fields
+    DataInputsBit_ALL_MASK  = 0x0000003Fu // Mask covering all 6 sensor data fields
 };
 
 /// Double-buffered container ensuring synchronized reads/writes across execution contexts.
 struct InputsDump {
 private:
-    // ---------------------------------------------------------------------------
+   // ---------------------------------------------------------------------------
     // Private data members
     // ---------------------------------------------------------------------------
     
@@ -138,16 +143,24 @@ public:
     InputsDump(uint32_t mandatory_fields)
         : buffers_{DataInputs(), DataInputs()},
           idx2update_(0),
-          flags_{mandatory_fields, 0},
+          flags_{mandatory_fields | DataInputsBit_CLOCK, 0},
           iter_(0),
           prev_iter_(0),
-          mandatory_fields_(mandatory_fields)
+          mandatory_fields_(mandatory_fields | DataInputsBit_CLOCK)
     {
         // One-time release fence to ensure constructor initialization propagates 
         // across potential core/interrupt boundaries before execution continues.
         std::atomic_thread_fence(std::memory_order_release);
     }
     
+    // Pushes clock timestamp into the active buffer
+    inline void set_clock(uint32_t value) {
+        uint32_t idx = idx2update_.load(std::memory_order_acquire);
+        buffers_[idx].clock = value;
+        uint32_t new_flags = atomic_clear_field_bit(idx, DataInputsBit_CLOCK);
+        check_fill_and_switch(idx, new_flags);
+    }
+
     // Pushes supply voltage ADC value into the active buffer
     inline void set_supply_adc(uint16_t value) {
         uint32_t idx = idx2update_.load(std::memory_order_acquire);
@@ -183,9 +196,17 @@ public:
         check_fill_and_switch(idx, new_flags);
     }
 
+    // Pushes reference angle into the active buffer
+    inline void set_ref_angle(uint32_t value) {
+        uint32_t idx = idx2update_.load(std::memory_order_acquire);
+        buffers_[idx].angle_ref = value;
+        uint32_t new_flags = atomic_clear_field_bit(idx, DataInputsBit_REF_ANGLE);
+        check_fill_and_switch(idx, new_flags);
+    }
+
     // Updates which fields must be populated to consider a buffer full.
     // Caution: Modify this only during initialization or halted states to avoid split-logic buffers.
     inline void set_mandatory(uint32_t mandatory_fields) {
-        mandatory_fields_.store(mandatory_fields, std::memory_order_release);
+        mandatory_fields_.store(mandatory_fields | DataInputsBit_CLOCK, std::memory_order_release);
     }
 };

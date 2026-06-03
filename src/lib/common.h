@@ -7,9 +7,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <cmath>
+#include <math.h>
 #include <atomic>  // C++ atomic operations support
 
-
+inline float signf(float x) { return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f); }
 // Utility clamp helper used across several headers.
 // Must be declared before including headers that use it.
 static inline int32_t clamp_i32(int32_t value, int32_t limit) {
@@ -47,17 +48,6 @@ inline int16_t fast_sign_int(int32_t val) {
 #include "vectors.h"
 
 
-/// @brief Represents the instantaneous kinematic and dynamic state at a specific tick
-struct MotionState {
-    int32_t pos;  // Position (e.g., Q16.16 format for turns/angle)
-    float vel;    // Velocity (RPS)
-    float acc;    // Acceleration (RPS/s)
-    float trq;    // Torque/Current (Amperes)
-
-    MotionState() : pos(0), vel(0.0f), acc(0.0f), trq(0.0f) {}
-
-    MotionState(int32_t p, float v, float a, float q = 0.0f) : pos(p), vel(v), acc(a), trq(q) {}
-};
 
 
 /// Frequency configuration structure

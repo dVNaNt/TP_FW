@@ -42,6 +42,7 @@ public:
     Vec2D voltage_ab_ = {0, 0};
     Vec2D voltage_dq_ = {0, 0};
     Feedback& feedback;
+    bool is_saturated = false;
     
 
     DriverPWM(Feedback& parent, Motor& motor_ref)
@@ -147,6 +148,7 @@ public:
 
                     int32_t Vd_mv = (int32_t)(voltage_dq_result.u_d * 1000.0f);
                     int32_t Vq_mv = (int32_t)(voltage_dq_result.u_q * 1000.0f);
+                    is_saturated = voltage_dq_result.is_saturated;
                     int16_t Vd_norm = feedback.supply.mv2norm(Vd_mv);
                     int16_t Vq_norm = feedback.supply.mv2norm(Vq_mv);
 

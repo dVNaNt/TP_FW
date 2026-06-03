@@ -1,125 +1,357 @@
-#pragma once  // Ensures this header file is included only once during compilation
+// =============================================================================
+// motion_executor.h
+// Reversible trajectory execution engine for STM32G4 / Cortex-M4F
+//
+// Features:
+//   - Q32.32 / Q16.16 precise fixed-point positioning
+//   - Wrap-safe 32-bit hardware time tracking
+//   - Seamless reversible multi-segment jumps
+//   - O(1) hot path execution
+//   - Bypass mode (enable/disable) with time freezing
+//   - Non-blocking Unpause at boundaries (idles in HOLD until pushed)
+//
+// Command modes (derived at push time):
+//   HERMITE : duration > 0 and displacement != INT32_MIN
+//   HOLD    : duration == 0, displacement == 0, end_velocity == 0
+//   FREERUN : displacement == INT32_MIN (Acts as a reverse barrier, wipes history)
+//
+// Hot path cycle estimate: ~25-35 cycles on Cortex-M4F.
+// =============================================================================
+#pragma once
 
-#include "../../common.h"  // Includes common project definitions and hardware dependencies
+#include <cstdint>
+#include <cstddef>
+#include <cmath>
+#include <climits>
+#include "qubic_hermite.h"
+#include "history_buffer.h"
 
+// =============================================================================
+// MotionCommand
+// =============================================================================
+struct MotionCommand {
+    uint32_t duration     = 0;          // Segment duration in microseconds
+    int32_t  displacement = INT32_MIN;  // Q16.16 turns, INT32_MIN = FREERUN barrier
+    float    end_velocity = INFINITY;   // Segment end velocity (RPS)
+    float    torque       = INFINITY;   // Pass-through [0..1]
 
-
-/// @brief Represents a mathematical piece of a curve (spline or S-curve phase)
-struct MotionSegment {
-    uint32_t t;    // Segment duration in microseconds
-    uint8_t mode;  // Control mode bitmask (DO_POS/VEL/ACC/TRQ)
-
-    int32_t pos;  // Starting position (Q16.16 where 16 bits of full rotations + 16 bits of angle)
-    float vel;    // Starting velocity (RPS)
-    float acc;    // Starting acceleration (RPS/s)
-    float jrk;    // Constant jerk applied during this segment (RPS/s^3)
-    float trq;    // Torque/Current limit (Amperes)
-
-    MotionSegment() : t(0), mode(0), pos(0), vel(0.0f), acc(0.0f), jrk(0.0f), trq(0.0f) {}
-
-    MotionSegment(uint32_t time, uint8_t m, int32_t p, float v, float a, float j, float q)
-        : t(time), mode(m), pos(p), vel(v), acc(a), jrk(j), trq(q) {}
+    inline bool has_duration()     const { return duration != 0; }
+    inline bool has_displacement() const { return displacement != INT32_MIN; }
+    inline bool has_velocity()     const { return !std::isinf(end_velocity); }
+    inline bool has_torque()       const { return !std::isinf(torque); }
 };
 
-/// @brief Evaluates MotionSegments in real-time, intended for high-frequency ISR
-/// @tparam N The capacity of the FIFO segment buffer
-template <size_t N>
+
+// =============================================================================
+// MotionExecutorOutput
+// =============================================================================
+struct MotionExecutorOutput {
+    int64_t position_q32;
+    float   velocity_rps;
+    float   torque;
+};
+
+// =============================================================================
+// MotionExecutor
+// =============================================================================
+template <size_t BUF_SIZE = 128>
 class MotionExecutor {
-private:
-    BufferFIFO<MotionSegment, N> buffer;
-
-    MotionSegment current_segment;
-    MotionState inst_state;
-
-    float dt;
-    float freq;
-    float us_to_ticks; // Предрассчитанный коэффициент для перевода мкс в такты
-
-    float half_acc0;
-    float half_jrk;
-    float sixth_jrk;
-
-    uint32_t time_ticks;
-    uint32_t duration_ticks;
-
-    int32_t base_pos;
-    float base_vel;
-    float base_acc;
-
 public:
-    explicit MotionExecutor(uint32_t freq_hz)
-        : time_ticks(0),
-          duration_ticks(0),
-          dt(1.0f / static_cast<float>(freq_hz)),
-          freq(static_cast<float>(freq_hz)),
-          us_to_ticks(static_cast<float>(freq_hz) / 1000000.0f), // Инициализация конвертера
-          base_pos(0),
-          base_vel(0),
-          base_acc(0) {}
+    void init(uint32_t now_us, int64_t initial_pos_q32 = 0) {
+        buf_.clear();
+        anchor_q32_      = initial_pos_q32;
+        real_pos_q32_    = initial_pos_q32;
+        seg_start_us_    = now_us;
+        last_tick_us_    = now_us;
+        seg_dur_us_      = 0;
+        seg_cmd_end_vel_ = 0.0f;
+        seg_torque_      = 0.0f;
+        seg_mode_        = Mode::HOLD;
 
-    inline __attribute__((always_inline)) MotionState tick() {
-        if (time_ticks >= duration_ticks) {
-            if (buffer.read(current_segment)) {
-                // Log new motion segment task to serial output (before processing to show actual buffer content)
-                // TP_LOG_VALS("New segment:", current_segment.t, current_segment.mode, current_segment.pos, current_segment.vel, current_segment.acc, current_segment.jrk, current_segment.trq);
-
-                base_pos = current_segment.pos;
-                base_vel = current_segment.vel;
-                base_acc = current_segment.acc;
-
-                // Быстрый перевод микросекунд в такты через FPU (без деления и uint64).
-                // Добавляем 0.5f для корректного математического округления до ближайшего целого.
-                // При t < 16.7 секунд потери точности каста во float нет (до 24 бит).
-                duration_ticks = static_cast<uint32_t>(static_cast<float>(current_segment.t) * us_to_ticks + 0.5f);
-                time_ticks = 0;
-
-                half_acc0 = current_segment.acc * 0.5f;
-                half_jrk  = current_segment.jrk * 0.5f;
-                sixth_jrk = current_segment.jrk * (1.0f / 6.0f);
-            } else {
-                duration_ticks = 0;
-                time_ticks = 0;
-                base_vel = 0.0f;
-                base_acc = 0.0f;
-                current_segment.jrk = 0.0f;
-                half_acc0 = 0.0f;
-                half_jrk = 0.0f;
-                sixth_jrk = 0.0f;
-                base_pos = inst_state.pos; 
-            }
-        }
-
-        time_ticks++;
-        float t = static_cast<float>(time_ticks) * dt;
-
-        float j0 = current_segment.jrk;
-
-        float delta_p = t * (base_vel + t * (half_acc0 + t * sixth_jrk));
-
-        inst_state.pos = base_pos + static_cast<int32_t>(delta_p * 65536.0f);
-
-        inst_state.vel = base_vel + t * (base_acc + t * half_jrk);
-        inst_state.acc = base_acc + j0 * t;
-
-        return inst_state;
+        initialized_     = true;
+        enabled_         = true;
+        paused_          = false;
+        last_time_scale_ = 0;
     }
 
-    bool add_segment(const MotionSegment& segment) {
-        if (segment.t > 0) {
-            return buffer.write(segment);
+    __attribute__((always_inline))
+    void update_real_pos(int64_t pos_q32) { real_pos_q32_ = pos_q32; }
+
+    bool push(MotionCommand cmd) {
+        if (!cmd.has_torque())   cmd.torque       = 0.0f;
+        if (!cmd.has_velocity()) cmd.end_velocity = 0.0f;
+
+        if (!(cmd.torque >= 0.0f && cmd.torque <= 1.0f)) return false;
+        if (!std::isfinite(cmd.end_velocity)) return false;
+
+        const bool is_freerun = !cmd.has_displacement();
+        const bool is_hold    = (cmd.duration == 0 && cmd.displacement == 0 && cmd.end_velocity == 0.0f);
+
+        if (is_freerun && cmd.duration != 0) return false;
+        if (!is_freerun && !is_hold && cmd.duration == 0) return false;
+
+        return buf_.write(cmd);
+    }
+
+    // -------------------------------------------------------------------------
+    // Control API
+    // -------------------------------------------------------------------------
+    bool is_enabled() const { return enabled_; }
+    bool is_paused()  const { return paused_; }
+
+    void set_enable(bool en) { enabled_ = en; }
+
+    // Sets or clears the pause state unconditionally.
+    // If set to unpaused (p == false) at a trajectory boundary (no future/past), 
+    // it will idle in HOLD mode until new commands arrive, smoothly executing them.
+    bool set_pause(bool p) {
+        paused_ = p;
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // tick()
+    // Hot path, highly optimized. Time is internally frozen if disabled or paused.
+    // -------------------------------------------------------------------------
+    __attribute__((always_inline))
+    MotionExecutorOutput tick(uint32_t now_us, int16_t time_scale) {
+        if (__builtin_expect(!initialized_, 0)) return {0, NAN, 0.0f};
+
+        const uint32_t dt = now_us - last_tick_us_;
+        last_tick_us_    = now_us;
+        last_time_scale_ = time_scale;
+
+        // Bypass / Freeze logic
+        if (__builtin_expect(!enabled_ || paused_, 0)) {
+            seg_start_us_ += dt; // Keeps (now_us - seg_start_us_) constant
+
+            if (!enabled_) {
+                return {real_pos_q32_, NAN, seg_torque_};
+            }
+            // If paused, return the exact frozen evaluated state
+            return eval_segment(now_us - seg_start_us_, time_scale);
         }
+
+        const uint32_t t_in_seg = now_us - seg_start_us_;
+
+        if (time_scale >= 0) {
+            if (__builtin_expect(needs_forward_transition(t_in_seg), 0))
+                do_forward_transition(now_us);
+        } else {
+            if (__builtin_expect(needs_reverse_transition(t_in_seg), 0))
+                do_reverse_transition(now_us);
+        }
+
+        return eval_segment(now_us - seg_start_us_, time_scale);
+    }
+
+private:
+    enum class Mode : uint8_t { HOLD, HERMITE, FREERUN };
+
+    HistoryBuffer<MotionCommand, BUF_SIZE> buf_;
+    HermiteInterpolator hermite_;
+
+    int64_t  anchor_q32_      = 0;
+    int64_t  real_pos_q32_    = 0;
+    uint32_t seg_start_us_    = 0;
+    uint32_t last_tick_us_    = 0;
+    uint32_t seg_dur_us_      = 0;
+    float    seg_cmd_end_vel_ = 0.0f;
+    float    seg_torque_      = 0.0f;
+    
+    bool     initialized_     = false;
+    bool     enabled_         = true;
+    bool     paused_          = false;
+    int16_t  last_time_scale_ = 0;
+    Mode     seg_mode_        = Mode::HOLD;
+
+    static __attribute__((always_inline)) int64_t sat_add_i64(int64_t a, int64_t b) {
+        if (b > 0 && a > INT64_MAX - b) return INT64_MAX;
+        if (b < 0 && a < INT64_MIN - b) return INT64_MIN;
+        return a + b;
+    }
+
+    __attribute__((always_inline))
+    bool needs_forward_transition(uint32_t t_in_seg) const {
+        if (seg_mode_ == Mode::HOLD) return buf_.has_future();
+        if (seg_dur_us_ > 0 && t_in_seg >= seg_dur_us_) return true;
+        if (seg_mode_ == Mode::FREERUN && buf_.has_future()) return true;
         return false;
     }
 
-    void set_freq(uint32_t freq_hz) {
-        freq = static_cast<float>(freq_hz);
-        dt = 1.0f / freq;
-        us_to_ticks = freq / 1000000.0f; // Обязательно обновляем коэффициент при смене частоты
+    __attribute__((always_inline))
+    bool needs_reverse_transition(uint32_t t_in_seg) const {
+        if (seg_mode_ == Mode::HOLD) return false;
+        return t_in_seg > 0x80000000u; // Crossed left boundary backwards
     }
 
-    bool is_empty() {
-        return buffer.is_empty();
+    // Configures the segment and prepares the interpolator.
+    // For FREERUN, wipes the history to ensure it's not reversible into.
+    void enter_segment(const MotionCommand& cmd, uint32_t start_us, float v0) {
+        seg_start_us_    = start_us;
+        seg_dur_us_      = cmd.duration;
+        seg_cmd_end_vel_ = cmd.end_velocity;
+        seg_torque_      = cmd.torque;
+
+        if (!cmd.has_displacement()) {
+            seg_mode_   = Mode::FREERUN;
+            anchor_q32_ = real_pos_q32_;
+            buf_.trim_all_history(); // FREERUN acts as a solid barrier
+            return;
+        }
+
+        if (cmd.displacement == 0 && cmd.duration == 0 && cmd.end_velocity == 0.0f) {
+            seg_mode_ = Mode::HOLD;
+            return;
+        }
+
+        seg_mode_ = Mode::HERMITE;
+
+        if (__builtin_expect(cmd.duration == 0, 0)) {
+            anchor_q32_ = sat_add_i64(anchor_q32_, (int64_t)cmd.displacement << 16);
+            seg_mode_   = Mode::HOLD;
+            return;
+        }
+
+        hermite_.prepare(cmd.displacement, cmd.duration, v0, cmd.end_velocity);
+        buf_.trim_to_active();
     }
 
-    MotionState get_current_state() const { return inst_state; }
+    // Transitions state forward. Will gracefully idle in HOLD if future is depleted,
+    // avoiding forced pause so unpause behavior works universally.
+    __attribute__((noinline))
+    void do_forward_transition(uint32_t now_us) {
+        constexpr size_t kMaxTransitions = BUF_SIZE + 2;
+
+        for (size_t guard = 0; guard < kMaxTransitions; ++guard) {
+            if (seg_mode_ == Mode::HOLD && !buf_.has_active()) {
+                float v0 = 0.0f;
+                MotionCommand prev;
+                // If there's a barrier/completed segment before us, use its end_velocity to dock smoothly
+                if (buf_.peek_active(prev)) {
+                    v0 = prev.end_velocity;
+                }
+                
+                if (!buf_.advance_cursor()) return;
+                MotionCommand first;
+                if (buf_.peek_active(first)) enter_segment(first, now_us, v0);
+                continue;
+            }
+
+            MotionCommand active;
+            if (!buf_.peek_active(active)) return;
+
+            const uint32_t t_in_seg = now_us - seg_start_us_;
+
+            if (seg_dur_us_ == 0) {
+                if (!buf_.has_future()) return;
+                if (seg_mode_ == Mode::FREERUN) anchor_q32_ = real_pos_q32_;
+                
+                const float exit_v = seg_cmd_end_vel_;
+                if (!buf_.advance_cursor()) return;
+
+                MotionCommand next;
+                if (buf_.peek_active(next)) enter_segment(next, now_us, exit_v);
+                continue;
+            }
+
+            if (t_in_seg < seg_dur_us_) return;
+
+            if (seg_mode_ == Mode::HERMITE) {
+                anchor_q32_ = sat_add_i64(anchor_q32_, (int64_t)active.displacement << 16);
+            } else if (seg_mode_ == Mode::FREERUN) {
+                anchor_q32_ = real_pos_q32_;
+            }
+
+            const float exit_v = active.end_velocity;
+            const uint32_t seg_end_us = seg_start_us_ + seg_dur_us_;
+
+            if (!buf_.has_future()) {
+                buf_.advance_cursor();
+                seg_mode_        = Mode::HOLD;
+                seg_start_us_    = now_us;
+                seg_dur_us_      = 0;
+                seg_cmd_end_vel_ = 0.0f;
+                // We purposefully do NOT auto-pause. System idles in HOLD mode.
+                return;
+            }
+
+            buf_.advance_cursor();
+            MotionCommand next;
+            if (buf_.peek_active(next)) enter_segment(next, seg_end_us, exit_v);
+        }
+    }
+
+    // Transitions state backwards.
+    // Handles FREERUN barriers by safely popping the current segment to future
+    // and caching the docking velocity for smooth forward re-entry.
+    __attribute__((noinline))
+    void do_reverse_transition(uint32_t now_us) {
+        constexpr size_t kMaxTransitions = BUF_SIZE + 2;
+
+        for (size_t guard = 0; guard < kMaxTransitions; ++guard) {
+            const uint32_t t_in_seg = now_us - seg_start_us_;
+            if (t_in_seg <= 0x80000000u) return; // Inside segment
+
+            MotionCommand prev;
+            if (!buf_.retreat_cursor(prev)) {
+                // Reached start of history or a FREERUN barrier. Pop to future.
+                buf_.pop_active_to_future();
+                
+                MotionCommand barrier_cmd;
+                float dock_v = 0.0f;
+                // Peek at the barrier element (which is now right behind the future)
+                // We extract its end velocity to guarantee seamless forward docking later.
+                if (buf_.peek_active(barrier_cmd)) {
+                    dock_v = barrier_cmd.end_velocity;
+                }
+
+                seg_mode_        = Mode::HOLD;
+                seg_start_us_    = now_us;
+                seg_dur_us_      = 0;
+                seg_cmd_end_vel_ = dock_v; // Cache docking velocity
+                // We purposefully do NOT auto-pause. Ready to seamlessly go forward.
+                return;
+            }
+
+            if (prev.has_displacement()) {
+                anchor_q32_ = sat_add_i64(anchor_q32_, -((int64_t)prev.displacement << 16));
+            }
+
+            MotionCommand before_prev;
+            const float v0 = buf_.peek_prev_history(before_prev) ? before_prev.end_velocity : 0.0f;
+
+            const uint32_t reentry_start = now_us - prev.duration;
+            enter_segment(prev, reentry_start, v0);
+        }
+    }
+
+    __attribute__((always_inline))
+    MotionExecutorOutput eval_segment(uint32_t t_in_seg, int16_t time_scale) const {
+        MotionExecutorOutput out{anchor_q32_, 0.0f, seg_torque_};
+
+        static constexpr float inv_time_scale = 1.0f/1024.0f;
+
+        switch (seg_mode_) {
+        case Mode::HERMITE: {
+            const uint32_t t = (seg_dur_us_ > 0 && t_in_seg > seg_dur_us_) ? seg_dur_us_ : t_in_seg;
+            int32_t dp_q16_32 = 0;
+            hermite_.eval(t, dp_q16_32, out.velocity_rps);
+            out.position_q32 = anchor_q32_ + (int64_t)dp_q16_32;
+            out.velocity_rps *= time_scale * inv_time_scale;
+            break;
+        }
+
+        case Mode::FREERUN:
+            out.position_q32 = real_pos_q32_;
+            out.velocity_rps = seg_cmd_end_vel_ * time_scale * inv_time_scale;
+            break;
+
+        case Mode::HOLD:
+        default:
+            break;
+        }
+
+        return out;
+    }
 };

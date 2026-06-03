@@ -4,12 +4,10 @@
 // Provides unified interface for updating and accessing sensor data
 // 
 // Key Features:
-// - Encapsulates InputsDump, SupplyVoltage, CurrentSense, and Position
+// - Encapsulates InputsDump, SupplyVoltage, CurrentSense, Position, and SystemTimer
 // - tick() method is private and only accessible through Feedback structure
 // - All getter methods are public for external access
 // - Ensures data consistency by controlling update flow
-
-
 
 #include "inputs_dump.h"  // Include inputs dump for ADC data buffering
 #include "error.h"  // Include error manager (must be before supply_voltage and current_sense)
@@ -17,11 +15,13 @@
 #include "analog/current_sense.h"  // Include current sensing
 #include "analog/power.h"
 #include "encoder.h"
+#include "system_timer.h" // Include the new template-based SystemTimer
 
-// Forward declaration to allow friend access
 struct Feedback;
 
 // Feedback structure: Aggregates all sensor feedback components
+// Templated to allow SystemTimer to optimize hardware division
+
 struct Feedback {  // Define the Feedback structure for unified sensor data management
 public:    
     ErrorManager error;  // Error manager must be first to be initialized before other components
@@ -30,6 +30,7 @@ public:
     CurrentSense current;  // 3-channel current sensing with calibration
     PowerMonitor power;
     Encoder encoder;
+    SystemTimer clock; // High-performance absolute system time tracker
 
     // SpeedEstimator speed;
     
@@ -42,13 +43,9 @@ private:
     friend struct PowerMonitor;
     friend struct DriverPWM;  // Allow DriverPWM to access private methods for calibration
     friend struct Encoder;
+
     DataInputs data_;  // Private copy of latest sensor data for external access
     uint32_t enabled_modules_;  // Bitmask of enabled modules for conditional tick execution
-
-    // Frequency monitoring variables
-    uint32_t tick_counter_;  // Counter for tick() calls
-    uint32_t last_report_time_us_;  // Last time frequency was reported (in microseconds)
-    
     
 public:
     // Constructor: Initialize feedback with configuration parameters
@@ -64,9 +61,7 @@ public:
           data_(),  // Initialize data copy with default constructor
           enabled_modules_(0),  // Initialize enabled modules from mandatory fields
           power(current.full_scale_max_ma, supply_max_mv),
-          tick_counter_(0),  // Initialize tick counter to zero
-          last_report_time_us_(0)  // Initialize last report time to zero
-          
+          clock(170000000) // Initialize the absolute system timer
     {
     }
 
@@ -103,33 +98,14 @@ public:
     const DataInputs& get_data() const {  // Return const reference to avoid copying
         return data_;  // Return private data copy
     }
+
     uint32_t tick1 = 0;
+
     // Main processing function: Update all feedback components with new sensor data
     // This is the only method that calls tick() on internal structures
     // Only processes modules that are enabled via enable_* functions
-    // Monitors actual tick() call frequency and reports every 5 seconds
     bool tick() {  // Main processing function called each cycle to update all sensors
-        // // Increment tick counter for frequency monitoring
-        // tick_counter_++;
-        
-        // // Check if 5 seconds have passed since last report (5,000,000 microseconds)
-        // uint32_t current_time_us = micros();  // Get current time in microseconds
-        // uint32_t elapsed_us = current_time_us - last_report_time_us_;  // Calculate elapsed time
-        
-        // // Report frequency every 5 seconds (5,000,000 microseconds)
-        // if (elapsed_us >= 5000000) {  // Check if 5 seconds elapsed
-        //     // Calculate actual frequency: ticks / seconds
-        //     float actual_frequency_hz = (float)tick_counter_ / (elapsed_us / 1000000.0f);  // Convert microseconds to seconds
-        //     float actual_frequency1_hz = (float)tick1 / (elapsed_us / 1000000.0f);  // Convert microseconds to seconds
-        //     // Log the actual tick frequency
-        //     TP_LOG_VALS("Feedback F (Hz):", (int32_t)actual_frequency_hz,(int32_t)actual_frequency1_hz);
-            
-        //     // Reset counters for next measurement period
-        //     tick_counter_ = 0;  // Reset tick counter
-        //     tick1 = 0;
-        //     last_report_time_us_ = current_time_us;  // Update last report time
-        // }
-        
+
         if (!inputs.is_updated()) {  // Use private method through friend access
             return false;  // Exit if no new data
         }
@@ -138,6 +114,9 @@ public:
         // Get latest complete sensor data from inputs dump and store in private copy
         data_ = inputs.get_data();  // Use private method through friend access and store in member
         
+        // 1. Always update absolute system time using the raw DWT tick timestamp from the ISR
+        clock.tick(data_.clock);
+
         // Update supply voltage only if enabled
         if (enabled_modules_ & (uint32_t)DataInputsBit_SUPPLY) {  // Check if SUPPLY bit is set
             supply.tick(data_.supply_adc);  // Process supply voltage ADC value

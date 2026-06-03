@@ -64,7 +64,7 @@ enum CalSamplingState {
  * @brief Calibration configuration constants
  */
 enum {
-    ANGLE_CAL_CAL_SETTLING_TIME_US = 50000,  // Settling time in microseconds
+    ANGLE_CAL_CAL_SETTLING_TIME_US = 10000,  // Settling time in microseconds
     ANGLE_CAL_CAL_SPEED_US = 2500,           // Speed in angle increments per microsecond
     ANGLE_CAL_CAL_OVERSEMPLING = 128,        // Number of samples per oversampling period
     ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 8     // Number of test steps in Pass0
@@ -85,7 +85,7 @@ public:
      */
     AngleCalibrator(uint16_t freq) {
         frequency = freq;       
-        size_t settling_time =
+        settling_time =
             calculate_settling_time(frequency, ANGLE_CAL_CAL_SETTLING_TIME_US);  // Convert settling time to ticks
                                                          // Store update frequency
         cal_table = CalibrationTable::create();                                  // Create calibration table
@@ -234,7 +234,7 @@ public:
      * @param mech_angle Output: mechanical angle
      */
     uint16_t get_el_angle_correction(uint32_t pos) const {
-        return cal_table.correct_el_angle(pos);  // Apply calibration correction
+        return cal_table.correct_el_angle(pos >> 16);  // Apply calibration correction
     }
 
 
