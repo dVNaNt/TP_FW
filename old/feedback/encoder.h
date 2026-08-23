@@ -1,6 +1,6 @@
 #pragma once  // Ensure this header is included only once during compilation
 
-#include "../common.h"  // Include common migration definitions and types
+#include "../../common.h"  // Include common migration definitions and types
 
 /// Position integrator manages and calculates the absolute position from incremental encoder readings.
 /// Uses a single 64-bit integer (q1.31.32 format) for zero-overhead wrap-around tracking.

@@ -1,3 +1,13 @@
+/**
+ * @file target.h
+ * @brief Board-configuration umbrella for the CLN17 v3 hardware.
+ *
+ * Collects MCU clock constants, PWM timer frequency/period, ADC full-scale
+ * definitions (SYS_PARAMS) and pulls in all peripheral setup headers. The
+ * macros SupplyVoltage/Motor/MotorType/PhasePattern/ControlMode/DriverStatus
+ * defined here are #undef'd by tunepulse.h after inclusion.
+ */
+
 #pragma once
 
 #define TARGET_CLN17V3
@@ -41,11 +51,12 @@ constexpr PinName ENC_MOSI = PA_7;  // Encoder SPI MOSI
 constexpr PinName ENC_CS = PA_4;    // Encoder Chip Select
 
 // Control SPI
-constexpr PinName CTRL_SCK = PB_3;   // Control SPI Clock / ERR 
-constexpr PinName CTRL_MISO = PB_4;  // Control SPI MISO / STP
-constexpr PinName CTRL_MOSI = PB_5;  // Control SPI MOSI / DIR
-constexpr PinName CTRL_CS = PA_15;   // Control SPI Chip Select / EN
-constexpr PinName CTRL_5V = PC_15;   // Control Interface Power/Signal
+constexpr PinName CTRL_SCK = PB_3;   // Control ERR pin | SPI3 CLK  | USART2 TX | TIM3 ABZ Z |
+constexpr PinName CTRL_MISO = PB_4;  // Control STP pin | SPI3 MISO | USART2 RX | TIM3 ABZ B |
+constexpr PinName CTRL_MOSI = PB_5;  // Control DIR pin | SPI3 MOSI | USART2 CK | TIM3 ABZ A | 
+constexpr PinName CTRL_CS = PA_15;   // Control ENB pin | SPI3 NSS  | I2C1 SCL  | ---------- |
+constexpr PinName CTRL_SDA = PB_7;   // Control DIR pin | --------- | I2C1 SDA  | ---------- |
+constexpr PinName CTRL_5V = PC_15;   // Control Interface Power Supply
 
 // User Interface & Misc
 constexpr PinName LED_RED = PB_1;   // Red LED
@@ -59,10 +70,10 @@ constexpr PinName IO_SWCLK = PA_14;  // SWD Clock
 }  // namespace PINOUT
 
 namespace SYS_PARAMS {
-    constexpr int32_t MAX_SUPPLY_FS = 102300;
-    constexpr int32_t IA_MAX_CURRENT_FS = 11000;
-    constexpr int32_t IB_MAX_CURRENT_FS = 11000;
-    constexpr int32_t IC_MAX_CURRENT_FS = 16500;
+    constexpr float MAX_SUPPLY_FS = 102.3;
+    constexpr float IA_MAX_CURRENT_FS = 11.0;
+    constexpr float IB_MAX_CURRENT_FS = 11.0;
+    constexpr float IC_MAX_CURRENT_FS = 16.5;
     constexpr int32_t ADC_DELAY_TICKS_CONST = 120;
     constexpr int32_t DEADTIME_TICKS_CONST = 20;
 }

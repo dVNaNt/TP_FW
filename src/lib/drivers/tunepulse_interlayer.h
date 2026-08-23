@@ -1,0 +1,24 @@
+#ifndef INTERLAYER_HPP
+#define INTERLAYER_HPP
+
+/**
+ * @file tunepulse_interlayer.h
+ * @brief Convenience umbrella header grouping the hardware "interlayer"
+ *        drivers used by the TunePulse stack.
+ *
+ * Pulls in, with a single include:
+ * - flash_eeprom.h            : EEPROM-emulation middleware (calibration
+ *                               table persistence).
+ * - pwm_driver_phy/pwm_driver.h : physical PWM/ADC driver layer (PhyDriverPWM,
+ *                               current sensing, supply voltage monitoring).
+ * - encoder_phy/encoder.h     : magnetic encoder interface.
+ *
+ * This header defines no code of its own; it exists so that application code
+ * can depend on one stable include instead of the individual driver paths.
+ */
+
+#include "flash_eeprom.h"
+#include "pwm_driver_phy/pwm_driver.h"
+#include "encoder_phy/encoder.h"
+
+#endif

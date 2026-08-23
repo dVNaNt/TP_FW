@@ -1,10 +1,25 @@
 #pragma once
 
-#include "../../common.h"
+/**
+ * @file motor_selector.h
+ * @brief Unified phase selector combining inverse-Clarke voltage synthesis,
+ *        Clarke current recombination, phase-pattern remapping and SVPWM
+ *        centering/scaling.
+ *
+ * MotorSelectorPHY provides two data paths used every control cycle:
+ *
+ * - @c tick_voltage : alpha-beta command voltages -> remapped 3-phase PWM
+ *   duties (inverse Clarke for BLDC, direct coil mapping for steppers), with
+ *   SVPWM zero-sequence centering or linear scale-down on saturation.
+ * - @c tick_current : raw per-channel currents -> alpha-beta currents
+ *   (Clarke transform), reconstructing a missing phase via Kirchhoff's
+ *   Current Law and masking sensors sampled during high-duty intervals.
+ *
+ * Phase-pattern remapping (ABC / ACB / CBA wiring) is folded into both paths
+ * using precomputed index permutations for zero runtime overhead.
+ */
 
-// ============================================================================
-// MotorSelector - unified structure combining current, voltage, and phase selection
-// ============================================================================
+#include "../../common.h"
 // Combines ABC2AB (current), AB2ABC (voltage), and integrated phase remapping
 // into a single interface for motor control with minimal overhead.
 //
@@ -27,17 +42,19 @@
 //
 // Phase remapping is integrated directly for zero-overhead abstraction
 // ============================================================================
+struct PhyDriverPWM;
+struct CurrentSensePHY;
 
-struct MotorSelector {
+struct MotorSelectorPHY {
 private:
+    friend struct PhyDriverPWM;
+    friend struct CurrentSensePHY;
     // --- State variables for Current processing (formerly ABC2AB) ---
     FilterEMA lpf_;                           // LPF filter for phase balance
     static constexpr uint8_t LPF_ALPHA = 42;  // Filter coefficient (0-255)
 
     int16_t epsilon_abs_;  // Absolute balance tolerance in Q15 format
     Vec3D abc_voltages_;   // ABC voltages after phase remapping
-
-    Vec2D ab_currents_;  // Output Vec2D: sin=alpha, cos=beta in Q15 format
 
     MotorType motor_type_;  // Motor type: 1=DC, 4=Stepper, 6=BLDC
     // Integrated phase remapping indices (precomputed for zero overhead)
@@ -73,8 +90,8 @@ private:
         } else if (motor_type == MotorType_STEP) {         // Handle Stepper motor type (direct 2-phase mapping)
             // Phase A = alpha input (coil A) by default
             // Phase B = beta input (coil B) by default
-            voltg_c = 0;                          // Phase C: unused for stepper
-        } else {  // Handle unexpected invalid motor type
+            voltg_c = 0;  // Phase C: unused for stepper
+        } else {          // Handle unexpected invalid motor type
             error = true;
             return Vec3D(INT16_MIN, INT16_MIN, INT16_MIN);  // Store phase C result
         }
@@ -114,12 +131,9 @@ private:
     }
 
     // ============================================================================
-    // Internal method: ABC to AB current converter with sensor recombination (formerly ABC2AB::tick)
+    // Internal method: ABC to AB current converter with sensor recombination
     // ============================================================================
-    // ============================================================================
-    // Internal method: ABC to AB current converter with sensor recombination (formerly ABC2AB::tick)
-    // ============================================================================
-    void abc2ab_tick(Vec3D abc, MotorType mt) {
+    Vec2D abc2ab_tick(Vec3D abc, MotorType mt) {
         const bool valid_a = (abc.a != INT16_MIN);
         const bool valid_b = (abc.b != INT16_MIN);
         const bool valid_c = (abc.c != INT16_MIN);
@@ -129,9 +143,8 @@ private:
         // Validate motor type is supported or no current sense we have only 1 current for
         // BLDC/STEP (short exit)
         if (present_cnt == 1) {
-            ab_currents_ = Vec2D(INT16_MIN, INT16_MIN);
             err_current_ = true;
-            return;  // Exit early on invalid motor type
+            return Vec2D(INT16_MIN, INT16_MIN);  // Exit early on invalid motor type
         }
 
         // making invalid currents as zero to simplify balance math
@@ -153,42 +166,45 @@ private:
         int16_t alpha;
         int16_t beta;
 
-        // Handle DC motor: calculate current from available sensors
+        // BLDC/PMSM: full Clarke transform to the stationary alpha-beta frame.
         if (mt == MotorType_BLDC) {
-            // Perform Clarke Transform to convert ABC to alpha-beta
             constexpr static int32_t INV_SQRT3_Q15 = 18919;  // 1/sqrt(3) in Q15 format (floor(0.577350269 * 2^15) = 18918.6)
             alpha = ia;
-            // Calculate beta: I_beta = (I_B - I_C) *  1/sqrt(3)
-            beta = clamp_i32(((ib - ic) * INV_SQRT3_Q15) >> 15, INT16_MAX);  // Shift right to convert to Q15
+            // Calculate beta: I_beta = (I_B - I_C) * 1/sqrt(3)
+            beta = clamp_i32(((ib - ic) * INV_SQRT3_Q15) >> 15, INT16_MAX);
         } else if (mt == MotorType_STEP) {
+            // Stepper: two independent coils map directly onto alpha/beta.
             alpha = ia;
             beta = ib;
         } else {
-            ab_currents_ = Vec2D(INT16_MIN, INT16_MIN);
             err_current_ = true;
-            return;  // Exit early on invalid motor type
+            return Vec2D(INT16_MIN, INT16_MIN);;  // Exit early on invalid motor type
         }
 
-        ab_currents_ = {alpha, beta};
-        err_current_ = false;  // Clear error flag
+        Vec2D ab_currents_ = {alpha, beta};
+        err_current_ = false;  // Clear error flag before the balance check below
 
-        if (present_cnt == 3) {  // Handle motor phase balance
-            // Calibration mode uses stepper-style current sensing (direct alpha-beta mapping)
-            // Filter updated only when enough sensors for motor balance (2 for DC and 3 for rest). Using real sum of sensors
+        if (present_cnt == 3) {  // Phase-balance supervision (all sensors present)
+            // Low-pass filtered sum of the three phase currents should stay
+            // near zero (Kirchhoff). A persistent offset indicates a sensor
+            // gain/offset fault and raises the current-path error flag.
             const int16_t bal = lpf_.tick_lpf(sum);
-            if (bal > epsilon_abs_ or bal < -epsilon_abs_)  // Check if within tolerance
-                err_current_ = true;                        // Clear error flag if balanced
+            if (bal > epsilon_abs_ or bal < -epsilon_abs_)  // Outside tolerance...
+                err_current_ = true;                        // ...raise error flag
         }
+        return ab_currents_;
     }
 
-public:
-    /// Constructor: initializes motor selector with motor type and phase pattern
-    /// @param motor_type Motor type (1=DC, 4=Stepper, 6=BLDC)
-    /// @param phase_pattern Phase connection pattern (ABC, ACB, CBA)
-    /// @param control_mode Control mode (VoltageAB or CurrentAB)
-    /// @param duty_permille Maximum duty cycle in permille (0-995 = 0.0%-99.5%)
-    /// @param current_epsilon Balance tolerance for current in Q15 format
-    MotorSelector(MotorType motor_type = MotorType_STEP,
+    /**
+     * Constructor: initializes the motor selector.
+     *
+     * @param motor_type      Motor type enum (MotorType_BLDC / MotorType_STEP).
+     * @param phase_pattern   Physical wiring pattern (ABC, ACB, CBA).
+     * @param duty_permille   Maximum duty cycle in permille (historical parameter,
+     *                        currently unused inside this class).
+     * @param current_epsilon Balance tolerance for the current-sum check (Q15).
+     */
+    MotorSelectorPHY(MotorType motor_type = MotorType_STEP,
                   PhasePattern phase_pattern = PhasePattern_ABC,
                   uint16_t duty_permille = 995u,
                   int16_t current_epsilon = 256)
@@ -200,13 +216,52 @@ public:
           abc_voltages_(0, 0, 0),
           err_voltage_(0u),
           err_current_(0u),
-          ab_currents_{0, 0},
           lpf_(0, LPF_ALPHA),
           epsilon_abs_(0) {
         set_phase_pattern(phase_pattern);
         set_current_epsilon(current_epsilon);
     }
 
+    /**
+     * Process the voltage path: alpha-beta command -> remapped 3-phase duties.
+     *
+     * @param voltage Alpha-beta voltages in Q15 (Vec2D first member = alpha,
+     *                second member = beta).
+     * @return Reference-free copy of the remapped ABC duty vector (Q15).
+     */
+    const Vec3D tick_voltage(Vec2D voltage) {
+        // Convert AB to ABC using internal voltage converter
+        Vec3D abc = ab2abc_tick(voltage, motor_type_, err_voltage_);
+
+        // Apply inline phase remapping (logical ABC -> physical channels)
+        abc_voltages_.a = abc[idx0_];
+        abc_voltages_.b = abc[idx1_];
+        abc_voltages_.c = abc[idx2_];
+
+        return abc_voltages_;
+    }
+
+    /// Process current path: ABC currents -> AB currents
+    /// Physical channels are remapped to logical ABC, then converted to AB
+    /// @param physical Physical channel currents [Ch0, Ch1, Ch2] in Q15 format (INT16_MIN = sensor missing)
+    Vec2D tick_current(Vec3D physical) {
+        // Apply high duty cycle masking: if PWM duty > 30720, invalidate corresponding current sensor
+        // Apply inline inverse phase remapping (physical channels -> logical ABC)
+        constexpr int16_t DUTY_THRESHOLD = 30720;  // ~93.8% duty cycle
+        Vec3D logical;
+        logical[idx0_] = (abc_voltages_.a > DUTY_THRESHOLD) ? INT16_MIN : physical[0];
+        logical[idx1_] = (abc_voltages_.b > DUTY_THRESHOLD) ? INT16_MIN : physical[1];
+        logical[idx2_] = (abc_voltages_.c > DUTY_THRESHOLD) ? INT16_MIN : physical[2];
+
+        // Convert logical ABC to AB using internal current converter
+        return  abc2ab_tick(logical, motor_type_);
+    }
+
+    /// Get pointer to remapped ABC voltages (final output for PWM)
+    /// @return Pointer to 3-element array [A, B, C] in Q15 format
+    inline Vec3D get_voltages() const { return abc_voltages_; }
+
+public:
     /// Set motor type for both current and voltage converters
     /// @param motor_type Motor type (1=DC, 4=Stepper, 6=BLDC)
     inline void set_motor_type(MotorType motor_type) { motor_type_ = motor_type; }
@@ -215,14 +270,18 @@ public:
     /// @return Motor type (1=DC, 4=Stepper, 6=BLDC)
     inline MotorType get_motor_type() const { return motor_type_; }
 
-    /// Set phase connection pattern
-    /// @param phase_pattern Phase pattern (ABC, ACB, CBA)
+    /**
+     * Set the physical phase-connection pattern.
+     *
+     * Precomputed permutations (logical index -> physical channel):
+     * - ABC -> [0,1,2]
+     * - ACB -> [0,2,1]
+     * - CBA -> [2,1,0]
+     *
+     * @param phase_pattern Phase pattern (ABC, ACB, CBA)
+     */
     void set_phase_pattern(PhasePattern phase_pattern) {
         phase_pattern_ = phase_pattern;
-        // Precomputed permutations:
-        // ABC -> [0,1,2]
-        // BCA -> [1,2,0]
-        // CAB -> [2,0,1]
         switch (phase_pattern) {
             case PhasePattern_CBA:
                 idx0_ = 2;
@@ -243,43 +302,12 @@ public:
         }
     }
 
+    /// Get the currently configured phase-connection pattern.
     inline PhasePattern get_phase_pattern() { return phase_pattern_; }
 
     /// Set balance tolerance for current converter
     /// @param epsilon Balance tolerance in Q15 format
     inline void set_current_epsilon(int16_t epsilon) { epsilon_abs_ = abs((int32_t)epsilon); }
-
-    /// Process voltage path: AB voltages -> ABC voltages with phase remapping
-    /// @param voltage Vec2D voltage (sin=alpha, cos=beta) in Q15 format
-    const Vec3D tick_voltage(Vec2D voltage) {
-        // Convert AB to ABC using internal voltage converter
-        Vec3D abc = ab2abc_tick(voltage, motor_type_, err_voltage_);
-
-        // Apply inline phase remapping (logical ABC -> physical channels)
-        abc_voltages_.a = abc[idx0_];
-        abc_voltages_.b = abc[idx1_];
-        abc_voltages_.c = abc[idx2_];
-
-        return abc_voltages_;
-    }
-
-    /// Process current path: ABC currents -> AB currents
-    /// Physical channels are remapped to logical ABC, then converted to AB
-    /// @param physical Physical channel currents [Ch0, Ch1, Ch2] in Q15 format (INT16_MIN = sensor missing)
-    Vec2D tick_current(const int16_t physical[3]) {
-        // Apply high duty cycle masking: if PWM duty > 30720, invalidate corresponding current sensor
-        // Apply inline inverse phase remapping (physical channels -> logical ABC)
-        constexpr int16_t DUTY_THRESHOLD = 30720;  // ~93.8% duty cycle
-        Vec3D logical;
-        logical[idx0_] = (abc_voltages_.a > DUTY_THRESHOLD) ? INT16_MIN : physical[0];
-        logical[idx1_] = (abc_voltages_.b > DUTY_THRESHOLD) ? INT16_MIN : physical[1];
-        logical[idx2_] = (abc_voltages_.c > DUTY_THRESHOLD) ? INT16_MIN : physical[2];
-
-        // Convert logical ABC to AB using internal current converter
-        abc2ab_tick(logical, motor_type_);
-
-        return ab_currents_;
-    }
 
     /// Check if voltage path error occurred
     /// @return 1 if error, 0 if no error
@@ -292,12 +320,4 @@ public:
     /// Check if any error occurred
     /// @return 1 if any error, 0 if no errors
     uint8_t is_err() const { return err_voltage_ | err_current_; }
-
-    /// Get pointer to remapped ABC voltages (final output for PWM)
-    /// @return Pointer to 3-element array [A, B, C] in Q15 format
-    inline Vec3D get_voltages() const { return abc_voltages_; }
-
-    /// Get AB currents as Vec2D (alpha-beta)
-    /// @return Vec2D with sin=alpha, cos=beta in Q15 format
-    inline Vec2D get_currents() const { return ab_currents_; }
 };

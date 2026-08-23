@@ -27,8 +27,9 @@
  * - This safely dissipates energy while protecting against overcurrent
  *
  * Interrupt Architecture:
- * - Rising edge: Fault detection, sets error flag in feedback.error
- * - Falling edge: Fault cleared, clears error flag in feedback.error
+ * - Overcurrent (COMP1/2/4): Rising edge only (Fault detection, sets error flag)
+ * - Overvoltage (COMP3): Both edges (Rising sets fault, Falling clears fault)
+ * - PB10 (DRV_FAULT): Both edges (Falling sets fault, Rising clears fault)
  *
  * Recovery Timer (managed in lib.h):
  * - Timer starts when ALL hard faults are cleared (comparator outputs go low)
@@ -83,8 +84,10 @@ static inline void MX_DAC1_Init(void) {         // Begin function to initialize 
     while ((DAC1->SR & (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY)) != (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY))
         __NOP();  // Prevent compiler optimization of the loop while waiting for hardware stabilization
 
-    DAC1->DHR12R1 = 0U;  // Set initial mid-scale/default value to Channel 1 data register
-    DAC1->DHR12R2 = 0U;  // Set initial mid-scale/default value to Channel 2 data register
+    // ОПТИМИЗАЦИЯ: Устанавливаем максимальный порог (4095), чтобы исключить ложные срабатывания 
+    // компараторов тока в момент старта до того, как управляющий код задаст реальный порог.
+    DAC1->DHR12R1 = 256U;  
+    DAC1->DHR12R2 = 256U;  
 }  // End of MX_DAC1_Init function
 
 static inline void MX_DAC3_Init(void) {         // Begin function to initialize DAC3 peripheral
@@ -100,29 +103,37 @@ static inline void MX_DAC3_Init(void) {         // Begin function to initialize 
         __NOP();  // Execute no-operation instruction to save power during short hardware spinlock
 
     DAC3->DHR12R1 = 1024U;  // Apply default startup threshold for overvoltage protection to Channel 1
-    DAC3->DHR12R2 = 0U;     // Apply default startup threshold for overcurrent to Channel 2
+    DAC3->DHR12R2 = 256U;  // ОПТИМИЗАЦИЯ: Безопасный порог для OC при старте
 }  // End of MX_DAC3_Init function
 
 void DAC_Set_COMP2_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase A overcurrent threshold
     DAC1->DHR12R2 =
         (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC1 CH2 register
+        SerialUSB.print("Set COMP2: ");
+        SerialUSB.println(threshold);
+
 }  // End of DAC_Set_COMP2_OC_Threshold function
 
 void DAC_Set_COMP1_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase B overcurrent threshold
     DAC1->DHR12R1 =
         (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC1 CH1 register
-}  // End of DAC_Set_COMP1_OC_Threshold function
+        SerialUSB.print("Set COMP1: ");
+        SerialUSB.println(threshold);
+    }  // End of DAC_Set_COMP1_OC_Threshold function
 
 void DAC_Set_COMP4_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase C overcurrent threshold
     DAC3->DHR12R2 =
         (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC3 CH2 register
+                SerialUSB.print("Set COMP4: ");
+        SerialUSB.println(threshold);
 }  // End of DAC_Set_COMP4_OC_Threshold function
 
-void DAC_Set_COMP3_OV_Threshold(
-    uint16_t threshold) {                           // Function to dynamically update overvoltage threshold without blocking code
+void DAC_Set_COMP3_OV_Threshold(uint16_t threshold) {   // Function to dynamically update overvoltage threshold without blocking code
     if ((DAC3->CR & DAC_CR_EN1) != 0U) {            // Safely verify that DAC3 Channel 1 is actually enabled to prevent hardfaults
         DAC3->DHR12R1 = (threshold >> 4) & 0x0FFF;  // Perform 16-to-12-bit downscaling safely and update threshold register
     }  // End of hardware enable check condition
+            SerialUSB.print("Set COMP3 OV: ");
+        SerialUSB.println(threshold);
 }  // End of DAC_Set_COMP3_OV_Threshold function
 
 static inline void MX_COMPS_INIT(void) {          // Begin function to initialize all four analog comparators simultaneously
@@ -178,10 +189,10 @@ static inline void MX_DRV_FAULT_GPIO_Init(void) {
     // Configure EXTI line 10 for PB10
     LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTB, LL_SYSCFG_EXTI_LINE10);  // Connect EXTI10 to GPIOB
 
-    // Enable EXTI line 10 with falling edge trigger (active low fault signal)
-    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_10);           // Unmask interrupt
-    LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_10);  // Falling edge trigger (fault when LOW)
-    LL_EXTI_DisableRisingTrig_0_31(LL_EXTI_LINE_10);  // Disable rising edge
+    // ИСПРАВЛЕНО: Запрос пользователя - прерывание на ОБА фронта для снятия флага
+    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_10);           
+    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_10);   // Rising edge trigger (clear fault)
+    LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_10);  // Falling edge trigger (set fault)
 
     // Clear any pending flags
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_10);
@@ -193,8 +204,8 @@ static inline void MX_DRV_FAULT_GPIO_Init(void) {
 
 /**
  * @brief Configure EXTI interrupts for all comparators
- * Rising edge: Fault detection (comparator output goes high)
- * Falling edge: Fault cleared (comparator output goes low)
+ * OC Comparators: Rising edge only (Fault detection)
+ * OV Comparator: Both edges (Fault detection and clearing)
  */
 static inline void COMP_EXTI_Init(void) {
     // COMP1 is connected to EXTI21
@@ -202,32 +213,30 @@ static inline void COMP_EXTI_Init(void) {
     // COMP3 is connected to EXTI29
     // COMP4 is connected to EXTI30
 
-    // Enable EXTI line 21 (COMP1) - both edges for fault detection and clearing
-    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_21);            // Unmask interrupt
-    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_21);    // Rising edge trigger (fault)
-    LL_EXTI_DisableFallingTrig_0_31(LL_EXTI_LINE_21);  // Falling edge trigger (clear)
+    // Enable EXTI line 21 (COMP1) - Rising edge only
+    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_21);            
+    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_21);    
+    LL_EXTI_DisableFallingTrig_0_31(LL_EXTI_LINE_21);  
 
-    // Enable EXTI line 22 (COMP2) - both edges
-    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_22);            // Unmask interrupt
-    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_22);    // Rising edge trigger (fault)
-    LL_EXTI_DisableFallingTrig_0_31(LL_EXTI_LINE_22);  // Falling edge trigger (clear)
+    // Enable EXTI line 22 (COMP2) - Rising edge only
+    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_22);            
+    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_22);    
+    LL_EXTI_DisableFallingTrig_0_31(LL_EXTI_LINE_22);  
 
-    // Enable EXTI line 30 (COMP4) - both edges
-    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_30);            // Unmask interrupt
-    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_30);    // Rising edge trigger (fault)
-    LL_EXTI_DisableFallingTrig_0_31(LL_EXTI_LINE_30);  // Falling edge trigger (clear)
+    // Enable EXTI line 30 (COMP4) - Rising edge only
+    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_30);            
+    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_30);    
+    LL_EXTI_DisableFallingTrig_0_31(LL_EXTI_LINE_30);  
 
-    // Enable EXTI line 29 (COMP3) - both edges
-    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_29);           // Unmask interrupt
-    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_29);   // Rising edge trigger (fault)
-    LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_29);  // Falling edge trigger (clear)
+    // Enable EXTI line 29 (COMP3) - Both edges
+    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_29);           
+    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_29);   
+    LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_29);  
 
     // Clear any pending flags
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_21 | LL_EXTI_LINE_22 | LL_EXTI_LINE_29 | LL_EXTI_LINE_30);
 
     // Enable NVIC interrupts
-    // COMP1/2/3 share COMP1_2_3_IRQn
-    // COMP4 uses COMP4_IRQn
     NVIC_SetPriority(COMP1_2_3_IRQn, 0);  // Highest priority for safety
     NVIC_EnableIRQ(COMP1_2_3_IRQn);
 
@@ -240,10 +249,9 @@ static inline void COMP_EXTI_Init(void) {
  * Disables all PWM outputs (Hi-Z state) immediately and sets error flag
  */
 inline void COMP_Set_OC_Protection_State(void) {
-    // IMMEDIATE PWM protection: Set all phases to Hi-Z (INT16_MIN)
-    // This provides instant hardware protection before software can react
-    const int16_t pwm_hiz[3] = {INT16_MIN, INT16_MIN, INT16_MIN};  // All phases Hi-Z
-    TIM1_Set_PWM_Values(pwm_hiz);                                  // Apply immediately in ISR
+    // ОПТИМИЗАЦИЯ: Массивы объявлены как static const, чтобы не тратить время на стек в ISR
+    static const int16_t pwm_hiz[3] = {INT16_MIN, INT16_MIN, INT16_MIN};  // All phases Hi-Z
+    TIM1_Set_PWM_Values(pwm_hiz);                                         // Apply immediately in ISR
 }
 
 /**
@@ -251,10 +259,9 @@ inline void COMP_Set_OC_Protection_State(void) {
  * Enables regenerative braking (low-side ON, high-side OFF) immediately and sets error flag
  */
 inline void COMP_Set_OV_Protection_State(void) {
-    // IMMEDIATE PWM protection: Set all phases to regenerative braking (PWM = 0)
-    // This provides instant hardware protection before software can react
-    const int16_t pwm_regen[3] = {0, 0, 0};  // All phases regenerative braking
-    TIM1_Set_PWM_Values(pwm_regen);          // Apply immediately in ISR
+    // ОПТИМИЗАЦИЯ: Массивы объявлены как static const, чтобы не тратить время на стек в ISR
+    static const int16_t pwm_regen[3] = {0, 0, 0};  // All phases regenerative braking
+    TIM1_Set_PWM_Values(pwm_regen);                 // Apply immediately in ISR
 }
 
 /**
@@ -265,18 +272,21 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
     // Check COMP1 (Phase B overcurrent) - EXTI line 21
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_21)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_21);  // Clear pending flag
-                                                  // Set fatal overcurrent error flag
+        
         if (g_heart_ptr != nullptr) {
-            g_heart_ptr->feedback.error.set_fatal_phase2_oc();  // Set fatal overcurrent error
+            g_heart_ptr->driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
         }
+         SerialUSB.println("B");
     }
 
     // Check COMP2 (Phase A overcurrent) - EXTI line 22
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_22)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_22);  // Clear pending flag
+        
         if (g_heart_ptr != nullptr) {
-            g_heart_ptr->feedback.error.set_fatal_phase1_oc();  // Set fatal overcurrent error
+            g_heart_ptr->driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
         }
+        SerialUSB.println("A");
     }
 
     // Check COMP3 (Overvoltage) - EXTI line 29
@@ -285,13 +295,13 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
 
         // Check if rising edge (fault) or falling edge (clear)
         if (LL_COMP_ReadOutputLevel(COMP3) == LL_COMP_OUTPUT_LEVEL_HIGH) {
-            COMP_Set_OV_Protection_State();  // Rising edge: set overvoltage protection
             if (g_heart_ptr != nullptr)
-                g_heart_ptr->feedback.error.set_fatal_dc_ovlo();  // Set fatal overvoltage error
+                g_heart_ptr->driver_phy.set_fault().overvoltage(true);  // Set fatal overvoltage error
         } else {
             if (g_heart_ptr != nullptr)
-                g_heart_ptr->feedback.error.reset_fatal_dc_ovlo();  // Clear fatal overvoltage error
+                g_heart_ptr->driver_phy.set_fault().overvoltage(false);  // Clear overvoltage error
         }
+        SerialUSB.println("V");
     }
 }
 
@@ -303,26 +313,34 @@ extern "C" void COMP4_IRQHandler(void) {
     // Check COMP4 (Phase C overcurrent) - EXTI line 30
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_30)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_30);  // Clear pending flag
+        
         if (g_heart_ptr != nullptr) {
-            g_heart_ptr->feedback.error.set_fatal_phase3_oc();  // Set fatal overcurrent error
+            g_heart_ptr->driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
         }
+        SerialUSB.println("C");
     }
 }
 
 /**
  * @brief EXTI15_10 interrupt handler
- * Handles PB10 (DRV_FAULT) external interrupt on falling edge
- * Called when driver fault signal goes LOW (active low fault detection)
+ * Handles PB10 (DRV_FAULT) external interrupt on both edges
+ * Falling edge: Fault signal LOW -> Set error
+ * Rising edge: Fault signal HIGH -> Clear error
  */
 extern "C" void EXTI15_10_IRQHandler(void) {
     // Check EXTI line 10 (PB10 - DRV_FAULT)
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_10)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_10);  // Clear pending flag
 
-        // Set fatal overcurrent error flag
+        // ИСПРАВЛЕНО: Логика запроса. Сигнал активен низким уровнем (Active Low).
+        // Если rising edge (пин HIGH) -> false (снимаем флаг)
+        // Если falling edge (пин LOW) -> true (ставим флаг)
+        bool is_fault = (LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_10) == 0U); 
+        SerialUSB.println("E");
         if (g_heart_ptr != nullptr) {
-            g_heart_ptr->feedback.error.set_fatal_driver();  // Set fatal overcurrent error
+            g_heart_ptr->driver_phy.set_fault().external(is_fault);
         }
+        
     }
 }
 

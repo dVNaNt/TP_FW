@@ -209,7 +209,9 @@ Example:
 
 ### Build Verification
 - **Always verify compilation** after code changes
-- **Always report firmware size difference** before and after changes (in bytes compared to previous record. Make changelog file where add brief changes overview AND size. Read only last lines for check)
+- Run the report script from the command line, passing all 6 arguments wrapped in quotes. Use a semicolon (;) inside the text to create multiple bullet points.
+python changelogger.py "Summary" "Changes" "Reasons" "Notes" <FlashSize> <RAMSize>
+Example: python changelogger.py"Interpolator optimization" "Switch to Q31 fixed-point math; Optimize BEMF calculation" "Reduce cycle count for high-performance control" "SMMUL and SMMLA instructions utilized" 45120 12048
 - Check for warnings and treat them as errors
 - Verify that optimizations don't break functionality
 

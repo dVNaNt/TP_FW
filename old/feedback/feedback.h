@@ -9,8 +9,7 @@
 // - All getter methods are public for external access
 // - Ensures data consistency by controlling update flow
 
-#include "inputs_dump.h"  // Include inputs dump for ADC data buffering
-#include "error.h"  // Include error manager (must be before supply_voltage and current_sense)
+#include "../inputs_dump.h"  // Include inputs dump for ADC data buffering
 #include "analog/supply_voltage.h"  // Include supply voltage sensing
 #include "analog/current_sense.h"  // Include current sensing
 #include "analog/power.h"
@@ -24,7 +23,6 @@ struct Feedback;
 
 struct Feedback {  // Define the Feedback structure for unified sensor data management
 public:    
-    ErrorManager error;  // Error manager must be first to be initialized before other components
     InputsDump inputs;  // Double-buffered ADC and sensor data storage
     SupplyVoltage supply;  // Supply voltage sensing with filtering
     CurrentSense current;  // 3-channel current sensing with calibration
@@ -54,10 +52,10 @@ public:
     // current_ch2_fs_ma: Full-scale current for channel 2 in milliamps
     // current_ch3_fs_ma: Full-scale current for channel 3 in milliamps
     Feedback(int32_t supply_max_mv, int16_t current_ch1_fs_ma, int16_t current_ch2_fs_ma, int16_t current_ch3_fs_ma)  // Constructor: Create and initialize feedback system
-        : error(),  // Initialize error manager first (must be before supply and current)
+        :   // Initialize error manager first (must be before supply and current)
           inputs(0),  // Initialize inputs dump with mandatory fields using constructor
-          supply(50, supply_max_mv, error),  // Initialize supply voltage sensor with error manager reference
-          current(current_ch1_fs_ma, current_ch2_fs_ma, current_ch3_fs_ma, error),  // Initialize current sensors with error manager reference
+          supply(50, supply_max_mv),  // Initialize supply voltage sensor with error manager reference
+          current(current_ch1_fs_ma, current_ch2_fs_ma, current_ch3_fs_ma),  // Initialize current sensors with error manager reference
           data_(),  // Initialize data copy with default constructor
           enabled_modules_(0),  // Initialize enabled modules from mandatory fields
           power(current.full_scale_max_ma, supply_max_mv),
@@ -86,7 +84,7 @@ public:
     // Enable encoder/position module (adds ANGLE bit to enabled modules)
     void enable_encoder() {  // Enable encoder/position processing
         enabled_modules_ |= (uint32_t)DataInputsBit_ANGLE;  // Set ANGLE bit in enabled modules mask
-        inputs.set_mandatory(enabled_modules_);  // Recreate inputs dump with updated mandatory fields
+        // inputs.set_mandatory(enabled_modules_);  // Recreate inputs dump with updated mandatory fields
     }
 
 
@@ -99,7 +97,7 @@ public:
         return data_;  // Return private data copy
     }
 
-    uint32_t tick1 = 0;
+
 
     // Main processing function: Update all feedback components with new sensor data
     // This is the only method that calls tick() on internal structures
@@ -110,7 +108,7 @@ public:
             return false;  // Exit if no new data
         }
         
-        tick1++;
+
         // Get latest complete sensor data from inputs dump and store in private copy
         data_ = inputs.get_data();  // Use private method through friend access and store in member
         

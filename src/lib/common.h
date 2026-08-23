@@ -1,18 +1,49 @@
 #pragma once
 
-// Common includes for the translated TunePulse algo headers.
+/**
+ * @file common.h
+ * @brief Common includes and small shared utilities for the TunePulse
+ *        algorithm headers.
+ *
+ * Provides:
+ * - Standard C/C++ headers used across the library (stdint, math, atomics).
+ * - Small inline math helpers: signf(), clamp_i32(), fast_sign_int().
+ * - The Channel enum used to index 3-phase quantities (CH1..CH3).
+ * - The Frequency helper struct that keeps core/PWM frequencies and derives
+ *   the PWM timer period.
+ * - Include-order-critical utilities: clamp_i32() must be visible before the
+ *   headers that use it, hence it is defined here ahead of those includes.
+ */
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <cmath>
-#include <math.h>
 #include <atomic>  // C++ atomic operations support
+#include <cmath>
 
-inline float signf(float x) { return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f); }
+
+/**
+ * @brief Floating-point sign extraction.
+ * @param x Input value.
+ * @return +1.0f if x > 0, -1.0f if x < 0, 0.0f if x == 0.
+ */
+inline float signf(float x) {
+    return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f);
+}
 // Utility clamp helper used across several headers.
 // Must be declared before including headers that use it.
+/**
+ * @brief Symmetric saturation (clamp) of a signed 32-bit value.
+ *
+ * @param value Input value to clamp.
+ * @param limit Symmetric limit; result lies in [-limit, +limit].
+ * @return value clamped to the range [-limit, +limit].
+ *
+ * @note Assumes @p limit is non-negative; a negative limit would produce an
+ *       empty range (value > limit and value < -limit cannot both be fixed).
+ */
 static inline int32_t clamp_i32(int32_t value, int32_t limit) {
     if (value > limit) {
         return limit;
@@ -23,14 +54,30 @@ static inline int32_t clamp_i32(int32_t value, int32_t limit) {
     return value;
 }
 
+/**
+ * @brief Logical channel identifiers used to index 3-phase quantities.
+ *
+ * Values are chosen to match zero-based array indices, so a Channel value can
+ * be used directly to subscript per-phase arrays (currents, offsets, ...).
+ */
 enum Channel : uint8_t {
-    CH1 = 0,  // Channel 1 (array index 0)
-    CH2 = 1,  // Channel 2 (array index 1)
-    CH3 = 2   // Channel 3 (array index 2)
+    CH1 = 0,  ///< Channel 1 (array index 0)
+    CH2 = 1,  ///< Channel 2 (array index 1)
+    CH3 = 2   ///< Channel 3 (array index 2)
 };
 
+/**
+ * @brief Branchless integer sign extraction.
+ *
+ * Uses an arithmetic right shift of the sign bit: for negative inputs the
+ * shift yields all-ones (-1), which OR-ed with 1 stays -1; for zero or
+ * positive inputs the shift yields 0, which OR-ed with 1 becomes +1.
+ *
+ * @param val Input value.
+ * @return -1 if val < 0, otherwise +1 (zero is treated as positive).
+ */
 inline int16_t fast_sign_int(int32_t val) {
-    return (val >> 31) | 1; 
+    return (val >> 31) | 1;
     // Returns -1 for negative values and 1 for 0 and positive values.
     // Zero is considered positive.
 }
@@ -39,24 +86,30 @@ inline int16_t fast_sign_int(int32_t val) {
 #include "dev_log.h"
 
 // Include headers that depend on the utility functions above
-#include "math/helpers/fifo_buffer.h"
 #include "math/controllers/pi.h"
 #include "math/filters/ema.h"
 #include "math/filters/median3.h"
+#include "math/helpers/fifo_buffer.h"
 #include "math/helpers/stability_check.h"
 #include "motor_driver/types.h"
 #include "vectors.h"
 
-
-
-
-/// Frequency configuration structure
-/// Manages core frequency, PWM frequency, and PWM period with automatic calculation
+/**
+ * @brief Frequency configuration helper.
+ *
+ * Manages the core (system) frequency and the PWM carrier frequency, and
+ * automatically derives the PWM timer period as
+ * @c period = frequency_core / frequency_pwm.
+ *
+ * @note This computes the period for edge-aligned counting. For
+ *       center-aligned (up/down) PWM the hardware period must be half of
+ *       this value (see PWM_TIMER_PERIOD in lib.h which divides by 2*freq).
+ */
 struct Frequency {
 private:
-    int32_t frequency_core_;  // Core/system frequency in Hz
-    int32_t frequency_pwm_;   // PWM frequency in Hz
-    int32_t period_pwm_;      // PWM period (calculated from core and PWM frequencies)
+    int32_t frequency_core_;  ///< Core/system frequency in Hz.
+    int32_t frequency_pwm_;   ///< PWM carrier frequency in Hz.
+    int32_t period_pwm_;      ///< PWM period in timer ticks (core_freq / pwm_freq).
 
 public:
     /// Constructor with default values

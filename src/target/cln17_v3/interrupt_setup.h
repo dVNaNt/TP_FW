@@ -1,3 +1,12 @@
+/**
+ * @file interrupt_setup.h
+ * @brief NVIC configuration and ISR glue for CLN17 v3.
+ *
+ * NVIC_Init() assigns priorities; the ISR handlers bridge hardware events
+ * (ADC end-of-conversion, comparators, timers) into the global TUNE_HEART
+ * object through g_heart_ptr.
+ */
+
 #ifndef NVIC_CLN17V3_H  // Include guard to prevent multiple inclusions of this header file
 #define NVIC_CLN17V3_H  // Define the include guard macro for the preprocessor
 
@@ -8,10 +17,9 @@
 #include "comp_setup.h"   // Include analog comparator subsystem setup
 #include "gpio_setup.h"   // Include general purpose I/O configuration
 
+#include "can_setup.h"        // Include CAN/CAN-FD communication setup
 #include "spi_setup.h"        // Include SPI communication setup for the encoder
 #include "timer_pwm_setup.h"  // Include PWM timer hardware definitions and functions
-
-
 
 struct TunePulseHeart;                        // Forward declaration of the main FOC controller structure
 extern TunePulseHeart* volatile g_heart_ptr;  // Expose global volatile pointer to access FOC instance inside ISRs
@@ -37,21 +45,18 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
 
     if ((uint32_t)(current_values[2] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase C
         current_values[2] = UINT16_MAX;  // Mark Phase C reading as invalid if it falls outside the valid range
+    
+    TUNE_HEART.driver_phy.current_sense.set_currents(current_values);
+    TUNE_HEART.driver_phy.supply_voltage.set_voltage_irq(voltage_supply);
 
-    TUNE_HEART.on_adc_values(DWT->CYCCNT, current_values, voltage_supply,
-                             temperature_adc);  // Pass the validated data into the FOC algorithm core
 
 }  // End of ADC_READY_Callback function
 
 inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA completion
-
-    TUNE_HEART.on_encoder_raw(Encoder_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
+    TUNE_HEART.encoder.set_raw_position(Encoder_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
     TUNE_HEART.tick();
-    
 
 }  // End of POSITION_Callback function
-
-
 
 inline void NVIC_Init() {  // Define the initialization function for the Nested Vectored Interrupt Controller
     NVIC_SetPriority(SPI1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 6, 0));  // Set SPI1 interrupt to priority level 6
@@ -68,12 +73,11 @@ inline void NVIC_Init() {  // Define the initialization function for the Nested 
  * This function bypasses HAL entirely. It must be called directly from TIM1_CC_IRQHandler.
  */
 inline void FOC_TimTrig_Callback() {  // Define custom inline callback for the timer trigger event
-    ADC1_StartDMAConversion();  // Trigger hardware dual ADC conversion (ADC1 and ADC2 start synchronously)
+    ADC1_StartDMAConversion();        // Trigger hardware dual ADC conversion (ADC1 and ADC2 start synchronously)
 
     Encoder_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading
 
-    TIM1_Set_PWM_Values(
-        TUNE_HEART.pwm_duty_values());  // Request new duty cycles from FOC core and write them to hardware registers
+    TUNE_HEART.driver_phy.tick_icr();  // Request new duty cycles from FOC core and write them to hardware registers
 }  // End of FOC_TimTrig_Callback function
 
 #endif  // NVIC_CLN17V3_H // Final close of the header include guard

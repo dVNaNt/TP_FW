@@ -1,3 +1,11 @@
+/**
+ * @file spi_setup.h
+ * @brief SPI1 setup and DMA-driven polling for the magnetic encoder.
+ *
+ * Encoder_SmartInit() configures SPI1; the polling routine continuously reads
+ * absolute angle words from the sensor and feeds Encoder::set_raw_position().
+ */
+
 #ifndef SMART_ENCODER_SETUP_H
 #define SMART_ENCODER_SETUP_H
 
@@ -290,3 +298,385 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
 }
 
 #endif // SMART_ENCODER_SETUP_H
+
+
+
+
+
+
+
+
+
+
+
+// #ifndef SMART_ENCODER_SETUP_H
+// #define SMART_ENCODER_SETUP_H
+
+// #include <Arduino.h>
+// #include "stm32g4xx.h"
+
+// extern void POSITION_Callback();
+
+// // =============================================================================
+// // MT6835 на внутреннем SPI1
+// //
+// // PA4 = CSN   (GPIO output)
+// // PA5 = SCK   (AF5 SPI1)
+// // PA6 = MISO  (AF5 SPI1)
+// // PA7 = MOSI  (AF5 SPI1)
+// //
+// // SPI Mode 3: CPOL = 1, CPHA = 1
+// // Burst read: 0xA003, далее 4 dummy-byte.
+// // RX[2] = ANGLE[20:13]
+// // RX[3] = ANGLE[12:5]
+// // RX[4] = ANGLE[4:0] + STATUS[2:0]
+// // RX[5] = CRC
+// // =============================================================================
+
+// // Передача 0xA003 + четыре dummy-byte.
+// static uint8_t SPI1_TX_BUF[6] __attribute__((aligned(4))) = {
+//     0xA0, 0x03, 0x00, 0x00, 0x00, 0x00
+// };
+
+// static uint8_t SPI1_RX_BUF[6] __attribute__((aligned(4))) = {0};
+
+// // Угол MT6835 в формате Q0.32 / left aligned:
+// // bit 31 = ANGLE[20], bit 11 = ANGLE[0], bits [10:0] = 0.
+// static volatile uint32_t POSITION_ENCODER_MT_RAW = 0;
+
+// // STATUS из младших трёх бит RX[4]:
+// // bit 0 = overspeed
+// // bit 1 = weak magnetic field
+// // bit 2 = undervoltage
+// static volatile uint8_t POSITION_MT_STATUS = 0;
+
+// // Принятый CRC из RX[5].
+// static volatile uint8_t POSITION_MT_CRC = 0;
+
+// // Можно использовать для диагностики в основном коде.
+// static volatile bool POSITION_MT_DATA_VALID = false;
+
+
+// // =============================================================================
+// // CS MT6835: PA4, active LOW
+// // =============================================================================
+// static inline void MT6835_ChipSelect(bool select) {
+//     if (select) {
+//         GPIOA->BRR = GPIO_PIN_4;
+//     } else {
+//         GPIOA->BSRR = GPIO_PIN_4;
+//     }
+// }
+
+
+// // =============================================================================
+// // GPIO: PA4 / PA5 / PA6 / PA7
+// // =============================================================================
+// static inline void SPI1_GPIO_Init() {
+//     RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
+//     __DSB();
+
+//     // ---- PA4: CSN, GPIO output push-pull ----
+//     GPIOA->MODER &= ~(3U << (4U * 2U));
+//     GPIOA->MODER |=  (1U << (4U * 2U));
+
+//     GPIOA->OTYPER &= ~GPIO_OTYPER_OT4;
+//     GPIOA->OSPEEDR |= (3U << (4U * 2U));
+//     GPIOA->PUPDR &= ~(3U << (4U * 2U));
+
+//     // CSN idle HIGH
+//     GPIOA->BSRR = GPIO_PIN_4;
+
+//     // ---- PA5=SCK, PA6=MISO, PA7=MOSI: AF5 SPI1 ----
+//     GPIOA->MODER &= ~(
+//         (3U << (5U * 2U)) |
+//         (3U << (6U * 2U)) |
+//         (3U << (7U * 2U))
+//     );
+
+//     GPIOA->MODER |= (
+//         (2U << (5U * 2U)) |
+//         (2U << (6U * 2U)) |
+//         (2U << (7U * 2U))
+//     );
+
+//     GPIOA->OTYPER &= ~(
+//         GPIO_OTYPER_OT5 |
+//         GPIO_OTYPER_OT6 |
+//         GPIO_OTYPER_OT7
+//     );
+
+//     GPIOA->OSPEEDR |= (
+//         (3U << (5U * 2U)) |
+//         (3U << (6U * 2U)) |
+//         (3U << (7U * 2U))
+//     );
+
+//     GPIOA->PUPDR &= ~(
+//         (3U << (5U * 2U)) |
+//         (3U << (6U * 2U)) |
+//         (3U << (7U * 2U))
+//     );
+
+//     // AF5: SPI1 на PA5/PA6/PA7
+//     GPIOA->AFR[0] &= ~(
+//         (0xFU << (5U * 4U)) |
+//         (0xFU << (6U * 4U)) |
+//         (0xFU << (7U * 4U))
+//     );
+
+//     GPIOA->AFR[0] |= (
+//         (5U << (5U * 4U)) |
+//         (5U << (6U * 4U)) |
+//         (5U << (7U * 4U))
+//     );
+// }
+
+
+// // =============================================================================
+// // SPI1 + DMA1
+// // DMA1 Channel 1 = RX
+// // DMA1 Channel 2 = TX
+// //
+// // DMAMUX:
+// // DMA1 Channel 1 <- SPI1_RX = request 10
+// // DMA1 Channel 2 <- SPI1_TX = request 11
+// // =============================================================================
+// static inline void SPI1_Init() {
+//     SPI1_GPIO_Init();
+
+//     RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
+//     RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN | RCC_AHB1ENR_DMAMUX1EN;
+//     __DSB();
+
+//     // Перед перенастройкой DMA гарантированно отключаем оба канала.
+//     DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+//     DMA1_Channel2->CCR &= ~DMA_CCR_EN;
+
+//     // SPI1_RX -> DMA1 Channel 1
+//     DMAMUX1_Channel0->CCR = 10U;
+
+//     // SPI1_TX -> DMA1 Channel 2
+//     DMAMUX1_Channel1->CCR = 11U;
+
+//     // ---- DMA RX: SPI1->DR -> SPI1_RX_BUF ----
+//     DMA1_Channel1->CPAR  = (uint32_t)&SPI1->DR;
+//     DMA1_Channel1->CMAR  = (uint32_t)SPI1_RX_BUF;
+//     DMA1_Channel1->CNDTR = 0;
+
+//     DMA1_Channel1->CCR =
+//         DMA_CCR_MINC |
+//         DMA_CCR_TCIE |
+//         (3U << DMA_CCR_PL_Pos);
+
+//     // ---- DMA TX: SPI1_TX_BUF -> SPI1->DR ----
+//     DMA1_Channel2->CPAR  = (uint32_t)&SPI1->DR;
+//     DMA1_Channel2->CMAR  = (uint32_t)SPI1_TX_BUF;
+//     DMA1_Channel2->CNDTR = 0;
+
+//     DMA1_Channel2->CCR =
+//         DMA_CCR_MINC |
+//         DMA_CCR_DIR |
+//         (2U << DMA_CCR_PL_Pos);
+
+//     // SPI master, software NSS, Mode 3:
+//     // CPOL=1, CPHA=1.
+//     //
+//     // BR=5: PCLK2 / 64.
+//     // При PCLK2=170 MHz это примерно 2.66 MHz.
+//     SPI1->CR1 =
+//         SPI_CR1_MSTR |
+//         SPI_CR1_SSM |
+//         SPI_CR1_SSI |
+//         SPI_CR1_CPOL |
+//         SPI_CR1_CPHA |
+//         (5U << SPI_CR1_BR_Pos);
+
+//     // 8-bit frame, RX/TX DMA enabled.
+//     SPI1->CR2 =
+//         SPI_CR2_RXDMAEN |
+//         SPI_CR2_TXDMAEN |
+//         SPI_CR2_FRXTH |
+//         (7U << SPI_CR2_DS_Pos);
+
+//     // Очистка остаточных состояний.
+//     (void)SPI1->DR;
+//     (void)SPI1->SR;
+
+//     DMA1->IFCR =
+//         DMA_IFCR_CGIF1 |
+//         DMA_IFCR_CGIF2;
+
+//     MT6835_ChipSelect(false);
+
+//     SPI1->CR1 |= SPI_CR1_SPE;
+// }
+
+
+// // =============================================================================
+// // Проверка CRC-8 MT6835
+// // Polynomial: x^8 + x^2 + x + 1 = 0x07
+// // CRC считается по RX[2], RX[3], RX[4].
+// // =============================================================================
+// static inline uint8_t MT6835_CalcCRC(const uint8_t* data, uint8_t len) {
+//     uint8_t crc = 0x00;
+
+//     while (len--) {
+//         crc ^= *data++;
+
+//         for (uint8_t bit = 0; bit < 8; bit++) {
+//             if (crc & 0x80U) {
+//                 crc = (uint8_t)((crc << 1U) ^ 0x07U);
+//             } else {
+//                 crc <<= 1U;
+//             }
+//         }
+//     }
+
+//     return crc;
+// }
+
+
+// // =============================================================================
+// // Разбор принятого пакета MT6835
+// // =============================================================================
+// static inline void MT6835_ParseResponse() {
+//     const uint32_t angle21 =
+//         ((uint32_t)SPI1_RX_BUF[2] << 13U) |
+//         ((uint32_t)SPI1_RX_BUF[3] << 5U)  |
+//         ((uint32_t)SPI1_RX_BUF[4] >> 3U);
+
+//     POSITION_ENCODER_MT_RAW = angle21 << 11U;
+//     POSITION_MT_STATUS = SPI1_RX_BUF[4] & 0x07U;
+//     POSITION_MT_CRC = SPI1_RX_BUF[5];
+
+//     const uint8_t crcCalculated = MT6835_CalcCRC(&SPI1_RX_BUF[2], 3);
+//     POSITION_MT_DATA_VALID = (crcCalculated == POSITION_MT_CRC);
+// }
+
+
+// // =============================================================================
+// // Старт одного burst-read MT6835 через SPI1 + DMA
+// //
+// // Важно: следующую передачу запускайте только после завершения предыдущей.
+// // Обычно вызов идёт из таймера управления, а DMA IRQ вызывает POSITION_Callback().
+// // =============================================================================
+// static inline void Encoder_StartTransfer() {
+//     // На случай ошибочного повторного старта не портим текущую транзакцию.
+//     if (DMA1_Channel1->CCR & DMA_CCR_EN) {
+//         return;
+//     }
+
+//     MT6835_ChipSelect(true);
+
+//     DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+//     DMA1_Channel2->CCR &= ~DMA_CCR_EN;
+
+//     DMA1->IFCR =
+//         DMA_IFCR_CGIF1 |
+//         DMA_IFCR_CGIF2;
+
+//     DMA1_Channel1->CNDTR = 6;
+//     DMA1_Channel2->CNDTR = 6;
+
+//     // RX включается первым, иначе первый принятый байт может быть потерян.
+//     DMA1_Channel1->CCR |= DMA_CCR_EN;
+//     DMA1_Channel2->CCR |= DMA_CCR_EN;
+// }
+
+
+// // =============================================================================
+// // Инициализация: только MT6835 на SPI1, без fallback и auto-detect.
+// // =============================================================================
+// static inline void Encoder_SmartInit() {
+//     // После включения питания энкодеру даём стабилизироваться.
+//     delay(20);
+
+//     SPI1_Init();
+
+//     NVIC_DisableIRQ(DMA1_Channel1_IRQn);
+//     NVIC_ClearPendingIRQ(DMA1_Channel1_IRQn);
+
+//     NVIC_SetPriority(
+//         DMA1_Channel1_IRQn,
+//         NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0)
+//     );
+
+//     NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+
+//     // Необязательно: первый запрос для заполнения положения до запуска FOC.
+//     Encoder_StartTransfer();
+// }
+
+
+// // =============================================================================
+// // API совместимый с прежним кодом
+// // =============================================================================
+
+// // Возвращает угол в left-aligned 32-bit формате:
+// // 0x00000000 = 0 deg
+// // 0x80000000 = 180 deg
+// // 0xFFFFF800 = почти 360 deg
+// static inline uint32_t Encoder_GetAngle() {
+//     return POSITION_ENCODER_MT_RAW;
+// }
+
+// static inline uint8_t Encoder_GetMTStatus() {
+//     return POSITION_MT_STATUS;
+// }
+
+// static inline uint8_t Encoder_GetMTCRC() {
+//     return POSITION_MT_CRC;
+// }
+
+// static inline bool Encoder_IsDataValid() {
+//     return POSITION_MT_DATA_VALID;
+// }
+
+// // Оставлено только для совместимости со старым вызывающим кодом.
+// // Теперь MT6835 всегда единственный и "внутренний" энкодер.
+// static inline bool Encoder_IsUsingExternal() {
+//     return false;
+// }
+
+
+// // =============================================================================
+// // DMA RX complete IRQ
+// // =============================================================================
+// extern "C" void DMA1_Channel1_IRQHandler(void) {
+//     const uint32_t isr = DMA1->ISR;
+
+//     // Transfer error: завершаем SPI-транзакцию безопасно.
+//     if (isr & DMA_ISR_TEIF1) {
+//         DMA1->IFCR = DMA_IFCR_CTEIF1 | DMA_IFCR_CGIF1;
+
+//         DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+//         DMA1_Channel2->CCR &= ~DMA_CCR_EN;
+
+//         while (SPI1->SR & SPI_SR_BSY) {
+//             __NOP();
+//         }
+
+//         MT6835_ChipSelect(false);
+//         POSITION_MT_DATA_VALID = false;
+//         return;
+//     }
+
+//     if (isr & DMA_ISR_TCIF1) {
+//         DMA1->IFCR = DMA_IFCR_CGIF1;
+
+//         // RX DMA завершился. До поднятия CS обязательно ждём последний фронт SPI.
+//         while (SPI1->SR & SPI_SR_BSY) {
+//             __NOP();
+//         }
+
+//         MT6835_ChipSelect(false);
+
+//         MT6835_ParseResponse();
+
+//         // Вызывается после обновления POSITION_ENCODER_MT_RAW.
+//         POSITION_Callback();
+//     }
+// }
+
+// #endif // SMART_ENCODER_SETUP_H

@@ -1,3 +1,12 @@
+/**
+ * @file ema.h
+ * @brief Integer Exponential Moving Average low-pass filter.
+ *
+ * FilterEMA implements y += alpha*(x-y) with an 8-bit alpha (0..255) so the
+ * whole filter is multiply/shift only. Used for supply-voltage smoothing,
+ * current balance supervision and other slow feedback signals.
+ */
+
 #pragma once
 
 // Implements first-order filtering module providing both low-pass and high-pass
@@ -232,4 +241,309 @@ public:
     }
 
     inline uint8_t get_alpha() const { return alpha_; }
+};
+
+
+#pragma once
+
+#include <stdint.h>
+#include <math.h>
+
+
+// First-order float32 LPF / HPF.
+//
+// Public API intentionally mirrors the original integer FilterEMA:
+//
+// - alpha = 0   -> alpha_f = 0.0f, output holds indefinitely
+// - alpha = 255 -> alpha_f = 1.0f, LPF output equals input exactly
+//
+// LPF:
+//   y[k] = y[k - 1] + alpha * (x[k] - y[k - 1])
+//
+// HPF:
+//   dc[k] = dc[k - 1] + alpha * (x[k] - dc[k - 1])
+//   y[k]  = x[k] - dc[k]
+//
+// Unlike the original Q16.16 implementation, state and output are both
+// native float32 values; there is no internal fixed-point quantization.
+//
+// Licensed under the Apache License, Version 2.0
+// Copyright 2024 Anton Khrustalev, creapunk.com
+struct FilterEMA_f32 {
+private:
+    static constexpr float INV_ALPHA_SCALE = 1.0f / 255.0f;
+
+    float state_;      // Internal LPF / DC-estimate state.
+    float output_;     // Cached latest LPF or HPF result.
+    uint8_t alpha_;    // 0..255, mapped exactly to [0.0f .. 1.0f].
+
+    inline float alpha_float() const {
+        return static_cast<float>(alpha_) * INV_ALPHA_SCALE;
+    }
+
+public:
+    /// Default constructor: zero state, alpha = 1.0.
+    FilterEMA_f32()
+        : state_(0.0f),
+          output_(0.0f),
+          alpha_(255) {}
+
+    /**
+     * @brief Constructor with initial state and alpha.
+     * @param input_default Initial filter state/output.
+     * @param alpha_value Coefficient: 0 = hold, 255 = direct pass-through.
+     */
+    FilterEMA_f32(float input_default, uint8_t alpha_value)
+        : state_(input_default),
+          output_(input_default),
+          alpha_(alpha_value) {}
+
+    /**
+     * @brief Execute one low-pass-filter update.
+     * @param input Current input sample.
+     * @return Filtered output.
+     */
+    inline float tick_lpf(float input) {
+        const float alpha = alpha_float();
+
+        // Equivalent to:
+        // state_ = (1.0f - alpha) * state_ + alpha * input;
+        //
+        // This form needs one subtraction, one multiply and one addition,
+        // and is numerically stable for alpha close to zero.
+        state_ += alpha * (input - state_);
+        output_ = state_;
+
+        return output_;
+    }
+
+    /**
+     * @brief Execute one high-pass-filter update.
+     * @param input Current input sample.
+     * @return High-pass output, input minus updated DC estimate.
+     */
+    inline float tick_hpf(float input) {
+        const float alpha = alpha_float();
+
+        // First update the low-frequency/DC estimate.
+        state_ += alpha * (input - state_);
+
+        // Then remove it from the original input.
+        output_ = input - state_;
+
+        return output_;
+    }
+
+    /// @return Last output produced by tick_lpf() or tick_hpf().
+    inline float get_output() const {
+        return output_;
+    }
+
+    /**
+     * @brief Set alpha in the retained uint8 representation.
+     * @param alpha_value 0 -> 0.0f, 255 -> 1.0f.
+     */
+    inline void set_alpha(uint8_t alpha_value) {
+        alpha_ = alpha_value;
+    }
+
+    /// @return Raw uint8 alpha, useful for telemetry/configuration.
+    inline uint8_t get_alpha() const {
+        return alpha_;
+    }
+
+    /**
+     * @brief Reset both state and cached output.
+     * @param value New initial state in physical float units.
+     */
+    inline void reset(float value) {
+        state_ = value;
+        output_ = value;
+    }
+
+    /**
+     * @brief Calculate and set alpha from cutoff and sampling frequencies.
+     *
+     * Uses the same small-signal approximation as the original:
+     *     alpha = 2*pi*fc/fs
+     *
+     * It then quantizes this to uint8 alpha such that:
+     *     alpha_u8 = round(alpha_float * 255)
+     *
+     * @param fcut_hz Requested cutoff frequency, Hz.
+     * @param fsampl_hz Sampling frequency, Hz.
+     */
+    inline void set_cutoff(uint16_t fcut_hz, uint16_t fsampl_hz) {
+        if (fsampl_hz == 0u) {
+            return;
+        }
+
+        float alpha = TWO_PI *
+                      (static_cast<float>(fcut_hz) /
+                       static_cast<float>(fsampl_hz));
+
+        if (alpha <= 0.0f) {
+            alpha_ = 0u;
+            return;
+        }
+
+        if (alpha >= 1.0f) {
+            alpha_ = 255u;
+            return;
+        }
+
+        alpha_ = static_cast<uint8_t>(alpha * 255.0f + 0.5f);
+    }
+};
+
+
+/**
+ * @brief Adaptive-alpha first-order filter helper.
+ *
+ * This class intentionally keeps exactly the original public API and returns
+ * uint8 alpha. It is appropriate when FilterEMA::set_alpha() remains the
+ * configuration interface.
+ *
+ * Runtime result:
+ * - tick() returns alpha in 1..255 for a valid configured interval
+ * - that alpha maps to float coefficient alpha / 255.0f in FilterEMA
+ *
+ * The speed input still uses signed angle increment per tick because it is
+ * naturally an encoder-domain quantity.
+ *
+ * Licensed under the Apache License, Version 2.0
+ * Copyright 2026 Anton Khrustalev, creapunk.com
+ */
+struct FilterAdaptiveAlphaEMA_f32 {
+private:
+    static constexpr float TWO_PI_TIMES_SAFETY = 18.849555921538759f;
+    static constexpr float INV_65536 = 1.0f / 65536.0f;
+
+    uint16_t min_speed_clamp_;
+    uint16_t max_speed_clamp_;
+    float alpha_slope_;   // Float alpha per d_angle unit, before uint8 mapping.
+    uint8_t alpha_;
+
+    static inline uint16_t clamp_u16(float value) {
+        if (value <= 0.0f) {
+            return 0u;
+        }
+
+        if (value >= 65535.0f) {
+            return 65535u;
+        }
+
+        return static_cast<uint16_t>(value + 0.5f);
+    }
+
+public:
+    FilterAdaptiveAlphaEMA_f32()
+        : min_speed_clamp_(0u),
+          max_speed_clamp_(0u),
+          alpha_slope_(0.0f),
+          alpha_(1u) {}
+
+    /**
+     * @brief Configure alpha adaptation limits.
+     *
+     * The relation follows the original 3x electrical-frequency safety margin:
+     *
+     *   f_electrical = abs(d_angle) * f_sample / 65536
+     *   f_cutoff     = 3 * f_electrical
+     *   alpha_float  = 2*pi * f_cutoff / f_sample
+     *                = 6*pi * abs(d_angle) / 65536
+     *
+     * f_sample cancels from the runtime slope, but it remains necessary to
+     * convert user cutoff-frequency limits into d_angle limits.
+     *
+     * @param f_sample Sampling frequency in Hz.
+     * @param f_min_hz Minimum permitted cutoff frequency in Hz.
+     * @param f_max_hz Maximum permitted cutoff frequency in Hz.
+     */
+    FilterAdaptiveAlphaEMA_f32(
+        uint16_t f_sample,
+        uint16_t f_min_hz,
+        uint16_t f_max_hz
+    )
+        : min_speed_clamp_(0u),
+          max_speed_clamp_(0u),
+          alpha_slope_(0.0f),
+          alpha_(1u) {
+
+        if (f_sample == 0u) {
+            return;
+        }
+
+        // alpha_float = abs(d_angle) * (6*pi / 65536).
+        alpha_slope_ = TWO_PI_TIMES_SAFETY * INV_65536;
+
+        const float sample_scale = 65536.0f /
+                                   static_cast<float>(f_sample);
+
+        const uint16_t speed_at_f_min =
+            clamp_u16(static_cast<float>(f_min_hz) * sample_scale);
+
+        const uint16_t speed_at_f_max =
+            clamp_u16(static_cast<float>(f_max_hz) * sample_scale);
+
+        // Convert representable alpha endpoints into speed bounds.
+        const float alpha_min = 1.0f / 255.0f;
+        const float speed_at_alpha_1_f = alpha_min / alpha_slope_;
+        const float speed_at_alpha_255_f = 1.0f / alpha_slope_;
+
+        uint16_t speed_at_alpha_1 =
+            clamp_u16(speed_at_alpha_1_f + 1.0f);
+
+        uint16_t speed_at_alpha_255 =
+            clamp_u16(speed_at_alpha_255_f);
+
+        min_speed_clamp_ = (speed_at_f_min > speed_at_alpha_1)
+            ? speed_at_f_min
+            : speed_at_alpha_1;
+
+        max_speed_clamp_ = (speed_at_f_max < speed_at_alpha_255)
+            ? speed_at_f_max
+            : speed_at_alpha_255;
+
+        if (min_speed_clamp_ > max_speed_clamp_) {
+            min_speed_clamp_ = max_speed_clamp_;
+        }
+
+        alpha_ = 100u;
+    }
+
+    /**
+     * @brief Convert angular increment to alpha.
+     * @param d_angle Signed encoder-angle increment per sample.
+     * @return uint8 alpha in the interval 1..255.
+     */
+    inline uint8_t tick(int16_t d_angle) {
+        // Avoid undefined signed overflow for INT16_MIN.
+        int32_t signed_speed = static_cast<int32_t>(d_angle);
+        uint16_t speed = static_cast<uint16_t>(
+            signed_speed < 0 ? -signed_speed : signed_speed
+        );
+
+        if (speed < min_speed_clamp_) {
+            speed = min_speed_clamp_;
+        } else if (speed > max_speed_clamp_) {
+            speed = max_speed_clamp_;
+        }
+
+        float alpha = static_cast<float>(speed) * alpha_slope_;
+
+        if (alpha <= (1.0f / 255.0f)) {
+            alpha_ = 1u;
+        } else if (alpha >= 1.0f) {
+            alpha_ = 255u;
+        } else {
+            alpha_ = static_cast<uint8_t>(alpha * 255.0f + 0.5f);
+        }
+
+        return alpha_;
+    }
+
+    inline uint8_t get_alpha() const {
+        return alpha_;
+    }
 };

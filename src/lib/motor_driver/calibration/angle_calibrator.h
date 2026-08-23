@@ -22,6 +22,16 @@
  * The calibration removes hysteresis by collecting data in both directions
  * and builds a correction table for accurate position feedback.
  *
+ * Self-managed persistence (fully automatic, non-blocking):
+ * - On the first ticks the calibrator attempts to restore a previously dumped
+ *   table from the injected flash driver, transferring one 32-byte block per
+ *   tick. A valid record makes is_calibrated() return true immediately.
+ * - If no valid table exists in flash, a full calibration cycle starts
+ *   automatically without any external command.
+ * - When calibrate() is triggered (or auto-calibration runs), the fresh table
+ *   is persisted after validation: appended into free flash space, or the
+ *   region is erased first when it is full.
+ *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
@@ -57,7 +67,7 @@ enum CalSamplingState {
     CalSamplingState_Setup,     // Initial setup before starting rotation
     CalSamplingState_Rotating,  // Motor is rotating during calibration step
     CalSamplingState_Waiting,   // Motor is stationary, waiting for settling
-    CalSamplingState_Sampling,  // Oversampling encoder position for averaging
+    CalSamplingState_Sampling,  // Oversample encoder position for averaging
 };
 
 /**
@@ -67,7 +77,7 @@ enum {
     ANGLE_CAL_CAL_SETTLING_TIME_US = 10000,  // Settling time in microseconds
     ANGLE_CAL_CAL_SPEED_US = 2500,           // Speed in angle increments per microsecond
     ANGLE_CAL_CAL_OVERSEMPLING = 128,        // Number of samples per oversampling period
-    ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 8     // Number of test steps in Pass0
+    ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 8      // Number of test steps in Pass0
 };
 
 /**
@@ -81,14 +91,13 @@ public:
     /**
      * @brief Creates a new AngleCalibrator instance
      * @param frequency Update frequency in ticks per second
+     * @param flash Flash EEPROM driver reference injected into the calibration table
      * @return Initialized AngleCalibrator
      */
     AngleCalibrator(uint16_t freq) {
-        frequency = freq;       
-        settling_time =
-            calculate_settling_time(frequency, ANGLE_CAL_CAL_SETTLING_TIME_US);  // Convert settling time to ticks
-                                                         // Store update frequency
-        cal_table = CalibrationTable::create();                                  // Create calibration table
+        frequency = freq;
+        settling_time = calculate_settling_time(frequency, ANGLE_CAL_CAL_SETTLING_TIME_US);  // Convert settling time to ticks
+                                                                                             // Store update frequency
     }
 
     /**
@@ -97,12 +106,17 @@ public:
      * @param motor_type_step Motor type calibration step (4 for Stepper, 6 for BLDC)
      * @return Current electrical angle for motor control
      *
-     * Called at regular intervals to advance the calibration state machine.
-     * Returns the electrical angle to apply to the motor.
-     * The motor_type_step parameter determines calibration points per electrical rotation.
+     * Called at regular intervals. Every tick services exactly ONE 32-byte
+     * flash block (load scan or dump write), keeping the control loop
+     * non-blocking. The motor-driving calibration sequence only advances
+     * after an explicit or automatic calibration request.
      */
     uint16_t tick(int32_t encoder_pos, uint8_t motor_type_step) {
-        position = encoder_pos;                                // Update internal position from sensor
+        position = encoder_pos;    // Update internal position from sensor
+
+        if (!calibration_requested) {  // Idle unless a cycle was requested:
+            return angle_el;           // never drive the motor outside a request
+        }
         int32_t stable_pos = run_sampling_cycle(ang_el_step);  // Perform calibration cycle and get stable position
 
         if (stable_pos != INT32_MIN) {
@@ -124,7 +138,7 @@ public:
                         dif_max = INT32_MIN;                                                     // Reset max difference
                         dif_min = INT32_MAX;                                                     // Reset min difference
                         ang_el_step = (uint16_t)(UINT16_MAX / ANGLE_CAL_CAL_FIRST_STEP_USTEPS);  // Calculate step size
-                        cal_idx = ANGLE_CAL_CAL_FIRST_STEP_USTEPS - 1;                               // Set number of test steps
+                        cal_idx = ANGLE_CAL_CAL_FIRST_STEP_USTEPS - 1;                           // Set number of test steps
                         calibration_stage = CalStage_Pass0;                                      // Move to Pass0
                         TP_LOG("CALIBRATION: Test single pole motion");                          // Log stage transition
                     }
@@ -156,16 +170,16 @@ public:
                         }
 
                         TP_LOG_VAL("CALIBRATION: Detected motion direction: ", (long)this->direction);  // Log detected direction
-                        calibration_stage = CalStage_Pass1;   
-                                                                  // Move to Pass1
+                        calibration_stage = CalStage_Pass1;
+                        // Move to Pass1
                         ang_el_step =
                             (uint16_t)(65536u /
                                        motor_type_step);  // Calculate step size based on motor type (4 for Stepper, 6 for BLDC)
                         speed = (int32_t)(-speed * this->direction);  // Adjust speed for detected direction
                         cal_table.reset(motor_type_step);             // Reset calibration table with motor-specific step count
                         cal_table.fill_first(0, (uint16_t)stable_pos);
-                        cal_idx = 1;                                  // Reset calibration index
-                        init_pos = stable_pos;                        // Record starting position for Pass1
+                        cal_idx = 1;            // Reset calibration index
+                        init_pos = stable_pos;  // Record starting position for Pass1
                         TP_LOG("CALIBRATION: Full rotation in positive direction with sampling");  // Log stage transition
                     }
                     break;
@@ -204,10 +218,12 @@ public:
 
                 case CalStage_Check:
                     // Validate calibration data
-                    if (cal_table.check())                                                 // Perform calibration table validation
+                    if (cal_table.check()) {                                               // Perform calibration table validation
                         TP_LOG("CALIBRATION: Validation complete - motor ready for use");  // Log calibration success
-                    else
-                        TP_LOG("CALIBRATION: Validation error - motor ready for use");
+                    } else {
+                        TP_LOG("CALIBRATION: Validation error - motor ready for use");  // Log validation failure
+                    }
+                    calibration_requested = false;       // Cycle finished: release the request flag
                     calibration_stage = CalStage_Ready;  // Move to Ready stage
                     break;
 
@@ -218,6 +234,42 @@ public:
             }
         }
         return angle_el;  // Return current electrical angle
+    }
+
+    /**
+     * @brief Starts a full calibration cycle ("calibrate" command)
+     *
+     * Resets the state machine to its initial Setup stage and arms the
+     * calibration request. Until the new cycle reaches the Ready stage,
+     * is_calibrated() reports false even if a table was previously loaded
+     * from flash. After successful validation the fresh table is persisted
+     * automatically: appended into free flash space, or written from offset
+     * zero after erasing the full region when no space remains.
+     */
+    void calibrate() {
+        TP_LOG("CALIBRATION: Manual full-cycle start requested");  // Log command reception
+        calibration_requested = true;                              // Arm the calibration request
+        loaded_from_flash = false;                                 // Flash-restored data no longer counts
+        calibration_stage = CalStage_Setup;                        // Restart the overall state machine
+        cal_cycle_stage = CalSamplingState_Setup;                  // Restart the sampling sub-machine
+        time_in_state = 0;                                         // Clear any pending sub-stage countdown
+        cal_idx = 0;                                               // Clear step/sample counters
+        ang_el_step = 0;                                           // Clear angle step until Reset stage sets it
+    }
+
+    /**
+     * @brief Checks if a usable calibration is available
+     * @return true if motor is ready for normal operation
+     *
+     * Returns true either after a freshly completed calibration cycle or when
+     * a valid table was restored from flash - unless calibrate() has been
+     * triggered and the new cycle has not finished yet.
+     */
+    bool is_calibrated() const {
+        if (calibration_stage == CalStage_Ready) {  // Fresh cycle completed
+            return true;                            // Definitely calibrated
+        }
+        return loaded_from_flash && !calibration_requested;  // Restored from flash and not superseded
     }
 
     /**
@@ -236,7 +288,6 @@ public:
     uint16_t get_el_angle_correction(uint32_t pos) const {
         return cal_table.correct_el_angle(pos >> 16);  // Apply calibration correction
     }
-
 
     uint16_t get_position_correction(uint16_t pos) const {
         return cal_table.correct_position(pos);  // Apply calibration correction
@@ -267,8 +318,12 @@ private:
     int32_t dif_max = INT32_MIN;  // Maximum step difference for consistency checks
     int32_t dif_min = INT32_MAX;  // Minimum step difference for consistency checks
 
-    CalibrationTable cal_table;  // Calibration data table
+    CalibrationTable cal_table;  // Calibration data table (owns the flash state machine)
     uint16_t el_step_idx = 0;    // Target electrical angle after rotation
+
+    bool calibration_requested = false;  // True between calibrate() call and cycle completion
+    bool loaded_from_flash = false;      // True when a valid table was restored from flash
+    bool boot_resolved_ = false;         // True once the boot-time load attempt produced an outcome
 
     /**
      * @brief Decrements a counter until it reaches zero
@@ -292,12 +347,12 @@ private:
      */
     bool oversampling(int32_t position, size_t& iter, int32_t& integral, int32_t& base) {
         if (iter == ANGLE_CAL_CAL_OVERSEMPLING) {
-            base = position;  // Сохраняем абсолютную позицию (включая обороты)
-            integral = 0;     // Строго очищаем сумму!
+            base = position;  // Save the absolute position (including full turns)
+            integral = 0;     // Strictly clear the accumulator!
         }
 
-        // (uint16_t) решает проблему дрожания 65535<->0
-        // (int16_t) дает знак отклонения, не теряя при этом макро-смещение в base
+        // (uint16_t) cast solves the 65535<->0 jitter problem
+        // (int16_t) cast gives the deviation sign without losing the macro-offset kept in base
         int16_t diff = (int16_t)(uint16_t)(position - base);
         integral += diff;
 
@@ -306,7 +361,7 @@ private:
         }
 
         if (iter == 0) {
-            // Усредненную дельту прибавляем к абсолютной базе
+            // Add the averaged delta back onto the absolute base
             integral = base + (integral / (int32_t)ANGLE_CAL_CAL_OVERSEMPLING);
             return true;
         }
@@ -394,5 +449,3 @@ private:
         return INT32_MIN;  // Default return
     }
 };
-
-
