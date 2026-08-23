@@ -98,7 +98,51 @@ __attribute__((always_inline, optimize("O3"))) inline void PWM_Set_All_Low() {
     TIM1->CCER = 0x1444U;
 }
 
-// Force maximum inline speed and O3 optimization exclusively for this ultra-fast mathematical loop
+/**
+ * @brief Compute compare value and CCER channel-mask bits for one phase.
+ *
+ * Signed-duty semantics (duty in timer ticks, -period..+period):
+ * - duty > 0            : ccr = duty, both outputs on (0x05 = CCxE | CCxNE)
+ *                         -> standard complementary PWM, high-side ratio = duty/period.
+ * - duty == 0           : ccr = 0, low-side only (0x04 = CCxNE). Low-side gate is the
+ *                         inverted OCxREF, and OCxREF is always 0 here -> low-side ON 100%
+ *                         -> maximum regenerative braking.
+ * - -1 .. -(period-1)   : ccr = |duty|, low-side only. OCxREF is high for ccr/period of
+ *                         the carrier, so the low-side conducts (1 - |duty|/period):
+ *                         near -1 almost always ON (braking), fading toward freewheel.
+ * - duty <= -period     : pure freewheel — mask 0x00 disables BOTH FETs of the phase
+ *                         (glitch-free; avoids the residual 1-tick pulse that a full-period
+ *                         CCR would produce in center-aligned mode at the counter peak).
+ * @param d    Signed duty in ticks
+ * @param ccr  [out] Clamped compare value to write into CCRx
+ * @return Channel-enable bits (CCxE/CCxNE pattern) for this phase's CCER slot
+ */
+__attribute__((always_inline)) static inline uint32_t pwm_phase_ccr(int32_t d, uint32_t& ccr) {
+    // __builtin_abs compiles to a single-cycle, branchless ARM instruction (no pipeline stalls)
+    uint32_t mag = __builtin_abs(d);                 // Magnitude of the requested duty cycle
+
+    // Branchless-style clamp saturates any out-of-range request to the full period
+    if (mag > (uint32_t)PWM_TIMER_PERIOD) mag = PWM_TIMER_PERIOD;
+    ccr = mag;                                       // Compare value: |duty| (saturating)
+
+    if (d > 0) return 0x05U;                         // Active drive: high-side + low-side complementary
+    if (mag >= (uint32_t)PWM_TIMER_PERIOD) return 0x00U;  // Full negative: freewheel, all FETs OFF
+    return 0x04U;                                    // Braking blend: low-side only, weight = 1 - |duty|/period
+}
+
+
+/**
+ * @brief Ultra-fast 3-phase PWM update with signed-duty semantics.
+ *
+ * Duty range is -period..+period (in timer ticks) per phase:
+ * - duty > 0        : normal complementary drive, high-side ON ratio = duty/period.
+ * - duty == 0       : maximum regenerative braking (high-side OFF, low-side 100% ON).
+ * - duty in -1..-period : high-side always OFF; low-side conducts
+ *   (1 - |duty|/period) of the carrier -> smooth blend between braking and freewheel.
+ *   Near -1 the low-side is almost always ON (strong braking), near -period almost never.
+ * - duty <= -period : pure freewheel — both FETs of the phase are disabled (HiZ),
+ *   guaranteed glitch-free (no residual carrier pulses).
+ */
 __attribute__((always_inline, optimize("O3"))) inline void TIM1_Set_PWM_Values(
     const int16_t pwmValues[3]) {  // Define ultra-fast PWM update function
     int32_t d0 = pwmValues[0];     // Load requested duty cycle for Phase A
@@ -112,21 +156,18 @@ __attribute__((always_inline, optimize("O3"))) inline void TIM1_Set_PWM_Values(
         }  // End of protection condition checks
     }  // End of pointer safety check
 
-    // __builtin_abs compiles to a single-cycle, branchless ARM instruction (no pipeline stalls)
-    uint32_t abs0 = __builtin_abs(d0);  // Get absolute value for Phase A duty cycle
-    uint32_t abs1 = __builtin_abs(d1);  // Get absolute value for Phase B duty cycle
-    uint32_t abs2 = __builtin_abs(d2);  // Get absolute value for Phase C duty cycle
+    uint32_t ccr0, ccr1, ccr2;                                        // Compare values computed per phase
+    uint32_t m0 = pwm_phase_ccr(d0, ccr0);                            // Phase A: compare value + channel mask
+    uint32_t m1 = pwm_phase_ccr(d1, ccr1);                            // Phase B: compare value + channel mask
+    uint32_t m2 = pwm_phase_ccr(d2, ccr2);                            // Phase C: compare value + channel mask
 
-    // Clamping using ternary operators is highly optimized by GCC into branchless IT (If-Then) blocks
-    TIM1->CCR1 = (abs0 > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : abs0;  // Clamp and write Phase A register
-    TIM1->CCR2 = (abs1 > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : abs1;  // Clamp and write Phase B register
-    TIM1->CCR3 = (abs2 > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : abs2;  // Clamp and write Phase C register
+    TIM1->CCR1 = ccr0;  // Write Phase A compare register
+    TIM1->CCR2 = ccr1;  // Write Phase B compare register
+    TIM1->CCR3 = ccr2;  // Write Phase C compare register
 
-    // Fast mask generation: CC4E is bit 12 (0x1000U). We unconditionally keep CH4 enabled.
-    uint32_t ccer_mask = 0x1000U;          // Start with CH4 Output Compare enable bit set
-    ccer_mask |= 0x04U | (d0 > 0);         // CH1: CC1NE is always 1 (0x04), CC1E is 1 only if duty is positive
-    ccer_mask |= (0x04U | (d1 > 0)) << 4;  // CH2: Shifted by 4 bits for CC2NE and CC2E
-    ccer_mask |= (0x04U | (d2 > 0)) << 8;  // CH3: Shifted by 8 bits for CC3NE and CC3E
+    // Fast mask assembly: CC4E is bit 12 (0x1000U), kept unconditionally for the ADC trigger.
+    // Per-phase masks occupy 4-bit slots: xE bit0/xNE bit2 -> <<0, <<4, <<8.
+    uint32_t ccer_mask = 0x1000U | m0 | (m1 << 4) | (m2 << 8);
 
     // Direct assignment is significantly faster than Read-Modify-Write (|=) because we know all exact bit states
     TIM1->CCER = ccer_mask;  // Overwrite CCER register completely in one atomic hardware cycle
