@@ -66,6 +66,7 @@ TunePulseHeart TUNE_HEART(PWM_TIMER_FREQ_HZ,
  */
 TunePulseHeart* volatile g_heart_ptr = &TUNE_HEART;
 
+#include "target/cln17_v3/bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
 #include "target/cln17_v3/interrupt_setup.h"
 
 #include "target/cln17_v3/can_setup.h"  // Include CAN-FD driver setup
@@ -359,7 +360,7 @@ inline void tunepulse_init() {
     // here, so if no interrupt advances the calibration state machine this
     // loop will spin forever (see CODE_ISSUES.md).
     while (TUNE_HEART.driver_phy.current_sense.is_calibrated() == false) {
-        // TUNE_HEART.tick();
+        BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
     }
 
     SerialUSB.println("Current sensing setup complete");
@@ -373,7 +374,7 @@ inline void tunepulse_init() {
     TUNE_HEART.driver.setup_status.set_driver_status(OperationStatus::DriverCalibration);
     TUNE_HEART.driver.start_motor_calibration();
     while (TUNE_HEART.driver.get_motor_status() != MotorStatus::Success) {
-        // TUNE_HEART.tick();
+        BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
         if (TUNE_HEART.driver.get_motor_status() == MotorStatus::CalibError) {
             SerialUSB.println("Motor calibration Error");
             break;

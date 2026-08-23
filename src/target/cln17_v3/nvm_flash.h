@@ -233,37 +233,107 @@ private:
         return success;
     }
 
+    // ========================================================================
+    // Private ECC-guard infrastructure.
+    //
+    // On STM32G4 a read of an ERASED flash word raises a double-bit ECC error
+    // which triggers an NMI; the stock NMI handler just stalls the system.
+    // The guard below makes such reads recoverable: the custom NMI handler
+    // patches the stacked context (skips the faulting LDR, injects the natural
+    // 'erased' pattern 0xFFFFFFFF into its destination register) and lets
+    // read_section() report a clean failure to the caller instead of crashing.
+    // ========================================================================
+
+    static constexpr uint32_t GUARD_ARMED   = 0xECCECCECUL;  ///< Guard-window marker.
+    static constexpr uint32_t ERASED_WORD32 = 0xFFFFFFFFUL;  ///< Value of an erased word.
+
+    static volatile uint32_t ecc_guard_state;  ///< Non-zero only inside a guarded load.
+    static volatile bool     ecc_fault_flag;   ///< Set by the NMI handler on recovery.
+
+    /**
+     * @brief Arms the ECC trap for one speculative read.
+     *
+     * Any double-bit ECC NMI raised between enter/exit is recovered by the NMI
+     * handler instead of stalling the CPU.
+     */
+    static void ecc_guard_enter() {
+        ecc_fault_flag = false;
+        ecc_guard_state = GUARD_ARMED;
+        __asm volatile("" ::: "memory");  // Compile barrier: arm strictly before the load
+        __DSB();
+        __ISB();
+    }
+
+    /**
+     * @brief Disarms the guard and reports whether an ECC error was recovered.
+     * @return true if the guarded load faulted with a double-bit ECC error.
+     */
+    static bool ecc_guard_exit() {
+        // DSB guarantees the synchronously-raised NMI has been taken and fully
+        // processed BEFORE we sample the flag (ARM recommendation for faults).
+        __DSB();
+        __ISB();
+        ecc_guard_state = 0;
+        return ecc_fault_flag;
+    }
+
+    /**
+     * @brief Single isolated 32-bit load used for speculative reads.
+     *
+     * Kept noinline so the faulting instruction is ALWAYS the well-known LDR
+     * emitted inside this function body - this lets the NMI handler decode and
+     * patch the stacked context deterministically. Low-register constraints
+     * ("l") force r0-r7 so the destination register always lands in the basic
+     * exception stack frame (r0-r3, r12) and is therefore restorable.
+     *
+     * @param addr Absolute address to read.
+     * @return Word value; 0xFFFFFFFF if the location was erased/recovered.
+     */
+    __attribute__((noinline)) static uint32_t guarded_load(volatile const uint32_t* addr) {
+        uint32_t v;
+        __asm volatile("ldr %0, [%1]" : "=&l"(v) : "l"(addr));
+        return v;
+    }
+
     /**
      * @brief Generic read core: reads one 32-bit word at (rel_base + addr),
      *        bounds-checked against the caller's section limit.
+     *
+     * ERASED-FLASH SAFE: reading never-programmed (erased) words does NOT
+     * hardfault anymore. The double-bit ECC NMI is recovered internally,
+     * @p value receives 0xFFFFFFFF (-1 as int32_t) and the function returns
+     * false, so callers can simply skip/treat the location as empty.
+     *
      * @param rel_base Offset of the section inside the EEPROM area.
      * @param limit    Size of the section (upper bound for addr).
      * @param addr     Section-relative address to read.
-     * @param value    Output word.
-     * @return true on success.
+     * @param value    Output word (0xFFFFFFFF when erased/unreadable).
+     * @return true if a programmed word was read, false if erased/ECC-faulted.
      */
     static bool read_section(uint32_t rel_base, uint32_t limit,
                              uint32_t addr, int32_t* value) {
-        if (!in_bounds(addr, 4, limit)) {
+        if (!in_bounds(addr, 4, limit) || (addr % 4 != 0)) {
             return false;
         }
 
-        uint32_t hw_addr = EEPROM_BASE + rel_base + addr;
+        const volatile uint32_t* hw_addr =
+            reinterpret_cast<volatile const uint32_t*>(EEPROM_BASE + rel_base + addr);
 
-        // ВНИМАНИЕ: Если по адресу hw_addr память стерта (или там мусор),
-        // чтение вызовет HARDFAULT из-за ошибки ECC.
-        // Ловить это через FLASH->ECCR бесполезно, процессор упадет раньше.
-        // Эту функцию можно вызывать ТОЛЬКО если вы уверены,
-        // что данные туда были ранее корректно записаны.
+        // Спекулятивное чтение под защитой ECC-guard: если слово стерто,
+        // NMI-обработчик вернет управление со значением-заполнителем
+        // 0xFFFFFFFF и выставит флаг ошибки - вместо HARDFAULT/NMI-зависания.
+        ecc_guard_enter();
+        uint32_t raw = guarded_load(hw_addr);
+        bool ok = !ecc_guard_exit();
 
-        *value = *reinterpret_cast<volatile int32_t*>(hw_addr);
+        *value = static_cast<int32_t>(raw);
 
         // Флаг одинарной ошибки ECC (исправляется аппаратно на лету)
-        if (FLASH->ECCR & FLASH_ECCR_ECCC) {
-            FLASH->ECCR = FLASH_ECCR_ECCC; // Сбрасываем флаг (записью 1)
+        if (ok && (FLASH->ECCR & FLASH_ECCR_ECCC)) {
+            FLASH->ECCR |= FLASH_ECCR_ECCC; // Сбрасываем флаг (записью 1)
         }
 
-        return true;
+        return ok;
     }
 
 public:
@@ -319,6 +389,121 @@ public:
     static bool user_read(uint32_t addr, int32_t* value) {
         return read_section(NVM_USER_SECTION_OFFSET, NVM_USER_SECTION_SIZE, addr, value);
     }
+
+    // ========================================================================
+    // NMI recovery for flash double-bit ECC errors (erased-word reads).
+    // Called from NMI_Handler below with a pointer to the stacked exception
+    // frame. Public so it can also be chained from an existing custom NMI
+    // handler if one is ever introduced at board level.
+    // ========================================================================
+
+    /**
+     * @brief Recovers from a double-bit ECC NMI raised inside guarded_load().
+     *
+     * Behaviour:
+     * - If FLASH_ECCR_ECCD is set AND the ECC guard window is armed, the
+     *   faulting instruction (the isolated LDR in guarded_load) is decoded
+     *   from the stacked PC, its destination register is patched with the
+     *   'erased' pattern 0xFFFFFFFF and the stacked PC is advanced past it.
+     *   Execution resumes cleanly and read_section() returns false.
+     * - Any other NMI source (e.g. clock security system) is NOT claimed:
+     *   flags are acknowledged and the CPU stalls exactly like the stock
+     *   weak Default_Handler would.
+     *
+     * @param stacked_ctx Pointer to the stacked basic exception frame
+     *                    (r0,r1,r2,r3,r12,lr,pc,xPSR).
+     */
+    static void nmi_ecc_recover(uint32_t stacked_ctx) {
+        uint32_t* frame = reinterpret_cast<uint32_t*>(stacked_ctx);
+
+        const bool ours = (FLASH->ECCR & FLASH_ECCR_ECCD) &&
+                          (ecc_guard_state == GUARD_ARMED);
+
+        // Acknowledge both ECC status flags (write-1-to-clear) in any case,
+        // so a stale flag can never re-trigger anything later.
+        FLASH->ECCR |= (FLASH_ECCR_ECCC | FLASH_ECCR_ECCD);
+
+        if (!ours) {
+            // Not our fault (unknown NMI source): behave like Default_Handler.
+            while (true) {
+                __NOP();
+            }
+        }
+
+        // Decode the faulting instruction at the stacked return address.
+        const uint32_t pc = frame[6];
+        const uint16_t op = *(volatile uint16_t*)pc;
+
+        int32_t  rt         = -1;  // Destination register of the aborted load
+        uint32_t insn_size  = 2;   // Thumb instruction size
+
+        if ((op & 0xF800u) == 0x6800u || (op & 0xF800u) == 0x4800u) {
+            // 16-bit LDR Rt,[Rn,#imm5] / LDR Rt,literal
+            rt = op & 0x7u;
+        } else {
+            const uint16_t op2 = *(volatile uint16_t*)(pc + 2u);
+            if ((op & 0xFFF0u) == 0xF8D0u || (op & 0xFFFFu) == 0xF8DFu) {
+                // 32-bit LDR.W Rt,[Rn,#imm12] / LDR.W Rt,literal
+                rt        = (op2 >> 12) & 0xFu;
+                insn_size = 4;
+            }
+        }
+
+        if (rt < 0) {
+            // Unrecognized instruction shape: do NOT touch the context,
+            // stall like the default handler rather than corrupting state.
+            while (true) {
+                __NOP();
+            }
+        }
+
+        // The aborted load never wrote its destination register: inject the
+        // natural 'erased' word. r0-r3 live at frame[0..3], r12 at frame[4].
+        // (guarded_load is constrained to low registers, but r12 is handled
+        // too for robustness against future changes.)
+        if (rt <= 3) {
+            frame[rt] = ERASED_WORD32;
+        } else if (rt == 12) {
+            frame[4] = ERASED_WORD32;
+        }
+        // Registers r4-r11 are not part of the basic stack frame; the load's
+        // destination stays indeterminate there - acceptable, since the value
+        // of an aborted load is undefined anyway.
+
+        // Skip the faulting instruction and resume normal execution.
+        frame[6] = pc + insn_size;
+
+        ecc_fault_flag = true;
+    }
 };
+
+// ============================================================================
+// ECC-guard storage + NMI vector wiring (single-TU header: tunepulse.h).
+// ============================================================================
+
+volatile uint32_t FlashG4_LL::ecc_guard_state = 0;
+volatile bool     FlashG4_LL::ecc_fault_flag  = false;
+
+/** C-linkage trampoline called by the naked NMI_Handler with the stack frame. */
+extern "C" void flashg4_ll_nmi_dispatch(uint32_t stacked_ctx) {
+    FlashG4_LL::nmi_ecc_recover(stacked_ctx);
+}
+
+/**
+ * Strong override of the weak NMI_Handler from the startup files.
+ *
+ * Selects the active stack pointer and hands the stacked exception frame to
+ * the flash-ECC recovery dispatcher. NOTE: this claims ALL NMIs - currently
+ * nothing else in this firmware uses them (no CSS/other NMI users); if that
+ * ever changes, chain the other source through here or via nmi_ecc_recover().
+ */
+extern "C" __attribute__((naked)) void NMI_Handler(void) {
+    __asm volatile(
+        "tst     lr, #4          \n"
+        "ite     eq              \n"
+        "mrseq   r0, msp         \n"
+        "mrsne   r0, psp         \n"
+        "b       flashg4_ll_nmi_dispatch \n");
+}
 
 #endif // FLASH_EEPROM_HW_HPP

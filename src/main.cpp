@@ -30,23 +30,29 @@
  *    intentionally disabled in this test configuration.
  */
 void setup() {
-    delay(2000);
+    BOOT::init_button();
+
+    // Original 2000 ms power-rail / USB stabilization delay; the button is
+    // polled meanwhile, so holding SW1 already during power-up counts
+    // towards the 3 s bootloader trigger.
+    const uint32_t stabilize_start_ms = millis();
+    while ((millis() - stabilize_start_ms) < 2000U) {
+        BOOT::poll();  // may never return (enters USB DFU bootloader)
+        delay(BOOT::POLL_INTERVAL_MS);
+    }
 
     SerialUSB.begin();
     tunepulse_init();
-
-
-
 }
 
 /**
  * @brief Main application loop, called repeatedly by the Arduino core
  *        after setup() completes.
  *
- * Currently empty: all work in this test-suite configuration is driven by
- * interrupts / background peripherals, so there is no periodic foreground
- * processing to perform here.
+ * Currently empty except for the SW1 (PC6) hold-to-bootloader poll: keeping
+ * the button pressed for more than 3 seconds at any time de-initializes all
+ * peripherals and jumps into the built-in USB DFU system bootloader.
  */
 void loop() {
-
+    BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
 }
