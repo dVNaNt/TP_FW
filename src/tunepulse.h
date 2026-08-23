@@ -184,13 +184,25 @@ inline void tunepulse_init() {
     delay(100);
 
     // Calibration-table persistence setup:
-    // reserve storage for up to 4096 calibration records and bind the raw
-    // internal-flash operations used by the dump/persistence layer.
-    TUNE_HEART.calibration_dump.set_max_size(4096);
+    // bind the raw internal-flash operations of the CALIBRATION partition used
+    // by the dump/persistence layer. The partition size comes from the NVM
+    // layout defines (nvm_flash.h) so it stays flexible and single-sourced.
+    TUNE_HEART.calibration_dump.set_max_size(FlashG4_LL::calib_section_size());
     TUNE_HEART.calibration_dump.set_callback()
-        .erase_cb(&FlashG4_LL::erase)
-        .read_cb(&FlashG4_LL::read)
-        .write_cb(&FlashG4_LL::write);
+        .erase_cb(&FlashG4_LL::calibration_erase)
+        .read_cb(&FlashG4_LL::calibration_read)
+        .write_cb(&FlashG4_LL::calibration_write);
+
+    // User-data persistence setup (system_dump):
+    // a second independent FlashEEPROM instance bound to the USER-DATA
+    // partition callbacks. All bounds/safety logic is handled inside the NVM
+    // flash driver per-section, exactly like for the calibration partition.
+    TUNE_HEART.system_dump.set_max_size(FlashG4_LL::user_section_size());
+    TUNE_HEART.system_dump.set_callback()
+        .erase_cb(&FlashG4_LL::user_erase)
+        .read_cb(&FlashG4_LL::user_read)
+        .write_cb(&FlashG4_LL::user_write);
+
     // Angle calibration persistence is fully self-managed: on the first ticks
     // the calibrator restores a valid table from flash (is_calibrated() -> true)
     // or automatically starts a fresh calibration cycle. No manual call needed.

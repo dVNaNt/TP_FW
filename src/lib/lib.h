@@ -12,6 +12,7 @@
  * - @c motor_params       : motor description (type, pole pairs, ...).
  * - @c driver             : FOC current/voltage control driver (DriverPWM).
  * - @c calibration_dump   : flash-backed storage for calibration tables.
+ * - @c system_dump        : flash-backed storage for generic user data (2 KB).
  * - @c angle_calibrator   : electrical-angle calibration state machine.
  * - @c position_controller: cascaded position/velocity/current synthesizer.
  * - @c driver_phy         : physical layer (PWM, ADC current sense, supply).
@@ -102,6 +103,16 @@ public:
      * into the calibrator during construction.
      */
     FlashEEPROM calibration_dump;
+
+    /**
+     * Flash-backed persistent storage for generic USER data.
+     * A second, fully independent FlashEEPROM instance bound (in the board
+     * layer) to the dedicated user-data partition callbacks. All bounds
+     * checking and address translation is done inside the NVM flash driver,
+     * so this instance can never touch the calibration partition and vice
+     * versa. Size comes from the NVM_USER_SECTION_SIZE layout define.
+     */
+    FlashEEPROM system_dump;
 
     AngleCalibrator angle_calibrator;                                   ///< Electrical-angle calibration state machine.
     MotorVectorSynthesis position_controller = MotorVectorSynthesis();  ///< Cascaded position/velocity/current controller.
