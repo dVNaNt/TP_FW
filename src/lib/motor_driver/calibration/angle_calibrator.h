@@ -22,15 +22,15 @@
  * The calibration removes hysteresis by collecting data in both directions
  * and builds a correction table for accurate position feedback.
  *
- * Self-managed persistence (fully automatic, non-blocking):
- * - On the first ticks the calibrator attempts to restore a previously dumped
- *   table from the injected flash driver, transferring one 32-byte block per
- *   tick. A valid record makes is_calibrated() return true immediately.
- * - If no valid table exists in flash, a full calibration cycle starts
- *   automatically without any external command.
- * - When calibrate() is triggered (or auto-calibration runs), the fresh table
- *   is persisted after validation: appended into free flash space, or the
- *   region is erased first when it is full.
+ * Flash-backed lifecycle (non-blocking, 64 bytes transferred per tick):
+ * - The default CalStage_CheckMemory stage scans flash for the latest valid
+ *   table (0xFA2E marker + sample count header, strictly monotonic samples).
+ *   A hit moves straight to Ready; a miss parks the machine in Reset waiting
+ *   for an external trigger. "load_calibration" restarts the scan manually.
+ * - calibrate() always restarts the cycle at Setup. After validation the new
+ *   table MUST be persisted ("dump_calibration" runs automatically) before
+ *   the machine reaches Ready: appended into free space, or erase + rewrite
+ *   from offset zero when no room remains.
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
@@ -55,6 +55,9 @@ enum CalStage {
     CalStage_Check = 5,  // Verify calibration data consistency
     CalStage_Ready = 6,  // Calibration complete and ready for operation
     CalStage_Error = 7,  // Error occurred during calibration
+
+    CalStage_CheckMemory = 8,  // Non-blocking flash scan for a stored table (default stage)
+    CalStage_Save = 9,         // Persist the freshly validated table into flash
 };
 
 /**
@@ -94,10 +97,12 @@ public:
      * @param flash Flash EEPROM driver reference injected into the calibration table
      * @return Initialized AngleCalibrator
      */
-    AngleCalibrator(uint16_t freq) {
+    AngleCalibrator(uint16_t freq, FlashEEPROM* flash = nullptr) {
         frequency = freq;
         settling_time = calculate_settling_time(frequency, ANGLE_CAL_CAL_SETTLING_TIME_US);  // Convert settling time to ticks
-                                                                                             // Store update frequency
+        cal_table = CalibrationTable::create();  // Fresh RAM table
+        cal_table.attach_flash(flash);           // Bind the persistence driver
+        cal_table.begin_load();                  // Default stage scans flash on boot
     }
 
     /**
@@ -106,17 +111,53 @@ public:
      * @param motor_type_step Motor type calibration step (4 for Stepper, 6 for BLDC)
      * @return Current electrical angle for motor control
      *
-     * Called at regular intervals. Every tick services exactly ONE 32-byte
-     * flash block (load scan or dump write), keeping the control loop
+     * Called at regular intervals. Every tick services exactly 64 bytes of
+     * flash traffic (load scan or dump write), keeping the control loop
      * non-blocking. The motor-driving calibration sequence only advances
      * after an explicit or automatic calibration request.
      */
     uint16_t tick(int32_t encoder_pos, uint8_t motor_type_step) {
         position = encoder_pos;    // Update internal position from sensor
 
-        if (!calibration_requested) {  // Idle unless a cycle was requested:
-            return angle_el;           // never drive the motor outside a request
+        switch (calibration_stage) {
+            case CalStage_CheckMemory:  // Boot-time flash scan, 64 bytes per tick
+                if (cal_table.load_tick()) {
+                    if (cal_table.is_loaded()) {   // Branch 1: valid table -> straight to Ready
+                        TP_LOG("CALIBRATION: Valid table restored from flash");
+                        loaded_from_flash = true;
+                        calibration_stage = CalStage_Ready;
+                    } else {                       // Branch 2: none/invalid -> park in Reset
+                        TP_LOG("CALIBRATION: No valid table in flash - waiting for calibrate()");
+                        calibration_stage = CalStage_Reset;
+                    }
+                }
+                return angle_el;  // Motor is never driven while scanning memory
+
+            case CalStage_Save:  // Persist the freshly validated table, 64 bytes per tick
+                if (cal_table.dump_tick()) {
+                    if (cal_table.dump_ok()) {
+                        TP_LOG("CALIBRATION: Table saved to flash");
+                        calibration_requested = false;       // Cycle fully finished
+                        calibration_stage = CalStage_Ready;  // Ready only after a successful save
+                    } else {
+                        TP_LOG("CALIBRATION: ERROR - flash save failed");
+                        calibration_stage = CalStage_Error;
+                    }
+                }
+                return angle_el;
+
+            case CalStage_Reset:  // Idle parking spot until an external trigger arrives
+                if (!calibration_requested) return angle_el;
+                break;
+
+            case CalStage_Ready:
+            case CalStage_Error:
+                return angle_el;
+
+            default:
+                break;
         }
+
         int32_t stable_pos = run_sampling_cycle(ang_el_step);  // Perform calibration cycle and get stable position
 
         if (stable_pos != INT32_MIN) {
@@ -217,14 +258,15 @@ public:
                     break;
 
                 case CalStage_Check:
-                    // Validate calibration data
-                    if (cal_table.check()) {                                               // Perform calibration table validation
-                        TP_LOG("CALIBRATION: Validation complete - motor ready for use");  // Log calibration success
+                    // Validate calibration data, then require persistence before Ready
+                    if (cal_table.check()) {
+                        TP_LOG("CALIBRATION: Validation complete - saving to flash");
+                        cal_table.begin_dump();          // Dump is mandatory for the Ready stage
+                        calibration_stage = CalStage_Save;
                     } else {
-                        TP_LOG("CALIBRATION: Validation error - motor ready for use");  // Log validation failure
+                        TP_LOG("CALIBRATION: Validation error");  // Log validation failure
+                        calibration_stage = CalStage_Error;
                     }
-                    calibration_requested = false;       // Cycle finished: release the request flag
-                    calibration_stage = CalStage_Ready;  // Move to Ready stage
                     break;
 
                 case CalStage_Error:
@@ -258,6 +300,34 @@ public:
     }
 
     /**
+     * @brief "load_calibration" command: bind a memory region and restore
+     *
+     * Receives the flash driver pointer and restarts the non-blocking scan.
+     * When a valid table is found (FA2E marker, sample count matches the
+     * stored header, samples strictly monotonic), is_calibrated() starts
+     * returning true - unless calibrate() has been triggered meanwhile.
+     */
+    void load_calibration(FlashEEPROM* mem) {
+        cal_table.attach_flash(mem);          // Re-bind the memory pointer
+        cal_table.begin_load();               // Restart the table scan
+        loaded_from_flash = false;            // Previous restore no longer counts
+        calibration_requested = false;
+        calibration_stage = CalStage_CheckMemory;
+    }
+
+    /**
+     * @brief "dump_calibration" command: persist the RAM table into flash
+     *
+     * Serializes {FA2E magic | count, packed monotonic samples, metadata}.
+     * Checks free space first: appends there when the record fits, otherwise
+     * erases the whole region and rewrites from offset zero on clean pages.
+     */
+    void dump_calibration() {
+        cal_table.begin_dump();               // Arm the non-blocking dump engine
+        calibration_stage = CalStage_Save;    // tick() services it 64 bytes per call
+    }
+
+    /**
      * @brief Checks if a usable calibration is available
      * @return true if motor is ready for normal operation
      *
@@ -272,12 +342,13 @@ public:
         return loaded_from_flash && !calibration_requested;  // Restored from flash and not superseded
     }
 
-    /**
-     * @brief Checks if calibration is complete
-     * @return true if motor is ready for normal operation
-     */
-    bool is_ready() const {
-        return calibration_stage == CalStage_Ready;  // Check if in Ready stage
+
+    bool is_settling() const {
+        return calibration_stage == CalStage_CheckMemory;  // Check if in Ready stage
+    }
+
+    bool is_idle() const {
+        return calibration_stage == CalStage_Reset;  // Check if in Ready stage
     }
 
     /**
@@ -297,7 +368,7 @@ private:
     uint16_t frequency;    // Update frequency in ticks per second
     int32_t position = 0;  // Current encoder position reading
 
-    CalStage calibration_stage = CalStage_Setup;                // Current stage of overall calibration process
+    CalStage calibration_stage = CalStage_CheckMemory;          // Current stage of overall calibration process
     CalSamplingState cal_cycle_stage = CalSamplingState_Setup;  // Current sub-stage of calibration cycle
 
     uint16_t angle_el = 0;     // Electrical angle of motor (0..65535)

@@ -29,6 +29,7 @@
 #pragma once // Prevent multiple compiler inclusions of this header file
 
 #include "../../common.h" // Include common project definitions, utilities, and macros
+#include "../../drivers/flash_eeprom.h" // EEPROM-emulation driver used for calibration-table persistence
 
 #ifndef CAL_TABLE_CAPACITY // Check if CAL_TABLE_CAPACITY is not defined externally
 #define CAL_TABLE_CAPACITY 200 // Maximum number of calibration points allocated in memory
@@ -68,6 +69,129 @@ public: // Make the following methods public for external module access
 
         return t; // Return the fully initialized instance
     } // End of create() method
+
+    // --------------------------------------------------------------------------
+    // Flash persistence (non-blocking, exactly 64 bytes moved per tick call)
+    //
+    // Stored-record word stream (tables append from offset 0 upward, forming a
+    // chain; the LAST fully valid record in the chain is the actual one):
+    //   w0     : 0xFA2E0000 | sample_count - table marker + sample count
+    //   w1..wN : samples packed 2 x uint16_t per word (odd tail padded 0xFFFF)
+    //   tail   : {el_angle_div, offst_val | max_deviation << 16, offst_idx}
+    // --------------------------------------------------------------------------
+
+    /**
+     * @brief Injects the flash driver used for load/dump transfers
+     * @param f Pointer to FlashEEPROM instance (nullptr disables persistence)
+     */
+    void attach_flash(FlashEEPROM* f) { flash = f; } // Store the driver pointer
+
+    /**
+     * @brief Arms a flash scan for the newest valid calibration table
+     *
+     * The scan advances 64 bytes per load_tick() call until the table chain
+     * ends (erased word), the region is exhausted, or a corrupt header shows up.
+     */
+    void begin_load() {
+        load_ok = false;                         // Invalidate the previous scan result
+        f_mode = flash ? MODE_LOAD : MODE_IDLE;  // Arm the scanner only with a driver
+        f_addr = 0;                              // Restart the byte cursor
+        f_cnt = 0;                               // Reset the word-parser state
+        f_meta = false;
+    }
+
+    /**
+     * @brief Services one 64-byte chunk of the flash scan
+     * @return true when the scan is finished (outcome via is_loaded())
+     */
+    bool load_tick() {
+        if (f_mode != MODE_LOAD) return true;         // Not armed: already done
+        if (flash->get_max_size() == 0) return false; // Driver not configured yet: wait
+        for (int b = 0; b < 2 && f_mode == MODE_LOAD; ++b) { // 2 x 32 B = 64 bytes per tick
+            if (f_addr + 32 > flash->get_max_size()) { f_mode = MODE_IDLE; break; } // Region end
+            uint32_t w[8];
+            if (!flash->read_block(f_addr, w)) { f_mode = MODE_IDLE; break; }       // HW fault
+            f_addr += 32;                                                          // Advance cursor
+            for (int i = 0; i < 8 && f_mode == MODE_LOAD; ++i) scan_word(w[i]);    // Parse words
+        }
+        return f_mode != MODE_LOAD; // true once scanning stopped (done or aborted)
+    }
+
+    /**
+     * @brief Result of the last completed flash scan
+     * @return true when a valid table was restored into the RAM arrays
+     */
+    bool is_loaded() const { return load_ok; }
+
+    /**
+     * @brief Arms a dump of the RAM table into flash ("dump_calibration")
+     *
+     * First locates free space (64 bytes per tick); the record is appended
+     * there when it fits, otherwise the whole region is erased and rewritten
+     * from offset zero so the fresh table always lands on clean pages.
+     */
+    void begin_dump() {
+        store_ok = false;                                           // Clear the previous outcome
+        if (!flash || cal_size == 0) return;                        // Nothing to persist
+        f_total = 1 + (cal_size + 1) / 2 + 3;                       // Header + samples + trailer words
+        if ((f_total + 7) / 8 * 32 > flash->get_max_size()) return; // Record can never fit: fail fast
+        f_free = flash->get_max_size();                             // Assume no free tail yet
+        f_addr = 0;                                                 // Space scan starts at zero
+        f_mode = MODE_SPACE;                                        // Phase 1: locate free space
+    }
+
+    /**
+     * @brief Services one 64-byte chunk of the space scan / record write
+     * @return true when the dump is finished (outcome via dump_ok())
+     */
+    bool dump_tick() {
+        if (f_mode == MODE_SPACE) {                                // Phase 1: find first erased word
+            for (int b = 0; b < 2 && f_mode == MODE_SPACE; ++b) {  // 64 bytes per tick
+                if (f_addr + 32 > flash->get_max_size()) f_mode = MODE_IDLE; // Scanned everything
+                else {
+                    uint32_t w[8];
+                    if (!flash->read_block(f_addr, w)) f_mode = MODE_IDLE;   // HW fault
+                    else {
+                        f_addr += 32;
+                        for (int i = 0; i < 8 && f_mode == MODE_SPACE; ++i)
+                            if (w[i] == 0xFFFFFFFFul) {            // First unprogrammed word
+                                f_free = f_addr - 32 + i * 4;      // Free tail starts here
+                                f_mode = MODE_IDLE;
+                            }
+                    }
+                }
+            }
+            if (f_mode == MODE_SPACE) return false;                // Scan continues next tick
+            uint32_t need = (f_total + 7) / 8 * 32;                // Size padded to write granularity
+            if (f_free + need <= flash->get_max_size()) {          // Fits into the free tail: append
+                f_wri = f_free; f_word = 0; f_mode = MODE_WRITE;
+            } else if (flash->erase(0xDEADC0DE)) {                 // Full: wipe and rewrite cleanly
+                TP_LOG("CALIBRATION: Flash full - erasing region");
+                f_wri = 0; f_word = 0; f_mode = MODE_WRITE;
+            }                                                      // Erase failed: stays IDLE = fail
+            return f_mode != MODE_WRITE;
+        }
+        if (f_mode == MODE_WRITE) {                                // Phase 2: stream the record out
+            for (int r = 0; r < 2 && f_word < f_total; ++r) {      // 2 records = 64 bytes per tick
+                uint32_t rec[8];
+                uint32_t n = f_total - f_word < 8 ? f_total - f_word : 8; // Words left in this record
+                for (uint32_t i = 0; i < n; ++i) rec[i] = stream_word(f_word + i);
+                for (uint32_t i = n; i < 8; ++i) rec[i] = 0xFFFFFFFFul;   // Pad with erased value
+                if (!flash->write(f_wri, rec)) { f_mode = MODE_IDLE; return true; } // HW fault: fail
+                f_wri += 32;                                       // Advance record address
+                f_word += 8;                                       // Advance stream index
+            }
+            if (f_word >= f_total) { store_ok = true; f_mode = MODE_IDLE; } // Record fully written
+            return f_mode == MODE_IDLE;
+        }
+        return true;                                               // Not armed: already done
+    }
+
+    /**
+     * @brief Result of the last completed dump
+     * @return true when the record was written to flash completely
+     */
+    bool dump_ok() const { return store_ok; }
 
     /**
      * @brief Resets the calibration table for a new calibration process
@@ -394,6 +518,93 @@ private: // Restrict direct access to internal state memory and helper routines
     uint16_t offst_val; // Absolute offset to align raw calibration data to mathematical zero
     uint16_t max_deviation; // Maximum absolute modular deviation tracked from ideal theoretical values
     size_t temp_idx; // Temporary state index used strictly during sequential data collection checks
+
+    // ---------------------- Flash persistence engine state ----------------------
+    enum { MODE_IDLE = 0, MODE_LOAD, MODE_SPACE, MODE_WRITE }; // Transfer phase selector
+
+    FlashEEPROM* flash = nullptr; // Injected EEPROM-emulation driver
+    uint8_t f_mode = MODE_IDLE;   // Current transfer phase
+    bool load_ok = false;         // Load outcome: usable table restored from flash
+    bool store_ok = false;        // Dump outcome: record written completely
+    bool f_meta = false;          // Parser currently inside the metadata trailer
+    bool f_seq = false;           // Candidate is strictly monotonic so far
+    uint32_t f_addr = 0;          // Byte cursor within the logical flash region
+    uint32_t f_cnt = 0;           // Items remaining (candidate samples / trailer words)
+    uint32_t f_sidx = 0;          // Sample index inside the current candidate
+    uint16_t f_prev = 0;          // Previous sample kept for the monotonicity check
+    uint32_t f_m[3] = {0, 0, 0};  // Staging buffer for the metadata trailer
+    uint32_t f_total = 0;         // Total word count of the record being written
+    uint32_t f_wri = 0;           // Byte address of the next 32-byte record
+    uint32_t f_word = 0;          // Stream index of the next serialized word
+    uint32_t f_free = 0;          // First free byte offset found by the space scan
+
+    /**
+     * @brief Consumes one scanned word of the stored table chain
+     * @param w Raw 32-bit word read from flash
+     * @return false when the scan must stop (chain end or corrupted header)
+     *
+     * Candidates are streamed straight into the RAM arrays; an invalid one is
+     * simply never committed, so the newest valid table naturally wins.
+     */
+    bool scan_word(uint32_t w) {
+        if (f_cnt == 0 && !f_meta) {                           // Expecting a table header
+            if (w == 0xFFFFFFFFul) { f_mode = MODE_IDLE; return false; } // Erased: end of chain
+            if ((w & 0xFFFF0000ul) != 0xFA2E0000ul) { f_mode = MODE_IDLE; return false; } // Corrupt
+            uint32_t n = w & 0xFFFFul;                         // Sample count of the candidate
+            if (n == 0 || n > CAL_TABLE_CAPACITY) { f_mode = MODE_IDLE; return false; } // Bad size
+            f_cnt = n; f_sidx = 0; f_seq = true;               // Start collecting samples
+            return true;
+        }
+        if (!f_meta) {                                         // Two packed samples per word
+            for (int h = 0; h < 2 && f_sidx < f_cnt; ++h) {
+                uint16_t s = (uint16_t)(w >> (16 * h));        // Unpack one half-word sample
+                if (f_sidx > 0 && (int16_t)(s - f_prev) <= 0)  // Strict circular monotonicity
+                    f_seq = false;                             // Duplicate/backstep: invalid
+                cal_table[f_sidx++] = s;                       // Stage the sample in RAM
+                f_prev = s;
+            }
+            if (f_sidx >= f_cnt) { f_meta = true; f_cnt = 3; } // Samples done: expect trailer
+            return true;
+        }
+        f_m[3 - f_cnt] = w;                                    // Stage one metadata word
+        if (--f_cnt == 0) {                                    // Trailer complete
+            f_meta = false;
+            if (f_seq) commit_candidate();                     // Promote only valid candidates
+        }
+        return true;
+    }
+
+    /**
+     * @brief Promotes the last staged candidate into the live correction data
+     */
+    void commit_candidate() {
+        el_angle_div = f_m[0] ? f_m[0] : 1;                    // Guard against divide-by-zero
+        offst_val = (uint16_t)f_m[1];                          // Restore normalization offset
+        max_deviation = (uint16_t)(f_m[1] >> 16);              // Restore deviation base value
+        offst_idx = f_m[2] < f_sidx ? f_m[2] : 0;              // Bounds-checked start index
+        cal_size = f_sidx;                                     // Adopt the candidate length
+        temp_idx = 0;                                          // Reset sequential-fill tracker
+        load_ok = true;                                        // Scan produced a usable table
+    }
+
+    /**
+     * @brief Serializes one word of the record being written to flash
+     * @param i Absolute word index within the record stream
+     * @return Serialized 32-bit word number i
+     */
+    uint32_t stream_word(uint32_t i) const {
+        uint32_t sw = (cal_size + 1) / 2;                      // Packed-sample word count
+        if (i == 0) return 0xFA2E0000ul | (uint32_t)cal_size;  // Header: FA2E marker + sample count
+        if (i <= sw) {                                         // Packed sample pairs
+            uint32_t j = (i - 1) * 2;                          // Index of the pair's first sample
+            uint32_t hi = (j + 1 < cal_size) ? (uint32_t)cal_table[j + 1] : 0xFFFFul; // Odd-tail pad
+            return (uint32_t)cal_table[j] | (hi << 16);        // Two little-endian halves
+        }
+        i -= sw + 1;                                           // Metadata trailer follows samples
+        if (i == 0) return (uint32_t)el_angle_div;
+        if (i == 1) return (uint32_t)offst_val | ((uint32_t)max_deviation << 16);
+        return (uint32_t)offst_idx;
+    }
 
     /**
      * @brief Retrieves calibration value by index relative to offset

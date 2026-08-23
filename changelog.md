@@ -398,3 +398,21 @@ FLASH: 48320 bytes (36.87% of 131072 bytes): +1096 bytes
 RAM: 7404 bytes (22.60% of 32768 bytes): +48 bytes
 
 
+## 2026-08-23 - Flash-backed calibration lifecycle
+**Changes:**
+- Added calibrate/load_calibration/dump_calibration commands
+- CalStage_CheckMemory default stage scanning flash for FA2E tables
+- mandatory dump before Ready
+- append-or-erase persistence at 64 bytes per tick
+
+**Reasoning:**
+- Restore calibration from flash without recalibration on every power cycle
+
+**Notes:**
+- Record format: w0=0xFA2E0000|count, packed monotonic samples, restore-metadata trailer
+- newest valid table wins
+
+FLASH: 58752 bytes (44.82% of 131072 bytes): +10432 bytes
+RAM: 7644 bytes (23.33% of 32768 bytes): +240 bytes
+
+

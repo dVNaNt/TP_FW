@@ -92,9 +92,9 @@ typedef void (*LED_Control_Callback)(bool state);
  */
 struct TunePulseHeart {
 public:
-    Frequency clock_;               ///< System/PWM timing reference (170 MHz core, programmable carrier).
-    Motor motor_params;             ///< Motor description parameters (type, poles, limits).
-    DriverPWM driver;               ///< FOC control driver operating on driver_phy.
+    Frequency clock_;    ///< System/PWM timing reference (170 MHz core, programmable carrier).
+    Motor motor_params;  ///< Motor description parameters (type, poles, limits).
+    DriverPWM driver;    ///< FOC control driver operating on driver_phy.
 
     /**
      * Flash-backed persistent storage for calibration tables.
@@ -105,15 +105,16 @@ public:
 
     AngleCalibrator angle_calibrator;                                   ///< Electrical-angle calibration state machine.
     MotorVectorSynthesis position_controller = MotorVectorSynthesis();  ///< Cascaded position/velocity/current controller.
-    MotorStatus motor_status;       ///< Current high-level motor status (calibration lifecycle).
-    uint16_t angle_el_ = 0;         ///< Last computed electrical rotor angle [0..65535] mapped to 0..360 deg.
+    MotorStatus motor_status;               ///< Current high-level motor status (calibration lifecycle).
+    uint16_t angle_el_ = 0;                 ///< Last computed electrical rotor angle [0..65535] mapped to 0..360 deg.
     Vec2D_f32 pwm_voltage_ab = {0.0, 0.0};  ///< Last commanded alpha-beta voltage vector [V].
-    float current_target_a = 0.5;   ///< Target q-axis current for the FOC loop [A].
+    float current_target_a = 0.5;           ///< Target q-axis current for the FOC loop [A].
     LED_Control_Callback led_callbacks_[3] = {nullptr, nullptr, nullptr};  ///< Registered LED callbacks (index 0..2).
+    volatile bool is_running = false;
 
 public:
-    PhyDriverPWM driver_phy;        ///< Physical driver layer: PWM output, phase-current ADCs, supply-voltage ADC.
-    Encoder encoder;                ///< Magnetic encoder interface (SPI).
+    PhyDriverPWM driver_phy;  ///< Physical driver layer: PWM output, phase-current ADCs, supply-voltage ADC.
+    Encoder encoder;          ///< Magnetic encoder interface (SPI).
 
     /**
      * @brief Construct the application heart.
@@ -135,8 +136,8 @@ public:
      */
     TunePulseHeart(uint16_t freq_hz, uint16_t pwm_res, float max_sup, float iA_fs, float iB_fs, float iC_fs)
         : clock_(170000000, freq_hz),
-          driver(motor_params, driver_phy),                // Pass feedback and motor reference
-          angle_calibrator(freq_hz),    // Inject flash driver into the calibration table
+          driver(motor_params, driver_phy),              // Pass feedback and motor reference
+          angle_calibrator(freq_hz, &calibration_dump),  // Inject flash driver into the calibration table
           driver_phy(iA_fs, iB_fs, iC_fs, 128, max_sup),
           motor_status(MotorStatus::NotCalibrated) {}
 
@@ -178,9 +179,22 @@ public:
      */
     void calibrate() { angle_calibrator.calibrate(); }
 
-    int32_t el_sign = -1;      ///< Sign correction applied to the electrical angle readout.
-    int32_t err_sign = -1;     ///< Sign correction applied to the mechanical encoder position.
-    int32_t encoder_pos = 0;   ///< Last corrected mechanical encoder position (counts).
+    /**
+     * @brief "load_calibration" command: rebind the flash driver and restore
+     *
+     * Restarts the non-blocking scan of the memory region; on success the
+     * stored table becomes active and is_calibrated() returns true.
+     */
+    void load_calibration(FlashEEPROM* mem) { angle_calibrator.load_calibration(mem); }
+
+    /**
+     * @brief "dump_calibration" command: persist the current RAM table to flash
+     */
+    void dump_calibration() { angle_calibrator.dump_calibration(); }
+
+    int32_t el_sign = -1;     ///< Sign correction applied to the electrical angle readout.
+    int32_t err_sign = -1;    ///< Sign correction applied to the mechanical encoder position.
+    int32_t encoder_pos = 0;  ///< Last corrected mechanical encoder position (counts).
 
     /**
      * @brief Periodic control-loop entry point (called once per fresh sample).
@@ -199,13 +213,16 @@ public:
      *    to the physical layer.
      */
     void tick() {
+        if (is_running)
+            return;
+        is_running = true;
         if (driver_phy.current_sense.is_changed() & driver_phy.supply_voltage.is_changed()) {
             driver_phy.tick();
 
-            uint32_t real_raw_ang = encoder.get_angle();               // Raw mechanical angle (no sign fix)
-            int32_t real_pos = encoder.get_position() * err_sign;      // Corrected mechanical position
+            uint32_t real_raw_ang = encoder.get_angle();           // Raw mechanical angle (no sign fix)
+            int32_t real_pos = encoder.get_position() * err_sign;  // Corrected mechanical position
             encoder_pos = real_pos;
-            int32_t real_raw_pos = real_pos * err_sign;                // NOTE: double-applies err_sign
+            int32_t real_raw_pos = real_pos * err_sign;  // NOTE: double-applies err_sign
 
             // ========================================================================
             // Motor controller tick logic
@@ -237,17 +254,24 @@ public:
                     targt = current_target_a = 0.0;
                     break;
                 case MotorStatus::NotCalibrated:
+                    angle_calibrator.tick(real_raw_pos, (int16_t)driver.motor.get_motor_type());
                     if (driver_phy.current_sense.is_calibrated() == false) {
                         // Current offsets unknown yet: short all phases (INFINITY
                         // sentinel handled by the PWM backend) and bail out.
                         pwm_voltage_ab.a = pwm_voltage_ab.b = INFINITY;
                         driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
+                        is_running = false;
                         return;
                     } else if (driver.motor.get_status() == MotorStatus::Success) {
                         TP_LOG("Going to MotorStatus::ElectricCalibrationDone from MotorStatus::NotCalibrated");
-                        motor_status = MotorStatus::Success;
-                        angle_calibrator.calibrate();
-                        targt = current_target_a = 0.5;
+
+                        if (!angle_calibrator.is_settling()) {
+                            if (!angle_calibrator.is_calibrated()) {
+                                angle_calibrator.calibrate();
+                                targt = current_target_a = 0.5;
+                            }
+                            motor_status = MotorStatus::Success;
+                        }
                     }
                     break;
                 default: {
@@ -255,6 +279,7 @@ public:
                     // (active brake / idle) and skip FOC this cycle.
                     pwm_voltage_ab.a = pwm_voltage_ab.b = -0.1;
                     driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
+                    is_running = false;
                     return;
                 }
             }
@@ -264,5 +289,6 @@ public:
             pwm_voltage_ab = driver.tick_control_foc((int16_t)angle_el_, targt);
             driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
         }
+        is_running = false;
     }
 };
