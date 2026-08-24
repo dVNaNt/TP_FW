@@ -69,12 +69,22 @@ public:
 
 private:
     void init_foc_controller() {
-        float R_ohm = motor.get_total_resistance();
+        // All control constants come from the Motor parameter structure
+        // (identified values, or flash-restored ones when available).
+        float R_ohm = motor.get_resistance();
         float L_h = motor.get_effective_inductance();
-        const float torque_nm = 0.042f;
+        float torque_nm = motor.get_max_torque();
         const float rated_current_a = 1.5f;
-        float pole_pairs = (drv.motor_sel_.get_motor_type() == MotorType_BLDC) ? 7.0f : 50.0f;
-        // foc_current_ = FocCurrentController(R_ohm, L_h, torque_nm, rated_current_a, pole_pairs);
+        float pole_pairs = (float)motor.get_pole_pairs();
+
+        // Fallbacks for parameters not yet identified/stored.
+        if (torque_nm <= 0.0f) {
+            torque_nm = 0.042f;
+        }
+        if (pole_pairs <= 0.0f) {
+            pole_pairs = (drv.motor_sel_.get_motor_type() == MotorType_BLDC) ? 7.0f : 50.0f;
+        }
+
         foc_current_ = FocCurrentController(drv.motor_sel_.get_motor_type(), R_ohm, L_h, torque_nm, rated_current_a, pole_pairs);
         setup_status.set_driver_status(OperationStatus::Ready);
     }
@@ -102,11 +112,14 @@ public:
         lpf_id_.set_alpha(alpha);
         lpf_iq_.set_alpha(alpha);
 
-        int16_t filtered_id = med3_id_.tick(current_dq_raw.flux);
-        int16_t filtered_iq = med3_iq_.tick(current_dq_raw.torque);
+        // int16_t filtered_id = med3_id_.tick(current_dq_raw.flux);
+        // int16_t filtered_iq = med3_iq_.tick(current_dq_raw.torque);
 
-        (int16_t)lpf_id_.tick_lpf(filtered_id);
-        (int16_t)lpf_iq_.tick_lpf(filtered_iq);
+        float filtered_id = lpf_id_.tick_lpf(current_dq_raw.flux);
+        float filtered_iq = lpf_iq_.tick_lpf(current_dq_raw.torque);
+
+        // lpf_id_.tick_lpf(current_dq_raw.flux);
+        // lpf_iq_.tick_lpf(current_dq_raw.torque);
 
         Vec2D_f32 current_dq_filt = Vec2D_f32(filtered_id, filtered_iq);
 
@@ -138,9 +151,9 @@ public:
                 Vec2D_f32 current_ab_filt = current_dq_filt.rotate(angle_sincos);
                 MotorStatus prev_status = motor_calib_status;
 
-
-                motor_calib.tick_calibration(drv.get_supply_volts(), power, current_ab_filt.a, current_ab_filt.b, current_dq_raw.flux, current_dq_raw.torque,
-                                             motor_calib_status, motor, setup_status, angle_);
+                motor_calib.tick_calibration(drv.get_supply_volts(), power, current_ab_filt.a, current_ab_filt.b,
+                                             current_dq_raw.flux, current_dq_raw.torque, motor_calib_status, motor, setup_status,
+                                             angle_);
 
                 if (prev_status != MotorStatus::Success && motor_calib_status == MotorStatus::Success) {
                     init_foc_controller();

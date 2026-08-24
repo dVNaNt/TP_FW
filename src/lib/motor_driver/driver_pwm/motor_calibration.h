@@ -33,7 +33,6 @@ static constexpr float CAL_UNDERPOWER_RATIO = 0.001f;
 // Теперь это безразмерная доля Vbus, из которой на каждом тике получается шаг в Вольтах.
 static constexpr float CAL_VOLTAGE_RAMP_STEP_RATIO = 0.0005;
 
-
 static constexpr float CAL_VOLTAGE_LIMIT_RATIO = 0.5f;
 
 // Сos(45°) для коррекции амплитуды тестового вектора.
@@ -107,6 +106,13 @@ private:
     timeout_timer timeout_;
     StabilityCheck stability_check_;
     PhyDriverPWM& drv;
+
+    // Flash-restored profile snapshot (captured before identification overwrites
+    // the values) - used for the post-calibration "same motor" decision.
+    bool cfg_valid_ = false;    ///< A parameter profile was restored from system_dump.
+    MotorType cfg_type_;        ///< Stored motor type.
+    PhasePattern cfg_pattern_;  ///< Stored phase pattern.
+    float cfg_resistance_ohm_;  ///< Stored winding resistance [Ohm].
 
     float max_power_watts_;
     float soft_power_limit_watts_;
@@ -222,11 +228,17 @@ public:
     void start_calibration(Motor& motor, MotorStatus& status_tracker, int16_t& angle_ref, float motor_ohmic_power_watts) {
         status_tracker = MotorStatus::SoftWarmup;
 
+        // Snapshot the flash-restored profile (if any) BEFORE identification
+        // overwrites these fields - needed later for the "same motor" check.
+        cfg_valid_ = motor.is_loaded();
+        cfg_type_ = motor.get_motor_type();
+        cfg_pattern_ = motor.get_phase_pattern();
+        cfg_resistance_ohm_ = motor.get_resistance();
+
         reset_voltage();
         stability_check_.reset();
         is_resistance_correction_ = false;  // Сбрасываем флаг
 
-        max_power_watts_ = motor_ohmic_power_watts;
         soft_power_limit_watts_ = motor_ohmic_power_watts * 0.75f;
 
         // #REPLACE with just simple storing value + value threshold check
@@ -236,8 +248,6 @@ public:
 
         angle_ref = CAL_ANGLE_45D;
         timeout_.set_timeout(WARMUP_TIMEOUT);
-
-TP_LOG("[CALIB] Start -> SoftWarmup");
     }
 
     void tick_calibration(float supply_voltage_volts,
@@ -269,8 +279,6 @@ TP_LOG("[CALIB] Start -> SoftWarmup");
                     timeout_.tick() == 0) {
                     target_current_amps_ = measured_current_amps;
 
-                    TP_LOG("[CALIB] Warmup complete - current stable");
-
                     timeout_.set_timeout(SETTLE_TIMEOUT);
                     status_tracker = MotorStatus::Settle;
                 } else {
@@ -287,12 +295,7 @@ TP_LOG("[CALIB] Start -> SoftWarmup");
                 voltage_d_out_volts_ = voltage_volts_;
                 voltage_q_out_volts_ = 0.0f;
 
-                if (timeout_.get_timeout() == SETTLE_TIMEOUT) {
-                    TP_LOG("[CALIB] SoftWarmup -> Settle");
-                }
-
                 if (timeout_.tick() == 0) {
-                    TP_LOG("[CALIB] Settle -> ResistanceMeasure");
                     status_tracker = MotorStatus::ResistanceMeasure;
                     timeout_.set_timeout(CAL_OVERSAMPLING_POW2);
                 }
@@ -316,15 +319,12 @@ TP_LOG("[CALIB] Start -> SoftWarmup");
                 voltage_q_out_volts_ = 0.0f;
 
                 if (power_watts >= max_power_watts_) {
-                    TP_LOG("[CALIB] ERROR: OP duting rotation");
                     set_error(status_tracker, motor, setup_status);
                     break;
                 }
 
                 if (timeout_.tick() == 0) {
                     angle_ref = slow_rotation_angle_target_;
-
-                    TP_LOG("[CALIB] Slow rotation complete");
 
                     timeout_.set_timeout(SETTLE_TIMEOUT);
                     status_tracker = MotorStatus::Settle;
@@ -341,13 +341,7 @@ TP_LOG("[CALIB] Start -> SoftWarmup");
                 voltage_d_out_volts_ = holding_voltage_volts_;
                 voltage_q_out_volts_ = 0.0f;
 
-                if (timeout_.get_timeout() == SETTLE_TIMEOUT) {
-                    TP_LOG("[CALIB] InductanceMeasure -> InductanceMeasureWarmup");
-                }
-
                 if (timeout_.tick() == 0) {
-                    TP_LOG("[CALIB] InductanceMeasureWarmup -> InductanceMeasureD");
-
                     hfi_gen_.set_frequency_target(HFI_FREQ_1);
 
                     setup_hfi_state(MotorStatus::InductanceMeasureD, status_tracker, motor, INDUCTANCE_MEASURE_CYCLES_F1);
@@ -357,8 +351,7 @@ TP_LOG("[CALIB] Start -> SoftWarmup");
 
             case MotorStatus::InductanceMeasureD: {
                 process_hfi_axis(current_d_amps, true, false, supply_voltage_volts, status_tracker, motor, setup_status,
-                                 "D-axis F1 complete, switching to D-axis F2", MotorStatus::InductanceMeasureD2,
-                                 INDUCTANCE_MEASURE_CYCLES_F2, &Ld_f1_, HFI_FREQ_1);
+                                 MotorStatus::InductanceMeasureD2, INDUCTANCE_MEASURE_CYCLES_F2, &Ld_f1_, HFI_FREQ_1);
                 break;
             }
 
@@ -366,8 +359,7 @@ TP_LOG("[CALIB] Start -> SoftWarmup");
                 hfi_gen_.set_frequency_target(HFI_FREQ_2);
 
                 process_hfi_axis(current_d_amps, true, false, supply_voltage_volts, status_tracker, motor, setup_status,
-                                 "D-axis F2 complete, switching to Q-axis F1", MotorStatus::InductanceMeasureQ,
-                                 INDUCTANCE_MEASURE_CYCLES_F1, &Ld_f2_, HFI_FREQ_2);
+                                 MotorStatus::InductanceMeasureQ, INDUCTANCE_MEASURE_CYCLES_F1, &Ld_f2_, HFI_FREQ_2);
                 break;
             }
 
@@ -376,8 +368,7 @@ TP_LOG("[CALIB] Start -> SoftWarmup");
 
                 // Изменено false, true -> false, false
                 process_hfi_axis(current_q_amps, false, false, supply_voltage_volts, status_tracker, motor, setup_status,
-                                 "Q-axis F1 complete, switching to Q-axis F2", MotorStatus::InductanceMeasureQ2,
-                                 INDUCTANCE_MEASURE_CYCLES_F2, &Lq_f1_, HFI_FREQ_1);
+                                 MotorStatus::InductanceMeasureQ2, INDUCTANCE_MEASURE_CYCLES_F2, &Lq_f1_, HFI_FREQ_1);
                 break;
             }
 
@@ -385,7 +376,7 @@ TP_LOG("[CALIB] Start -> SoftWarmup");
                 hfi_gen_.set_frequency_target(HFI_FREQ_2);
 
                 process_hfi_axis(current_q_amps, false, true, supply_voltage_volts, status_tracker, motor, setup_status,
-                                 "Q-axis F2 complete, finalizing inductance", MotorStatus::Success, 0, &Lq_f2_, HFI_FREQ_2);
+                                 MotorStatus::Success, 0, &Lq_f2_, HFI_FREQ_2);
                 break;
             }
 
@@ -403,7 +394,6 @@ private:
         hfi_accum_amps_ = 0.0f;
         hfi_periods_ = 0;
         hfi_gen_.reset();
-
     }
 
     void process_hfi_axis(float measured_current_amps,
@@ -413,7 +403,6 @@ private:
                           MotorStatus& status_tracker,
                           Motor& motor,
                           DriverStatus& setup_status,
-                          const char* log_msg,
                           MotorStatus next_state,
                           uint32_t next_timeout,
                           float* result_L,
@@ -512,18 +501,14 @@ private:
             if (i_peak_amps > MIN_MEASUREMENT_CURRENT_AMPS) {
                 float X_L_sq = (impedance_ohms * impedance_ohms) - (resistance_ohms * resistance_ohms);
 
-                if (X_L_sq > 0.0f) {
+                if (X_L_sq > 0.0f)
                     *result_L = (sqrtf(X_L_sq) / omega_rad_per_sec) * 1e6f;  // uH
-                } else {
+                else
                     *result_L = 0.0f;  // R dominated Z entirely (shouldn't happen at 1kHz+)
-                    TP_LOG("[CALIB] WARNING: Impedance dominated by resistance.");
-                }
+
             } else {
                 *result_L = 0.0f;
-                TP_LOG("[CALIB] WARNING: HFI current is too low for reliable inductance measurement");
             }
-
-            TP_LOG(log_msg);
 
             // [OPT] Используем кэшированный amp_mv вместо повторного вызова norm2mv
 
@@ -535,19 +520,14 @@ private:
 
                 float diff_q = (Lq_f1_ > 0.0f) ? fabsf(Lq_f1_ - Lq_f2_) / Lq_f1_ : 0.0f;
 
-                if (diff_d > 0.3f || diff_q > 0.3f) {
-                    TP_LOG("[CALIB] WARNING: >30% variance between frequencies. Possible core saturation.");
-                }
-
                 // Average the 1kHz and 1.5kHz results
                 float final_Ld = (Ld_f1_ + Ld_f2_) * 0.5f;
                 float final_Lq = (Lq_f1_ + Lq_f2_) * 0.5f;
 
-
-                // motor.set_inductance_d(final_Ld);
-                // motor.set_inductance_q(final_Lq);
-                // motor.set_effective_inductance((final_Ld + final_Lq) / 2.0f);
-
+                // Store the identified D/Q inductances into the motor profile
+                // (measurements are computed in microhenries, stored in H).
+                motor.set_inductance_d(final_Ld * 1e-6f);
+                motor.set_inductance_q(final_Lq * 1e-6f);
                 finish_calibration_success(status_tracker, motor, setup_status);
             } else {
                 setup_hfi_state(next_state, status_tracker, motor, next_timeout);
@@ -558,13 +538,9 @@ private:
     void start_slow_rotation(int16_t target_angle, float power_limit_watts) {
         slow_rotation_angle_target_ = target_angle;
         slow_rotation_power_limit_watts_ = power_limit_watts;
-
-        TP_LOG("[CALIB] Starting slow rotation");
     }
 
     void set_error(MotorStatus& status_tracker, Motor& motor, DriverStatus& setup_status) {
-        TP_LOG("[CALIB] ERROR Motor R L detection");
-
         setup_status.set_driver_status(OperationStatus::Error);
         status_tracker = MotorStatus::CalibError;
         motor.set_status(MotorStatus::CalibError);
@@ -594,17 +570,29 @@ private:
 
         angle_ref = 0;  // Align to D-axis
 
-        TP_LOG("[CALIB] Starting inductance measurement");
-
         status_tracker = MotorStatus::InductanceMeasureWarmup;
         timeout_.set_timeout(SETTLE_TIMEOUT);
     }
 
     void finish_calibration_success(MotorStatus& status_tracker, Motor& motor, DriverStatus& setup_status) {
-        TP_LOG("[CALIB] Calibration completed successfully");
-
         status_tracker = MotorStatus::Success;
         motor.set_status(MotorStatus::Success);
+
+        // Same-motor identification: compare the freshly identified set with
+        // the profile restored from system_dump. Matching connection/type and
+        // resistance within 15% => the same motor: keep the stored
+        // configuration (Motor Identified). Otherwise overwrite it by
+        // appending a new record - the loader always picks the newest one.
+        bool same = cfg_valid_ && (motor.get_motor_type() == cfg_type_) && (motor.get_phase_pattern() == cfg_pattern_);
+        if (same) {
+            float r0 = cfg_resistance_ohm_;
+            float r1 = motor.get_resistance();
+            same = (fabsf(r0) > 1e-6f) && (fabsf(r1 - r0) <= 0.15f * fabsf(r0));
+        }
+
+        if (!same)
+            motor.begin_save();  // Non-blocking, serviced 8 words per tick
+
         reset_voltage();
     }
 
@@ -619,8 +607,6 @@ private:
         is_resistance_correction_ = true;
 
         voltage_volts_ *= 0.5f;
-
-        TP_LOG("[CALIB] Starting differential resistance correction");
 
         reset_measure_accumulators();
         status_tracker = MotorStatus::Settle;
@@ -637,13 +623,9 @@ private:
                                     DriverStatus& setup_status,
                                     int16_t& angle_ref) {
         // First cycle: check if the counter is initialized (initially equals CAL_OVERSAMPLING_POW2, i.e. 64)
-        if (timeout_.get_timeout() == CAL_OVERSAMPLING_POW2) {
+        if (timeout_.get_timeout() == CAL_OVERSAMPLING_POW2)
             // Reset all current accumulators to start clean averaging
             reset_measure_accumulators();
-
-            // Log the start of the resistance measurement process and the expected number of samples (64)
-            TP_LOG("[CALIB] Starting resistance measurement (64 samples)");
-        }
 
         // Accumulate current samples for phases A and B into accumulators for subsequent averaging
         accumulate_measure_currents(current_a_amps, current_b_amps);
@@ -657,10 +639,7 @@ private:
             float ia_amps = get_measure_current_a();
             float ib_amps = get_measure_current_b();
 
-            // [OPT] Cache norm2mv result — used twice: for v_uv and for TP_LOG_VAL
             float applied_voltage_volts = voltage_corrected_volts;
-
-            TP_LOG("[CALIB] Resistance current averaging complete");
 
             // Compute corrected voltage in microvolts (normalized → mV, then multiply by 1000)
             if (is_resistance_correction_) {
@@ -685,11 +664,7 @@ private:
                 // Напряжение полностью сокращается при точном V2 = V1/2
                 if (delta_i_amps > 0.0f && abs_first_i_amps > MIN_MEASUREMENT_CURRENT_AMPS) {
                     corrected_total_resistance_ohms = corrected_total_resistance_ohms * abs_first_i_amps / (2.0f * delta_i_amps);
-                } else {
-                    TP_LOG("[CALIB] WARNING: Resistance correction skipped due to invalid current delta");
                 }
-
-                TP_LOG("[CALIB] Differential resistance correction complete");
 
                 // Граница старого Motor API: передаём миллиОмы.
                 motor.set_total_resistance(corrected_total_resistance_ohms);
@@ -709,8 +684,6 @@ private:
                 float resistance_b_ohms =
                     (fabsf(ib_amps) > MIN_MEASUREMENT_CURRENT_AMPS) ? (applied_voltage_volts / ib_amps) : INFINITY;
 
-                TP_LOG("[CALIB] Raw phase resistance results");
-
                 // If angle equals 16384 (~+90 electrical degrees) — always the first pass for any motor
                 if (angle_ref == CAL_ANGLE_45D) {
                     // Set the timeout counter to 1800 cycles (time allocated for slow rotation)
@@ -724,9 +697,6 @@ private:
                         // Граница старого Motor API: передаём миллиОмы.
                         motor.set_total_resistance(average_resistance_ohms);
 
-                        TP_LOG("[CALIB] First pass phases are balanced");
-                        TP_LOG("[CALIB] Starting +45 degree verification rotation");
-
                         // Slowly rotate the vector by 30° for verification. Target angle 16384 (current + 45° el. (BLDC: +30°))
                         start_slow_rotation(CAL_ANGLE_90D, power_watts);
 
@@ -734,9 +704,6 @@ private:
                         return;
                     } else {  // Possibly stepper but in wrong phase pattern, fixing phase commutation
                         set_voltage(voltage_corrected_volts);  // Fix voltage level to seamless transfer - mult power by 2
-
-                        TP_LOG("[CALIB] First pass phases are unbalanced");
-                        TP_LOG("[CALIB] Searching alternate phase pattern");
 
                         // Slowly rotate the vector backwards to angle -24576, rotation by 45°
                         start_slow_rotation(-CAL_ANGLE_135D, power_watts);
@@ -746,15 +713,11 @@ private:
                         if ((ia_amps * 0.25f) >= ib_amps) {
                             drv.motor_sel_.set_phase_pattern(PhasePattern_CBA);
 
-                            TP_LOG("[CALIB] Selected phase pattern: CBA");
-
                             // Set target angle to -16384 (corresponds to CBA connection)
                             angle_ref = -CAL_ANGLE_90D;
                             return;
                         } else if ((ib_amps * 0.25f) >= ia_amps) {
                             drv.motor_sel_.set_phase_pattern(PhasePattern_ACB);
-
-                            TP_LOG("[CALIB] Selected phase pattern: ACB");
 
                             // Set target angle to -32768 (corresponds to ACB connection)
                             angle_ref = CAL_ANGLE_180D;
@@ -778,9 +741,6 @@ private:
                         // Set motor type in the selector as BLDC
                         drv.motor_sel_.set_motor_type(MotorType_BLDC);
 
-                        // Log successful BLDC motor detection
-                        TP_LOG("[CALIB] Motor type detected: BLDC");
-
                         trigger_resistance_correction(status_tracker, motor, ia_amps, ib_amps);
                         return;
                     }
@@ -789,9 +749,6 @@ private:
                     // (Expected: iA — negative dominant, iB close to 0 (any sign). Resistance was already calculated in first
                     // pass)
                     else if ((ib_amps * 0.0625f) > ia_amps) {
-                        // Log successful stepper motor detection
-                        TP_LOG("[CALIB] Motor type detected: STEPPER");
-
                         trigger_resistance_correction(status_tracker, motor, ia_amps, ib_amps);
                         return;
                     }
@@ -807,19 +764,11 @@ private:
                         // Write averaged resistance into the motor profile
                         motor.set_total_resistance(average_resistance_ohms);
 
-                        // Log stepper motor detection with balanced phases
-                        TP_LOG("[CALIB] Motor type detected: STEPPER");
-
                         trigger_resistance_correction(status_tracker, motor, ia_amps, ib_amps);
                         return;
                     }
                 }
-            } else {
-                TP_LOG("[CALIB] Resistance measurement rejected: insufficient input power");
             }
-
-            // If none of checks success - motor error
-            TP_LOG("[CALIB] Motor phase/type verification failed");
 
             drv.motor_sel_.set_motor_type(MotorType_Invalid);
             set_error(status_tracker, motor, setup_status);

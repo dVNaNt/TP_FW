@@ -127,7 +127,7 @@ write_limit_max = 1.000000
 [var4]
 name = TUNE_HEART.angle_calibrator.calibration_stage
 tracked_name = TUNE_HEART.angle_calibrator.calibration_stage
-address = 536876848
+address = 536877492
 type = 1
 color = 313589279
 should_update_from_elf = true
@@ -161,15 +161,15 @@ write_limit_max = 1.000000
 [var6]
 name = TUNE_HEART.current_target_a
 tracked_name = TUNE_HEART.current_target_a
-address = 536877524
+address = 536877636
 type = 7
 color = 3012792362
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.100000
-secondary_value_to_write = -1.500000
+value_to_write = 2.000000
+secondary_value_to_write = 0.010000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
@@ -178,7 +178,7 @@ write_limit_max = 1.000000
 [var7]
 name = TUNE_HEART.driver.angle_
 tracked_name = TUNE_HEART.driver.angle_
-address = 536876740
+address = 536877392
 type = 4
 color = 2141708102
 should_update_from_elf = true
@@ -195,7 +195,7 @@ write_limit_max = 1.000000
 [var8]
 name = TUNE_HEART.driver.current_ab.cos
 tracked_name = TUNE_HEART.driver.current_ab.cos
-address = 536876760
+address = 536877412
 type = 7
 color = 3996911876
 should_update_from_elf = true
@@ -212,7 +212,7 @@ write_limit_max = 1.000000
 [var9]
 name = TUNE_HEART.driver.current_ab.sin
 tracked_name = TUNE_HEART.driver.current_ab.sin
-address = 536876764
+address = 536877416
 type = 7
 color = 3019702206
 should_update_from_elf = true
@@ -229,7 +229,7 @@ write_limit_max = 1.000000
 [var10]
 name = TUNE_HEART.driver.current_dq.cos
 tracked_name = TUNE_HEART.driver.current_dq.cos
-address = 536876752
+address = 536877404
 type = 7
 color = 491470293
 should_update_from_elf = true
@@ -246,7 +246,7 @@ write_limit_max = 1.000000
 [var11]
 name = TUNE_HEART.driver.current_dq.sin
 tracked_name = TUNE_HEART.driver.current_dq.sin
-address = 536876756
+address = 536877408
 type = 7
 color = 4190077760
 should_update_from_elf = true
@@ -263,7 +263,7 @@ write_limit_max = 1.000000
 [var12]
 name = TUNE_HEART.driver.foc_current_.R
 tracked_name = TUNE_HEART.driver.foc_current_.R
-address = 536876460
+address = 536877104
 type = 7
 color = 129014720
 should_update_from_elf = true
@@ -280,7 +280,7 @@ write_limit_max = 1.000000
 [var13]
 name = TUNE_HEART.driver.foc_current_.brake_filter_alpha
 tracked_name = TUNE_HEART.driver.foc_current_.brake_filter_alpha
-address = 536876556
+address = 536877200
 type = 7
 color = 3402093085
 should_update_from_elf = true
@@ -297,7 +297,7 @@ write_limit_max = 1.000000
 [var14]
 name = TUNE_HEART.driver.foc_current_.bw_max_hz
 tracked_name = TUNE_HEART.driver.foc_current_.bw_max_hz
-address = 536876480
+address = 536877124
 type = 7
 color = 3161063239
 should_update_from_elf = true
@@ -314,14 +314,14 @@ write_limit_max = 1.000000
 [var15]
 name = TUNE_HEART.driver.foc_current_.bw_min_hz
 tracked_name = TUNE_HEART.driver.foc_current_.bw_min_hz
-address = 536876476
+address = 536877120
 type = 7
 color = 1990415049
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 10.000000
+value_to_write = 50.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -331,7 +331,7 @@ write_limit_max = 1.000000
 [var16]
 name = TUNE_HEART.driver.foc_current_.cmd_q_a
 tracked_name = TUNE_HEART.driver.foc_current_.cmd_q_a
-address = 536876548
+address = 536877192
 type = 7
 color = 1309000482
 should_update_from_elf = true
@@ -348,7 +348,7 @@ write_limit_max = 1.000000
 [var17]
 name = TUNE_HEART.driver.foc_current_.integrator_d
 tracked_name = TUNE_HEART.driver.foc_current_.integrator_d
-address = 536876500
+address = 536877144
 type = 7
 color = 1885559039
 should_update_from_elf = true
@@ -365,7 +365,7 @@ write_limit_max = 1.000000
 [var18]
 name = TUNE_HEART.driver.foc_current_.integrator_q
 tracked_name = TUNE_HEART.driver.foc_current_.integrator_q
-address = 536876504
+address = 536877148
 type = 7
 color = 423405269
 should_update_from_elf = true
@@ -382,7 +382,7 @@ write_limit_max = 1.000000
 [var19]
 name = TUNE_HEART.driver.foc_current_.ki
 tracked_name = TUNE_HEART.driver.foc_current_.ki
-address = 536876492
+address = 536877136
 type = 7
 color = 710634549
 should_update_from_elf = true
@@ -399,7 +399,7 @@ write_limit_max = 1.000000
 [var20]
 name = TUNE_HEART.driver.foc_current_.kp
 tracked_name = TUNE_HEART.driver.foc_current_.kp
-address = 536876488
+address = 536877132
 type = 7
 color = 2839841265
 should_update_from_elf = true
@@ -416,7 +416,7 @@ write_limit_max = 1.000000
 [var21]
 name = TUNE_HEART.driver.foc_current_.max_current_slew_rate_a_s
 tracked_name = TUNE_HEART.driver.foc_current_.max_current_slew_rate_a_s
-address = 536876580
+address = 536877224
 type = 7
 color = 3603106607
 should_update_from_elf = true
@@ -433,7 +433,7 @@ write_limit_max = 1.000000
 [var22]
 name = TUNE_HEART.driver.foc_current_.peak_loss_pwr
 tracked_name = TUNE_HEART.driver.foc_current_.peak_loss_pwr
-address = 536876544
+address = 536877188
 type = 7
 color = 2035801204
 should_update_from_elf = true
@@ -450,7 +450,7 @@ write_limit_max = 1.000000
 [var23]
 name = TUNE_HEART.driver.foc_current_.pwr_el
 tracked_name = TUNE_HEART.driver.foc_current_.pwr_el
-address = 536876524
+address = 536877168
 type = 7
 color = 4177592128
 should_update_from_elf = true
@@ -467,7 +467,7 @@ write_limit_max = 1.000000
 [var24]
 name = TUNE_HEART.driver.foc_current_.pwr_loss
 tracked_name = TUNE_HEART.driver.foc_current_.pwr_loss
-address = 536876528
+address = 536877172
 type = 7
 color = 1032073113
 should_update_from_elf = true
@@ -484,7 +484,7 @@ write_limit_max = 1.000000
 [var25]
 name = TUNE_HEART.driver.foc_current_.pwr_mech
 tracked_name = TUNE_HEART.driver.foc_current_.pwr_mech
-address = 536876532
+address = 536877176
 type = 7
 color = 1274840588
 should_update_from_elf = true
@@ -501,7 +501,7 @@ write_limit_max = 1.000000
 [var26]
 name = TUNE_HEART.driver.foc_current_.target_id_
 tracked_name = TUNE_HEART.driver.foc_current_.target_id_
-address = 536876572
+address = 536877216
 type = 7
 color = 1610350336
 should_update_from_elf = true
@@ -518,7 +518,7 @@ write_limit_max = 1.000000
 [var27]
 name = TUNE_HEART.driver.foc_current_.target_iq_
 tracked_name = TUNE_HEART.driver.foc_current_.target_iq_
-address = 536876576
+address = 536877220
 type = 7
 color = 771752191
 should_update_from_elf = true
@@ -535,7 +535,7 @@ write_limit_max = 1.000000
 [var28]
 name = TUNE_HEART.driver.lpf_id_.output_
 tracked_name = TUNE_HEART.driver.lpf_id_.output_
-address = 536876416
+address = 536877060
 type = 7
 color = 4127192320
 should_update_from_elf = true
@@ -552,7 +552,7 @@ write_limit_max = 1.000000
 [var29]
 name = TUNE_HEART.driver.lpf_iq_.output_
 tracked_name = TUNE_HEART.driver.lpf_iq_.output_
-address = 536876428
+address = 536877072
 type = 7
 color = 1932329215
 should_update_from_elf = true
@@ -603,7 +603,7 @@ write_limit_max = 1.000000
 [var32]
 name = TUNE_HEART.driver.motor_calib_status
 tracked_name = TUNE_HEART.driver.motor_calib_status
-address = 536876401
+address = 536877045
 type = 2
 color = 3515068321
 should_update_from_elf = true
@@ -620,7 +620,7 @@ write_limit_max = 1.000000
 [var33]
 name = TUNE_HEART.driver.power
 tracked_name = TUNE_HEART.driver.power
-address = 536876748
+address = 536877400
 type = 7
 color = 2871952208
 should_update_from_elf = true
@@ -637,7 +637,7 @@ write_limit_max = 1.000000
 [var34]
 name = TUNE_HEART.driver.setup_status
 tracked_name = TUNE_HEART.driver.setup_status
-address = 536876400
+address = 536877044
 type = 0
 color = 3360713545
 should_update_from_elf = true
@@ -654,7 +654,7 @@ write_limit_max = 1.000000
 [var35]
 name = TUNE_HEART.driver.voltage_ab_.sin
 tracked_name = TUNE_HEART.driver.voltage_ab_.sin
-address = 536876772
+address = 536877424
 type = 7
 color = 1277999086
 should_update_from_elf = true
@@ -671,7 +671,7 @@ write_limit_max = 1.000000
 [var36]
 name = TUNE_HEART.driver.voltage_dq_.cos
 tracked_name = TUNE_HEART.driver.voltage_dq_.cos
-address = 536876776
+address = 536877428
 type = 7
 color = 914554639
 should_update_from_elf = true
@@ -688,7 +688,7 @@ write_limit_max = 1.000000
 [var37]
 name = TUNE_HEART.driver.voltage_dq_.sin
 tracked_name = TUNE_HEART.driver.voltage_dq_.sin
-address = 536876780
+address = 536877432
 type = 7
 color = 2193182007
 should_update_from_elf = true
@@ -705,7 +705,7 @@ write_limit_max = 1.000000
 [var38]
 name = TUNE_HEART.driver_phy.current_sense.cal_n_.arr[0]
 tracked_name = TUNE_HEART.driver_phy.current_sense.cal_n_.arr[0]
-address = 536877724
+address = 536877836
 type = 4
 color = 796869013
 should_update_from_elf = true
@@ -722,7 +722,7 @@ write_limit_max = 1.000000
 [var39]
 name = TUNE_HEART.driver_phy.current_sense.cal_n_.arr[1]
 tracked_name = TUNE_HEART.driver_phy.current_sense.cal_n_.arr[1]
-address = 536877726
+address = 536877838
 type = 4
 color = 369282365
 should_update_from_elf = true
@@ -739,7 +739,7 @@ write_limit_max = 1.000000
 [var40]
 name = TUNE_HEART.driver_phy.current_sense.cal_n_.arr[2]
 tracked_name = TUNE_HEART.driver_phy.current_sense.cal_n_.arr[2]
-address = 536877728
+address = 536877840
 type = 4
 color = 1577405858
 should_update_from_elf = true
@@ -756,7 +756,7 @@ write_limit_max = 1.000000
 [var41]
 name = TUNE_HEART.driver_phy.current_sense.cal_val_.arr[0]
 tracked_name = TUNE_HEART.driver_phy.current_sense.cal_val_.arr[0]
-address = 536877712
+address = 536877824
 type = 6
 color = 210751360
 should_update_from_elf = true
@@ -773,7 +773,7 @@ write_limit_max = 1.000000
 [var42]
 name = TUNE_HEART.driver_phy.current_sense.cal_val_.arr[1]
 tracked_name = TUNE_HEART.driver_phy.current_sense.cal_val_.arr[1]
-address = 536877716
+address = 536877828
 type = 6
 color = 4124875174
 should_update_from_elf = true
@@ -790,7 +790,7 @@ write_limit_max = 1.000000
 [var43]
 name = TUNE_HEART.driver_phy.current_sense.cal_val_.arr[2]
 tracked_name = TUNE_HEART.driver_phy.current_sense.cal_val_.arr[2]
-address = 536877720
+address = 536877832
 type = 6
 color = 3188780620
 should_update_from_elf = true
@@ -807,7 +807,7 @@ write_limit_max = 1.000000
 [var44]
 name = TUNE_HEART.driver_phy.current_sense.current_ab_amps.cos
 tracked_name = TUNE_HEART.driver_phy.current_sense.current_ab_amps.cos
-address = 536877744
+address = 536877856
 type = 7
 color = 4021629568
 should_update_from_elf = true
@@ -824,7 +824,7 @@ write_limit_max = 1.000000
 [var45]
 name = TUNE_HEART.driver_phy.current_sense.current_ab_amps.sin
 tracked_name = TUNE_HEART.driver_phy.current_sense.current_ab_amps.sin
-address = 536877748
+address = 536877860
 type = 7
 color = 3738675816
 should_update_from_elf = true
@@ -841,7 +841,7 @@ write_limit_max = 1.000000
 [var46]
 name = TUNE_HEART.driver_phy.current_sense.full_scale_ma_.arr[0]
 tracked_name = TUNE_HEART.driver_phy.current_sense.full_scale_ma_.arr[0]
-address = 536877684
+address = 536877796
 type = 6
 color = 736570756
 should_update_from_elf = true
@@ -858,7 +858,7 @@ write_limit_max = 1.000000
 [var47]
 name = TUNE_HEART.driver_phy.current_sense.full_scale_ma_.arr[1]
 tracked_name = TUNE_HEART.driver_phy.current_sense.full_scale_ma_.arr[1]
-address = 536877688
+address = 536877800
 type = 6
 color = 1272331453
 should_update_from_elf = true
@@ -875,7 +875,7 @@ write_limit_max = 1.000000
 [var48]
 name = TUNE_HEART.driver_phy.current_sense.full_scale_ma_.arr[2]
 tracked_name = TUNE_HEART.driver_phy.current_sense.full_scale_ma_.arr[2]
-address = 536877692
+address = 536877804
 type = 6
 color = 3723697606
 should_update_from_elf = true
@@ -892,7 +892,7 @@ write_limit_max = 1.000000
 [var49]
 name = TUNE_HEART.driver_phy.current_sense.full_scale_max_ma
 tracked_name = TUNE_HEART.driver_phy.current_sense.full_scale_max_ma
-address = 536877696
+address = 536877808
 type = 6
 color = 2575466212
 should_update_from_elf = true
@@ -909,7 +909,7 @@ write_limit_max = 1.000000
 [var50]
 name = TUNE_HEART.driver_phy.current_sense.input_currents_[0]
 tracked_name = TUNE_HEART.driver_phy.current_sense.input_currents_[0]
-address = 536877752
+address = 536877864
 type = 3
 color = 1338690094
 should_update_from_elf = true
@@ -926,7 +926,7 @@ write_limit_max = 1.000000
 [var51]
 name = TUNE_HEART.driver_phy.current_sense.input_currents_[1]
 tracked_name = TUNE_HEART.driver_phy.current_sense.input_currents_[1]
-address = 536877754
+address = 536877866
 type = 3
 color = 2432827635
 should_update_from_elf = true
@@ -943,7 +943,7 @@ write_limit_max = 1.000000
 [var52]
 name = TUNE_HEART.driver_phy.current_sense.input_currents_[2]
 tracked_name = TUNE_HEART.driver_phy.current_sense.input_currents_[2]
-address = 536877756
+address = 536877868
 type = 3
 color = 3917191679
 should_update_from_elf = true
@@ -960,7 +960,7 @@ write_limit_max = 1.000000
 [var53]
 name = TUNE_HEART.driver_phy.current_sense.out_norm_.arr[0]
 tracked_name = TUNE_HEART.driver_phy.current_sense.out_norm_.arr[0]
-address = 536877736
+address = 536877848
 type = 4
 color = 1131386187
 should_update_from_elf = true
@@ -977,7 +977,7 @@ write_limit_max = 1.000000
 [var54]
 name = TUNE_HEART.driver_phy.current_sense.out_norm_.arr[1]
 tracked_name = TUNE_HEART.driver_phy.current_sense.out_norm_.arr[1]
-address = 536877738
+address = 536877850
 type = 4
 color = 358384884
 should_update_from_elf = true
@@ -994,7 +994,7 @@ write_limit_max = 1.000000
 [var55]
 name = TUNE_HEART.driver_phy.current_sense.out_norm_.arr[2]
 tracked_name = TUNE_HEART.driver_phy.current_sense.out_norm_.arr[2]
-address = 536877740
+address = 536877852
 type = 4
 color = 1468198114
 should_update_from_elf = true
@@ -1011,7 +1011,7 @@ write_limit_max = 1.000000
 [var56]
 name = TUNE_HEART.driver_phy.duty_abc_.arr[0]
 tracked_name = TUNE_HEART.driver_phy.duty_abc_.arr[0]
-address = 536877578
+address = 536877690
 type = 4
 color = 1224400090
 should_update_from_elf = true
@@ -1028,7 +1028,7 @@ write_limit_max = 1.000000
 [var57]
 name = TUNE_HEART.driver_phy.duty_abc_.arr[1]
 tracked_name = TUNE_HEART.driver_phy.duty_abc_.arr[1]
-address = 536877580
+address = 536877692
 type = 4
 color = 932342387
 should_update_from_elf = true
@@ -1045,7 +1045,7 @@ write_limit_max = 1.000000
 [var58]
 name = TUNE_HEART.driver_phy.duty_abc_.arr[2]
 tracked_name = TUNE_HEART.driver_phy.duty_abc_.arr[2]
-address = 536877582
+address = 536877694
 type = 4
 color = 3636272174
 should_update_from_elf = true
@@ -1062,7 +1062,7 @@ write_limit_max = 1.000000
 [var59]
 name = TUNE_HEART.driver_phy.motor_sel_.abc_voltages_.arr[0]
 tracked_name = TUNE_HEART.driver_phy.motor_sel_.abc_voltages_.arr[0]
-address = 536877594
+address = 536877706
 type = 4
 color = 82364909
 should_update_from_elf = true
@@ -1079,7 +1079,7 @@ write_limit_max = 1.000000
 [var60]
 name = TUNE_HEART.driver_phy.motor_sel_.abc_voltages_.arr[1]
 tracked_name = TUNE_HEART.driver_phy.motor_sel_.abc_voltages_.arr[1]
-address = 536877596
+address = 536877708
 type = 4
 color = 1623868514
 should_update_from_elf = true
@@ -1096,7 +1096,7 @@ write_limit_max = 1.000000
 [var61]
 name = TUNE_HEART.driver_phy.motor_sel_.abc_voltages_.arr[2]
 tracked_name = TUNE_HEART.driver_phy.motor_sel_.abc_voltages_.arr[2]
-address = 536877598
+address = 536877710
 type = 4
 color = 2190835107
 should_update_from_elf = true
@@ -1113,7 +1113,7 @@ write_limit_max = 1.000000
 [var62]
 name = TUNE_HEART.driver_phy.motor_sel_.err_current_
 tracked_name = TUNE_HEART.driver_phy.motor_sel_.err_current_
-address = 536877607
+address = 536877719
 type = 1
 color = 1170422389
 should_update_from_elf = true
@@ -1130,7 +1130,7 @@ write_limit_max = 1.000000
 [var63]
 name = TUNE_HEART.driver_phy.motor_sel_.motor_type_
 tracked_name = TUNE_HEART.driver_phy.motor_sel_.motor_type_
-address = 536877600
+address = 536877712
 type = 2
 color = 823471128
 should_update_from_elf = true
@@ -1147,7 +1147,7 @@ write_limit_max = 1.000000
 [var64]
 name = TUNE_HEART.driver_phy.motor_sel_.phase_pattern_
 tracked_name = TUNE_HEART.driver_phy.motor_sel_.phase_pattern_
-address = 536877604
+address = 536877716
 type = 4
 color = 8231194
 should_update_from_elf = true
@@ -1164,7 +1164,7 @@ write_limit_max = 1.000000
 [var65]
 name = TUNE_HEART.driver_phy.pwm_apply_[0]
 tracked_name = TUNE_HEART.driver_phy.pwm_apply_[0]
-address = 536877546
+address = 536877658
 type = 4
 color = 2108855425
 should_update_from_elf = true
@@ -1181,7 +1181,7 @@ write_limit_max = 1.000000
 [var66]
 name = TUNE_HEART.driver_phy.pwm_apply_[1]
 tracked_name = TUNE_HEART.driver_phy.pwm_apply_[1]
-address = 536877548
+address = 536877660
 type = 4
 color = 2127234693
 should_update_from_elf = true
@@ -1198,7 +1198,7 @@ write_limit_max = 1.000000
 [var67]
 name = TUNE_HEART.driver_phy.pwm_apply_[2]
 tracked_name = TUNE_HEART.driver_phy.pwm_apply_[2]
-address = 536877550
+address = 536877662
 type = 4
 color = 754205966
 should_update_from_elf = true
@@ -1215,7 +1215,7 @@ write_limit_max = 1.000000
 [var68]
 name = TUNE_HEART.driver_phy.supply_voltage.voltage_v_
 tracked_name = TUNE_HEART.driver_phy.supply_voltage.voltage_v_
-address = 536877824
+address = 536877936
 type = 7
 color = 3746578878
 should_update_from_elf = true
@@ -1232,7 +1232,7 @@ write_limit_max = 1.000000
 [var69]
 name = TUNE_HEART.el_sign
 tracked_name = TUNE_HEART.el_sign
-address = 536877904
+address = 536878016
 type = 6
 color = 4196148733
 should_update_from_elf = true
@@ -1249,7 +1249,7 @@ write_limit_max = 1.000000
 [var70]
 name = TUNE_HEART.encoder.position_.parts.angle
 tracked_name = TUNE_HEART.encoder.position_.parts.angle
-address = 536877888
+address = 536878000
 type = 5
 color = 1363756254
 should_update_from_elf = true
@@ -1266,7 +1266,7 @@ write_limit_max = 1.000000
 [var71]
 name = TUNE_HEART.encoder_pos
 tracked_name = TUNE_HEART.encoder_pos
-address = 536877912
+address = 536878024
 type = 6
 color = 1166385737
 should_update_from_elf = true
@@ -1283,7 +1283,7 @@ write_limit_max = 1.000000
 [var72]
 name = TUNE_HEART.err_sign
 tracked_name = TUNE_HEART.err_sign
-address = 536877908
+address = 536878020
 type = 6
 color = 3806597
 should_update_from_elf = true
@@ -1317,7 +1317,7 @@ write_limit_max = 1.000000
 [var74]
 name = TUNE_HEART.motor_params.motor_type_
 tracked_name = TUNE_HEART.motor_params.motor_type_
-address = 536876332
+address = 536876356
 type = 2
 color = 2050525292
 should_update_from_elf = true
@@ -1385,7 +1385,7 @@ write_limit_max = 1.000000
 [var78]
 name = TUNE_HEART.motor_params.phase_pattern_
 tracked_name = TUNE_HEART.motor_params.phase_pattern_
-address = 536876334
+address = 536876358
 type = 4
 color = 1813216506
 should_update_from_elf = true
@@ -1402,7 +1402,7 @@ write_limit_max = 1.000000
 [var79]
 name = TUNE_HEART.motor_params.total_resistance_mohm_
 tracked_name = TUNE_HEART.motor_params.total_resistance_mohm_
-address = 536876356
+address = 536876384
 type = 7
 color = 957263685
 should_update_from_elf = true
@@ -1419,7 +1419,7 @@ write_limit_max = 1.000000
 [var80]
 name = TUNE_HEART.motor_status
 tracked_name = TUNE_HEART.motor_status
-address = 536877512
+address = 536877624
 type = 2
 color = 1797035060
 should_update_from_elf = true
@@ -1436,7 +1436,7 @@ write_limit_max = 1.000000
 [var81]
 name = TUNE_HEART.position_controller.b0_ff_rev_s2_per_ma
 tracked_name = TUNE_HEART.position_controller.b0_ff_rev_s2_per_ma
-address = 536877472
+address = 536877584
 type = 7
 color = 1345608762
 should_update_from_elf = true
@@ -1453,7 +1453,7 @@ write_limit_max = 1.000000
 [var82]
 name = TUNE_HEART.position_controller.damping_gain
 tracked_name = TUNE_HEART.position_controller.damping_gain
-address = 536877480
+address = 536877592
 type = 7
 color = 2257939720
 should_update_from_elf = true
@@ -1470,7 +1470,7 @@ write_limit_max = 1.000000
 [var83]
 name = TUNE_HEART.position_controller.epsilon_rev
 tracked_name = TUNE_HEART.position_controller.epsilon_rev
-address = 536877448
+address = 536877560
 type = 7
 color = 1623163894
 should_update_from_elf = true
@@ -1487,7 +1487,7 @@ write_limit_max = 1.000000
 [var84]
 name = TUNE_HEART.position_controller.obs_fc_max_hz
 tracked_name = TUNE_HEART.position_controller.obs_fc_max_hz
-address = 536877460
+address = 536877572
 type = 7
 color = 2888801837
 should_update_from_elf = true
@@ -1504,7 +1504,7 @@ write_limit_max = 1.000000
 [var85]
 name = TUNE_HEART.position_controller.obs_fc_min_hz
 tracked_name = TUNE_HEART.position_controller.obs_fc_min_hz
-address = 536877456
+address = 536877568
 type = 7
 color = 2519597927
 should_update_from_elf = true
@@ -1521,7 +1521,7 @@ write_limit_max = 1.000000
 [var86]
 name = TUNE_HEART.position_controller.obs_fc_per_rev_s
 tracked_name = TUNE_HEART.position_controller.obs_fc_per_rev_s
-address = 536877464
+address = 536877576
 type = 7
 color = 3635633001
 should_update_from_elf = true
@@ -1538,7 +1538,7 @@ write_limit_max = 1.000000
 [var87]
 name = TUNE_HEART.position_controller.obs_vel_rev_s
 tracked_name = TUNE_HEART.position_controller.obs_vel_rev_s
-address = 536877492
+address = 536877604
 type = 7
 color = 1005209304
 should_update_from_elf = true
@@ -1555,7 +1555,7 @@ write_limit_max = 1.000000
 [var88]
 name = TUNE_HEART.position_controller.v_soft_rev_s
 tracked_name = TUNE_HEART.position_controller.v_soft_rev_s
-address = 536877484
+address = 536877596
 type = 7
 color = 3806460137
 should_update_from_elf = true
@@ -1572,7 +1572,7 @@ write_limit_max = 1.000000
 [var89]
 name = TUNE_HEART.pwm_voltage_ab.a
 tracked_name = TUNE_HEART.pwm_voltage_ab.a
-address = 536877516
+address = 536877628
 type = 7
 color = 826401984
 should_update_from_elf = true
@@ -1589,7 +1589,7 @@ write_limit_max = 1.000000
 [var90]
 name = TUNE_HEART.pwm_voltage_ab.b
 tracked_name = TUNE_HEART.pwm_voltage_ab.b
-address = 536877520
+address = 536877632
 type = 7
 color = 4160899040
 should_update_from_elf = true
@@ -1845,7 +1845,7 @@ format = DEC
 [group1-plot4]
 name = PID_Current
 type = 2
-visibility = false
+visibility = true
 secondary_write_enabled = true
 
 [group1-plot4-series0]

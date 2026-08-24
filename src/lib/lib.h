@@ -148,7 +148,7 @@ public:
     TunePulseHeart(uint16_t freq_hz, uint16_t pwm_res, float max_sup, float iA_fs, float iB_fs, float iC_fs)
         : clock_(170000000, freq_hz),
           driver(motor_params, driver_phy),              // Pass feedback and motor reference
-          angle_calibrator(freq_hz, &calibration_dump),  // Inject flash driver into the calibration table
+          angle_calibrator(freq_hz, motor_params, &calibration_dump),  // Whole motor (with its table) + table flash
           driver_phy(iA_fs, iB_fs, iC_fs, 128, max_sup),
           motor_status(MotorStatus::NotCalibrated) {}
 
@@ -203,6 +203,20 @@ public:
      */
     void dump_calibration() { angle_calibrator.dump_calibration(); }
 
+    /**
+     * @brief Persist ALL motor parameters into system_dump ("save" method).
+     *
+     * Non-blocking: the record is streamed 8 words per tick from tick().
+     */
+    void save_motor_params() { motor_params.begin_save(); }
+
+    /**
+     * @brief Restart the scan of system_dump for the newest stored parameter
+     *        record matching the given Cal-ID ("load" method).
+     * @param id Cal-ID to match, or MOTOR_ID_ANY for any record.
+     */
+    void load_motor_params(uint8_t id = MOTOR_ID_ANY) { motor_params.begin_load(id); }
+
     int32_t el_sign = -1;     ///< Sign correction applied to the electrical angle readout.
     int32_t err_sign = -1;    ///< Sign correction applied to the mechanical encoder position.
     int32_t encoder_pos = 0;  ///< Last corrected mechanical encoder position (counts).
@@ -236,18 +250,23 @@ public:
             int32_t real_raw_pos = real_pos * err_sign;  // NOTE: double-applies err_sign
 
             // ========================================================================
+            // Non-blocking flash service: advances the motor-parameter
+            // load/save engine by at most one 8-word block per system tick
+            // (boot-time restore from system_dump, post-calibration save).
+            // ========================================================================
+            motor_params.service_tick();
+
+            // ========================================================================
             // Motor controller tick logic
             // ========================================================================
             float targt = current_target_a;  // Local working copy of the current target [A]
             switch (motor_status) {
                 case MotorStatus::Success: {
                     if (!angle_calibrator.is_calibrated()) {
-                        // Calibration still running: advance it with the latest
-                        // mechanical position; returns the current best-known
-                        // electrical angle estimate.
+
                         angle_el_ = angle_calibrator.tick(real_raw_pos, (int16_t)driver.motor.get_motor_type());
                         if (angle_calibrator.is_calibrated()) {
-                            TP_LOG("Angle Calibration Done. Starting Normal/Cogging operation");
+
                             targt = current_target_a = 0.5;
                         }
                         break;
@@ -274,9 +293,7 @@ public:
                         is_running = false;
                         return;
                     } else if (driver.motor.get_status() == MotorStatus::Success) {
-                        TP_LOG("Going to MotorStatus::ElectricCalibrationDone from MotorStatus::NotCalibrated");
-
-                        if (!angle_calibrator.is_settling()) {
+                           if (!angle_calibrator.is_settling()) {
                             if (!angle_calibrator.is_calibrated()) {
                                 angle_calibrator.calibrate();
                                 targt = current_target_a = 0.5;
@@ -288,7 +305,7 @@ public:
                 default: {
                     // Any other transient state: apply a small negative voltage
                     // (active brake / idle) and skip FOC this cycle.
-                    pwm_voltage_ab.a = pwm_voltage_ab.b = -0.1;
+                    pwm_voltage_ab.a = pwm_voltage_ab.b = NAN;
                     driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
                     is_running = false;
                     return;

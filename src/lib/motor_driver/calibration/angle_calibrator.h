@@ -22,11 +22,11 @@
  * The calibration removes hysteresis by collecting data in both directions
  * and builds a correction table for accurate position feedback.
  *
- * Flash-backed lifecycle (non-blocking, 64 bytes transferred per tick):
- * - The default CalStage_CheckMemory stage scans flash for the latest valid
- *   table (0xFA2E marker + sample count header, strictly monotonic samples).
- *   A hit moves straight to Ready; a miss parks the machine in Reset waiting
- *   for an external trigger. "load_calibration" restarts the scan manually.
+ * Flash-backed lifecycle (non-blocking, 8 words / 32 bytes transferred per tick):
+ * - calibrate() first tries the stored calibration table referenced by the
+ *   motor profile's Cal-ID (= chunk address of its 0xFA3E marker word).
+ *   A hit moves straight to Ready; a miss falls through to the physical
+ *   cycle (marker + sample count + strictly monotonic samples).
  * - calibrate() always restarts the cycle at Setup. After validation the new
  *   table MUST be persisted ("dump_calibration" runs automatically) before
  *   the machine reaches Ready: appended into free space, or erase + rewrite
@@ -39,6 +39,7 @@
 #pragma once
 
 #include "../../common.h"
+#include "../motor.h"  // Whole Motor object - owns the CalibrationTable filled here
 #include "calibration_table.h"
 
 /**
@@ -94,16 +95,42 @@ public:
     /**
      * @brief Creates a new AngleCalibrator instance
      * @param frequency Update frequency in ticks per second
-     * @param flash Flash EEPROM driver reference injected into the calibration table
+     * @param motor_ref Whole motor object - its embedded CalibrationTable is
+     *                  filled in place by this calibrator. Ownership: the
+     *                  table ALWAYS lives inside the Motor (no fallback).
+     * @param table_flash Flash EEPROM driver injected into the calibration
+     *                    table (the calibration-table partition).
      * @return Initialized AngleCalibrator
      */
-    AngleCalibrator(uint16_t freq, FlashEEPROM* flash = nullptr) {
+    AngleCalibrator(uint16_t freq, Motor& motor_ref, FlashEEPROM* table_flash = nullptr)
+        : motor(motor_ref) {
         frequency = freq;
         settling_time = calculate_settling_time(frequency, ANGLE_CAL_CAL_SETTLING_TIME_US);  // Convert settling time to ticks
-        cal_table = CalibrationTable::create();  // Fresh RAM table
-        cal_table.attach_flash(flash);           // Bind the persistence driver
-        cal_table.begin_load();                  // Default stage scans flash on boot
+        ptab = &motor.cal_table;             // The calibration table lives INSIDE the Motor object
+        *ptab = CalibrationTable::create();  // Fresh RAM table
+        ptab->attach_flash(table_flash);     // Bind the persistence driver
+        // NOTE: the boot-time table load cannot start here - the calibration
+        // ID (chunk address) becomes known only after the motor parameter
+        // profile has been restored from system_dump. calibrate() arms it.
     }
+
+    /**
+     * @brief Electrical-period step of the connected motor
+     * @return Samples per electrical period: 6 for BLDC, 4 for STEPPER.
+     */
+    uint16_t cal_step() const {
+        return (motor.get_motor_type() == MotorType_BLDC) ? 6 : 4;
+    }
+
+    /**
+     * @brief Motor connectivity check
+     * @return true once the motor type has been identified (motor present)
+     *
+     * A motor that was never identified (MotorType_Invalid) is treated as
+     * not connected: neither the flash scan nor a calibration cycle makes
+     * sense without it.
+     */
+    bool is_motor_connected() const { return motor.get_motor_type() != MotorType_Invalid; }
 
     /**
      * @brief Main calibration tick function
@@ -111,18 +138,18 @@ public:
      * @param motor_type_step Motor type calibration step (4 for Stepper, 6 for BLDC)
      * @return Current electrical angle for motor control
      *
-     * Called at regular intervals. Every tick services exactly 64 bytes of
-     * flash traffic (load scan or dump write), keeping the control loop
-     * non-blocking. The motor-driving calibration sequence only advances
+     * Called at regular intervals. Every tick services exactly 8 words (32
+     * bytes) of flash traffic (load scan or dump write), keeping the control
+     * loop non-blocking. The motor-driving calibration sequence only advances
      * after an explicit or automatic calibration request.
      */
     uint16_t tick(int32_t encoder_pos, uint8_t motor_type_step) {
         position = encoder_pos;    // Update internal position from sensor
 
         switch (calibration_stage) {
-            case CalStage_CheckMemory:  // Boot-time flash scan, 64 bytes per tick
-                if (cal_table.load_tick()) {
-                    if (cal_table.is_loaded()) {   // Branch 1: valid table -> straight to Ready
+            case CalStage_CheckMemory:  // Boot-time flash scan, 8 words (32 bytes) per tick
+                if (ptab->load_tick()) {
+                    if (ptab->is_loaded()) {   // Branch 1: valid table -> straight to Ready
                         TP_LOG("CALIBRATION: Valid table restored from flash");
                         loaded_from_flash = true;
                         calibration_stage = CalStage_Ready;
@@ -133,10 +160,18 @@ public:
                 }
                 return angle_el;  // Motor is never driven while scanning memory
 
-            case CalStage_Save:  // Persist the freshly validated table, 64 bytes per tick
-                if (cal_table.dump_tick()) {
-                    if (cal_table.dump_ok()) {
+            case CalStage_Save:  // Persist the freshly validated table, 8 words (32 bytes) per tick
+                if (ptab->dump_tick()) {
+                    if (ptab->dump_ok()) {
                         TP_LOG("CALIBRATION: Table saved to flash");
+                        // Publish the fresh calibration reference into the
+                        // motor profile: the ID is the chunk address of the
+                        // FA3E marker. Also store the measured angle offset,
+                        // then re-save the parameter record into system_dump
+                        // (non-blocking, 8 words per tick from TunePulseHeart::tick).
+                        motor.set_cal_id((uint8_t)ptab->dumped_id());
+                        motor.set_calibration_offset((int32_t)ptab->get_offst_val());
+                        motor.begin_save();
                         calibration_requested = false;       // Cycle fully finished
                         calibration_stage = CalStage_Ready;  // Ready only after a successful save
                     } else {
@@ -211,14 +246,15 @@ public:
                         }
 
                         TP_LOG_VAL("CALIBRATION: Detected motion direction: ", (long)this->direction);  // Log detected direction
+                        motor.set_direction((int16_t)this->direction);  // Publish detected rotation direction into the motor profile
                         calibration_stage = CalStage_Pass1;
                         // Move to Pass1
                         ang_el_step =
                             (uint16_t)(65536u /
                                        motor_type_step);  // Calculate step size based on motor type (4 for Stepper, 6 for BLDC)
                         speed = (int32_t)(-speed * this->direction);  // Adjust speed for detected direction
-                        cal_table.reset(motor_type_step);             // Reset calibration table with motor-specific step count
-                        cal_table.fill_first(0, (uint16_t)stable_pos);
+                        ptab->reset(motor_type_step);             // Reset calibration table with motor-specific step count
+                        ptab->fill_first(0, (uint16_t)stable_pos);
                         cal_idx = 1;            // Reset calibration index
                         init_pos = stable_pos;  // Record starting position for Pass1
                         TP_LOG("CALIBRATION: Full rotation in positive direction with sampling");  // Log stage transition
@@ -237,7 +273,7 @@ public:
                         speed = -speed;       // Reverse speed for backward rotation
                         return angle_el;      // Return current angle
                     }
-                    cal_table.fill_first(cal_idx, (uint16_t)stable_pos);  // Store position in calibration table
+                    ptab->fill_first(cal_idx, (uint16_t)stable_pos);  // Store position in calibration table
                     cal_idx += 1;                                         // Increment calibration index
                     break;
                 }
@@ -247,7 +283,7 @@ public:
                     if (cal_idx > 0) {
                         cal_idx -= 1;  // Decrement calibration index
                     }
-                    cal_table.fill_second(cal_idx, (uint16_t)stable_pos);  // Store backward position in table
+                    ptab->fill_second(cal_idx, (uint16_t)stable_pos);  // Store backward position in table
 
                     if (cal_idx == 0) {
                         // Pass2 complete, move to Check stage
@@ -259,9 +295,31 @@ public:
 
                 case CalStage_Check:
                     // Validate calibration data, then require persistence before Ready
-                    if (cal_table.check()) {
+                    if (ptab->check()) {
+                        // The sample count must be a whole number of
+                        // electrical periods: multiple of 6 for BLDC,
+                        // multiple of 4 for STEPPER. Trim the excess and
+                        // derive the final pole count (n / div).
+                        uint16_t div = cal_step();
+                        uint16_t n = ptab->get_sample_count();
+                        if (n == 0 || (n % div) != 0) {
+                            ptab->truncate((uint16_t)(n - (n % div)));
+                            n = ptab->get_sample_count();
+                            TP_LOG_VAL("CALIBRATION: samples trimmed to ", (long)n);
+                        }
+                        if (n == 0 || (n % div) != 0) {
+                            TP_LOG("CALIBRATION: ERROR - invalid sample count");
+                            calibration_stage = CalStage_Error;
+                            break;
+                        }
+                        int32_t poles = (int32_t)n / (int32_t)div;
+                        if (motor.get_pole_pairs() != poles) {
+                            TP_LOG_VAL("CALIBRATION: pole pairs derived from samples: ", poles);
+                            motor.set_pole_pairs(poles);  // Store the identified pole count
+                        }
+
                         TP_LOG("CALIBRATION: Validation complete - saving to flash");
-                        cal_table.begin_dump();          // Dump is mandatory for the Ready stage
+                        ptab->begin_dump();  // Dump is mandatory for the Ready stage
                         calibration_stage = CalStage_Save;
                     } else {
                         TP_LOG("CALIBRATION: Validation error");  // Log validation failure
@@ -289,6 +347,27 @@ public:
      * zero after erasing the full region when no space remains.
      */
     void calibrate() {
+        if (!is_motor_connected()) {
+            // No motor identified -> nothing to calibrate.
+            TP_LOG("CALIBRATION: motor not connected - skipped");
+            return;
+        }
+
+        // Same-motor fast path: when a stored parameter profile exists, try
+        // to reuse its calibration table (referenced by the profile's Cal-ID
+        // = chunk address). A hit goes straight to Ready; a miss falls
+        // through to the full physical cycle below (request stays armed).
+        if (motor.is_loaded()) {
+            TP_LOG_VAL("CALIBRATION: trying stored table, id = ", (long)motor.get_cal_id());
+            ptab->begin_load(motor.get_cal_id());
+            loaded_from_flash = false;
+            calibration_requested = true;   // Auto-continue with a fresh cycle on miss
+            calibration_stage = CalStage_CheckMemory;
+            cal_cycle_stage = CalSamplingState_Setup;
+            time_in_state = 0;
+            return;
+        }
+
         TP_LOG("CALIBRATION: Manual full-cycle start requested");  // Log command reception
         calibration_requested = true;                              // Arm the calibration request
         loaded_from_flash = false;                                 // Flash-restored data no longer counts
@@ -303,13 +382,15 @@ public:
      * @brief "load_calibration" command: bind a memory region and restore
      *
      * Receives the flash driver pointer and restarts the non-blocking scan.
-     * When a valid table is found (FA2E marker, sample count matches the
-     * stored header, samples strictly monotonic), is_calibrated() starts
+     * When a valid table is found at the profile's Cal-ID chunk (FA3E marker,
+     * sane sample count, samples strictly monotonic), is_calibrated() starts
      * returning true - unless calibrate() has been triggered meanwhile.
      */
     void load_calibration(FlashEEPROM* mem) {
-        cal_table.attach_flash(mem);          // Re-bind the memory pointer
-        cal_table.begin_load();               // Restart the table scan
+        ptab->attach_flash(mem);          // Re-bind the memory pointer
+        if (is_motor_connected() && motor.is_loaded()) {
+            ptab->begin_load(motor.get_cal_id());  // Restart the direct-addressed scan
+        }
         loaded_from_flash = false;            // Previous restore no longer counts
         calibration_requested = false;
         calibration_stage = CalStage_CheckMemory;
@@ -318,13 +399,14 @@ public:
     /**
      * @brief "dump_calibration" command: persist the RAM table into flash
      *
-     * Serializes {FA2E magic | count, packed monotonic samples, metadata}.
-     * Checks free space first: appends there when the record fits, otherwise
-     * erases the whole region and rewrites from offset zero on clean pages.
+     * Serializes {FA3E marker, sample count, packed monotonic samples,
+     * metadata}. Checks free space first: appends there when the record fits,
+     * otherwise erases the whole region and rewrites from offset zero.
      */
     void dump_calibration() {
-        cal_table.begin_dump();               // Arm the non-blocking dump engine
-        calibration_stage = CalStage_Save;    // tick() services it 64 bytes per call
+        if (!is_motor_connected()) return;  // Nothing sensible to stamp without a motor
+        ptab->begin_dump();                 // Arm the non-blocking dump engine
+        calibration_stage = CalStage_Save;    // tick() services it 8 words per call
     }
 
     /**
@@ -357,11 +439,11 @@ public:
      * @param mech_angle Output: mechanical angle
      */
     uint16_t get_el_angle_correction(uint32_t pos) const {
-        return cal_table.correct_el_angle(pos >> 16);  // Apply calibration correction
+        return ptab->correct_el_angle(pos >> 16);  // Apply calibration correction
     }
 
     uint16_t get_position_correction(uint16_t pos) const {
-        return cal_table.correct_position(pos);  // Apply calibration correction
+        return ptab->correct_position(pos);  // Apply calibration correction
     }
 
 private:
@@ -389,7 +471,9 @@ private:
     int32_t dif_max = INT32_MIN;  // Maximum step difference for consistency checks
     int32_t dif_min = INT32_MAX;  // Minimum step difference for consistency checks
 
-    CalibrationTable cal_table;  // Calibration data table (owns the flash state machine)
+    CalibrationTable* ptab;      // Active table: always the Motor's embedded instance.
+    Motor& motor;                ///< Whole motor object handed over by the board layer.
+
     uint16_t el_step_idx = 0;    // Target electrical angle after rotation
 
     bool calibration_requested = false;  // True between calibrate() call and cycle completion

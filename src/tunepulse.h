@@ -168,20 +168,13 @@ void end_curnt_cal() {
  *       are active.
  */
 inline void tunepulse_init() {
-    SerialUSB.println("0. SystemClock_Config...");
-    SerialUSB.flush();
     delay(100);
     SystemClock_Config();  // Configure system clock to 170 MHz
-    SerialUSB.println("   [OK] Clock configured");
-    SerialUSB.flush();
+
     delay(100);
 
-    SerialUSB.println("0.1. CORDIC_Init...");
-    SerialUSB.flush();
-    delay(100);
     CORDIC_Init();  // Initialize CORDIC hardware accelerator for fast trigonometry
-    SerialUSB.println("   [OK] CORDIC initialized");
-    SerialUSB.flush();
+
     delay(100);
 
     // Calibration-table persistence setup:
@@ -204,16 +197,17 @@ inline void tunepulse_init() {
         .read_cb(&FlashG4_LL::user_read)
         .write_cb(&FlashG4_LL::user_write);
 
-    // Angle calibration persistence is fully self-managed: on the first ticks
-    // the calibrator restores a valid table from flash (is_calibrated() -> true)
-    // or automatically starts a fresh calibration cycle. No manual call needed.
+    // Motor-parameter persistence: bind the motor record store to the
+    // USER-DATA partition and arm the boot-time restore scan. The scan runs
+    // non-blocking (8 words / 32 bytes per system tick from TunePulseHeart::
+    // tick()) and restores the NEWEST valid record with the matching Cal-ID,
+    // printing the restored parameter set over serial when done.
+    TUNE_HEART.motor_params.attach_flash(&TUNE_HEART.system_dump);
+    TUNE_HEART.motor_params.begin_load();
 
-    SerialUSB.println("1. IO_Init...");
-    SerialUSB.flush();
     delay(100);
     IO_Init();  // Initialize GPIO pins
-    SerialUSB.println("   [OK] GPIO initialized");
-    SerialUSB.flush();
+
     delay(100);
 
     // Register LED control callbacks in TunePulseHeart
@@ -226,40 +220,22 @@ inline void tunepulse_init() {
     LED_Green_Control(false);  // Green LED OFF
     LED_Blue_Control(false);   // Blue LED OFF
 
-    SerialUSB.println("   [OK] LED callbacks registered");
-    SerialUSB.flush();
     delay(100);
 
-    SerialUSB.println("3. ADC_Init...");
-    SerialUSB.flush();
-    delay(100);
     ADC_Init();  // Initialize ADC channels
-    SerialUSB.println("   [OK] ADC initialized");
-    SerialUSB.flush();
+
     delay(100);
 
-    SerialUSB.println("4. PWM_Init...");
-    SerialUSB.flush();
-    delay(100);
     PWM_Init();  // Initialize TIM1 PWM (complementary mode)
-    SerialUSB.println("   [OK] PWM initialized");
-    SerialUSB.flush();
+
     delay(100);
 
-    SerialUSB.println("6. SPI1_Init...");
-    SerialUSB.flush();
-    delay(100);
     Encoder_SmartInit();  // Initialize SPI1 for encoder
-    SerialUSB.println("   [OK] SPI initialized");
-    SerialUSB.flush();
+
     delay(100);
 
-    SerialUSB.println("8. NVIC_Init...");
-    SerialUSB.flush();
-    delay(100);
     NVIC_Init();  // Configure interrupt priorities
-    SerialUSB.println("   [OK] NVIC configured");
-    SerialUSB.flush();
+
     delay(500);
 
     // CAN initialization moved to application code (main.cpp)

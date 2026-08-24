@@ -71,13 +71,20 @@ public: // Make the following methods public for external module access
     } // End of create() method
 
     // --------------------------------------------------------------------------
-    // Flash persistence (non-blocking, exactly 64 bytes moved per tick call)
+    // Flash persistence (non-blocking, exactly 8 words / 32 bytes moved per
+    // tick call - never more than one programmed/read block per system tick)
     //
-    // Stored-record word stream (tables append from offset 0 upward, forming a
-    // chain; the LAST fully valid record in the chain is the actual one):
-    //   w0     : 0xFA2E0000 | sample_count - table marker + sample count
-    //   w1..wN : samples packed 2 x uint16_t per word (odd tail padded 0xFFFF)
+    // Stored-record word stream (records append upward, forming a chain; the
+    // LAST fully valid record is the actual one):
+    //   w0     : 0xFA3E0000 - table marker
+    //   w1     : sample_count
+    //   w2..wN : samples packed 2 x uint16_t per word (odd tail padded 0xFFFF)
     //   tail   : {el_angle_div, offst_val | max_deviation << 16, offst_idx}
+    //
+    // The record ID is NOT stored inside the record: it IS the start address
+    // of the marker word expressed in 32-byte chunks (offset / 32). This ID
+    // is handed over to the motor parameter profile after a successful dump,
+    // so the table can be addressed directly on the next boot.
     // --------------------------------------------------------------------------
 
     /**
@@ -87,32 +94,42 @@ public: // Make the following methods public for external module access
     void attach_flash(FlashEEPROM* f) { flash = f; } // Store the driver pointer
 
     /**
-     * @brief Arms a flash scan for the newest valid calibration table
+     * @brief Arms a direct-addressed table load by calibration ID
      *
-     * The scan advances 64 bytes per load_tick() call until the table chain
-     * ends (erased word), the region is exhausted, or a corrupt header shows up.
+     * The ID is the start address of the marker word expressed in 32-byte
+     * chunks. The scan reads the record at that exact offset (one 8-word
+     * block per tick), taking the sample count from the record itself.
+     *
+     * @param chunk_id Calibration ID (record start address / 32).
      */
-    void begin_load() {
+    void begin_load(uint32_t chunk_id) {
         load_ok = false;                         // Invalidate the previous scan result
-        f_mode = flash ? MODE_LOAD : MODE_IDLE;  // Arm the scanner only with a driver
-        f_addr = 0;                              // Restart the byte cursor
+        f_hdr = false;                           // Parser expects a fresh marker word
         f_cnt = 0;                               // Reset the word-parser state
         f_meta = false;
+        uint32_t addr = (uint32_t)chunk_id * 32;
+        if (flash && flash->get_max_size() > addr) {
+            f_addr = addr;                       // Jump straight to the referenced record
+            f_mode = MODE_LOAD;
+        } else {
+            f_mode = MODE_IDLE;                  // No driver or ID out of range: nothing to read
+        }
     }
 
     /**
-     * @brief Services one 64-byte chunk of the flash scan
+     * @brief Services one 32-byte block of the flash scan
      * @return true when the scan is finished (outcome via is_loaded())
      */
     bool load_tick() {
-        if (f_mode != MODE_LOAD) return true;         // Not armed: already done
+        if (f_mode != MODE_LOAD) return true;         // Not armed / already committed: done
         if (flash->get_max_size() == 0) return false; // Driver not configured yet: wait
-        for (int b = 0; b < 2 && f_mode == MODE_LOAD; ++b) { // 2 x 32 B = 64 bytes per tick
+        for (int b = 0; b < 1 && f_mode == MODE_LOAD; ++b) { // 1 x 32 B = 8 words per tick
             if (f_addr + 32 > flash->get_max_size()) { f_mode = MODE_IDLE; break; } // Region end
             uint32_t w[8];
             if (!flash->read_block(f_addr, w)) { f_mode = MODE_IDLE; break; }       // HW fault
             f_addr += 32;                                                          // Advance cursor
             for (int i = 0; i < 8 && f_mode == MODE_LOAD; ++i) scan_word(w[i]);    // Parse words
+            if (load_ok) f_mode = MODE_IDLE;                                       // Committed: done
         }
         return f_mode != MODE_LOAD; // true once scanning stopped (done or aborted)
     }
@@ -126,14 +143,17 @@ public: // Make the following methods public for external module access
     /**
      * @brief Arms a dump of the RAM table into flash ("dump_calibration")
      *
-     * First locates free space (64 bytes per tick); the record is appended
-     * there when it fits, otherwise the whole region is erased and rewritten
-     * from offset zero so the fresh table always lands on clean pages.
+     * First locates free space (32 bytes per tick); the record is appended
+     * there when it fits (aligned up to the 32-byte chunk boundary so the
+     * marker always starts a chunk), otherwise the whole region is erased and
+     * rewritten from offset zero. After a successful dump dumped_id() returns
+     * the chunk address of the marker - the calibration ID for the motor
+     * profile.
      */
     void begin_dump() {
         store_ok = false;                                           // Clear the previous outcome
         if (!flash || cal_size == 0) return;                        // Nothing to persist
-        f_total = 1 + (cal_size + 1) / 2 + 3;                       // Header + samples + trailer words
+        f_total = 2 + (cal_size + 1) / 2 + 3;                       // Marker + count + samples + trailer words
         if ((f_total + 7) / 8 * 32 > flash->get_max_size()) return; // Record can never fit: fail fast
         f_free = flash->get_max_size();                             // Assume no free tail yet
         f_addr = 0;                                                 // Space scan starts at zero
@@ -141,12 +161,34 @@ public: // Make the following methods public for external module access
     }
 
     /**
-     * @brief Services one 64-byte chunk of the space scan / record write
+     * @brief Calibration ID of the last completed dump
+     * @return Start address of the FA3E marker in 32-byte chunks.
+     */
+    uint32_t dumped_id() const { return store_ok ? (f_wri0 / 32) : 0; }
+
+    /**
+     * @brief Number of samples currently collected in the RAM table
+     */
+    uint16_t get_sample_count() const { return (uint16_t)cal_size; }
+
+    /**
+     * @brief Truncates the RAM table to exactly @p n samples
+     *
+     * Used to align the collected sample count to a multiple of the
+     * electrical-period step before validation and persistence.
+     */
+    void truncate(uint16_t n) {
+        if (n < cal_size) cal_size = n;
+        if (temp_idx > n) temp_idx = n;
+    }
+
+    /**
+     * @brief Services one 32-byte block of the space scan / record write
      * @return true when the dump is finished (outcome via dump_ok())
      */
     bool dump_tick() {
         if (f_mode == MODE_SPACE) {                                // Phase 1: find first erased word
-            for (int b = 0; b < 2 && f_mode == MODE_SPACE; ++b) {  // 64 bytes per tick
+            for (int b = 0; b < 1 && f_mode == MODE_SPACE; ++b) {  // 8 words per tick
                 if (f_addr + 32 > flash->get_max_size()) f_mode = MODE_IDLE; // Scanned everything
                 else {
                     uint32_t w[8];
@@ -163,16 +205,19 @@ public: // Make the following methods public for external module access
             }
             if (f_mode == MODE_SPACE) return false;                // Scan continues next tick
             uint32_t need = (f_total + 7) / 8 * 32;                // Size padded to write granularity
-            if (f_free + need <= flash->get_max_size()) {          // Fits into the free tail: append
-                f_wri = f_free; f_word = 0; f_mode = MODE_WRITE;
+            // Align the append point UP to the chunk boundary so the marker
+            // word always lands at a chunk start - its chunk number IS the ID.
+            uint32_t aligned = (f_free + 31) & ~31ul;
+            if (aligned + need <= flash->get_max_size()) {         // Fits into the free tail: append
+                f_wri0 = aligned; f_wri = aligned; f_word = 0; f_mode = MODE_WRITE;
             } else if (flash->erase(0xDEADC0DE)) {                 // Full: wipe and rewrite cleanly
                 TP_LOG("CALIBRATION: Flash full - erasing region");
-                f_wri = 0; f_word = 0; f_mode = MODE_WRITE;
+                f_wri0 = 0; f_wri = 0; f_word = 0; f_mode = MODE_WRITE;
             }                                                      // Erase failed: stays IDLE = fail
             return f_mode != MODE_WRITE;
         }
         if (f_mode == MODE_WRITE) {                                // Phase 2: stream the record out
-            for (int r = 0; r < 2 && f_word < f_total; ++r) {      // 2 records = 64 bytes per tick
+            for (int r = 0; r < 1 && f_word < f_total; ++r) {      // 1 record = 8 words per tick
                 uint32_t rec[8];
                 uint32_t n = f_total - f_word < 8 ? f_total - f_word : 8; // Words left in this record
                 for (uint32_t i = 0; i < n; ++i) rec[i] = stream_word(f_word + i);
@@ -537,6 +582,8 @@ private: // Restrict direct access to internal state memory and helper routines
     uint32_t f_wri = 0;           // Byte address of the next 32-byte record
     uint32_t f_word = 0;          // Stream index of the next serialized word
     uint32_t f_free = 0;          // First free byte offset found by the space scan
+    bool f_hdr = false;           // Marker word consumed, expecting the count word
+    uint32_t f_wri0 = 0;          // Byte address where the current record started
 
     /**
      * @brief Consumes one scanned word of the stored table chain
@@ -547,10 +594,15 @@ private: // Restrict direct access to internal state memory and helper routines
      * simply never committed, so the newest valid table naturally wins.
      */
     bool scan_word(uint32_t w) {
-        if (f_cnt == 0 && !f_meta) {                           // Expecting a table header
-            if (w == 0xFFFFFFFFul) { f_mode = MODE_IDLE; return false; } // Erased: end of chain
-            if ((w & 0xFFFF0000ul) != 0xFA2E0000ul) { f_mode = MODE_IDLE; return false; } // Corrupt
-            uint32_t n = w & 0xFFFFul;                         // Sample count of the candidate
+        if (f_cnt == 0 && !f_meta) {                           // Expecting the two-word header
+            if (!f_hdr) {                                      // Word 1: FA3E marker
+                if (w == 0xFFFFFFFFul) { f_mode = MODE_IDLE; return false; } // Erased: end of chain
+                if ((w & 0xFFFF0000ul) != 0xFA3E0000ul) { f_mode = MODE_IDLE; return false; } // Corrupt
+                f_hdr = true;                                  // Marker ok: count word follows
+                return true;
+            }
+            f_hdr = false;                                     // Word 2: sample count
+            uint32_t n = w;
             if (n == 0 || n > CAL_TABLE_CAPACITY) { f_mode = MODE_IDLE; return false; } // Bad size
             f_cnt = n; f_sidx = 0; f_seq = true;               // Start collecting samples
             return true;
@@ -594,13 +646,14 @@ private: // Restrict direct access to internal state memory and helper routines
      */
     uint32_t stream_word(uint32_t i) const {
         uint32_t sw = (cal_size + 1) / 2;                      // Packed-sample word count
-        if (i == 0) return 0xFA2E0000ul | (uint32_t)cal_size;  // Header: FA2E marker + sample count
-        if (i <= sw) {                                         // Packed sample pairs
-            uint32_t j = (i - 1) * 2;                          // Index of the pair's first sample
+        if (i == 0) return 0xFA3E0000ul;                       // Word 1: FA3E table marker
+        if (i == 1) return (uint32_t)cal_size;                 // Word 2: sample count
+        if (i <= sw + 1) {                                     // Packed sample pairs
+            uint32_t j = (i - 2) * 2;                          // Index of the pair's first sample
             uint32_t hi = (j + 1 < cal_size) ? (uint32_t)cal_table[j + 1] : 0xFFFFul; // Odd-tail pad
             return (uint32_t)cal_table[j] | (hi << 16);        // Two little-endian halves
         }
-        i -= sw + 1;                                           // Metadata trailer follows samples
+        i -= sw + 2;                                           // Metadata trailer follows samples
         if (i == 0) return (uint32_t)el_angle_div;
         if (i == 1) return (uint32_t)offst_val | ((uint32_t)max_deviation << 16);
         return (uint32_t)offst_idx;
@@ -616,6 +669,14 @@ private: // Restrict direct access to internal state memory and helper routines
         return cal_table[actual_idx]; // Return physical memory value at computed position
     } // End of get_val_by_idx() method
 
+    /**
+     * @brief Read-only access to the normalization offset value
+     * @return Absolute offset aligning raw calibration data to zero
+     */
+public:
+    uint16_t get_offst_val() const { return offst_val; } // Public getter for the motor record
+
+private:
     /**
      * @brief Computes ideal value for given index in linear progression
      * @param i Index in range
