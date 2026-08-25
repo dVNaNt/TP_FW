@@ -1,6 +1,11 @@
+/**
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
+ */
+
 // =============================================================================
 // history_buffer.h (DYNAMIC HISTORY MODIFICATION)
-// Кольцевой буфер с историей, поддержкой реверса и очистки.
+// Ring buffer with history, reverse playback and clearing support.
 // =============================================================================
 #pragma once
 
@@ -11,7 +16,7 @@ template <typename T, size_t N>
 class HistoryBuffer {
     static_assert(N >= 8 && (N & (N - 1)) == 0, "N must be power-of-two >= 8");
     static constexpr size_t MASK     = N - 1;
-    static constexpr size_t MAX_HIST = N / 4; // Ровно 25% под историю при конкуренции
+    static constexpr size_t MAX_HIST = N / 4; // Exactly 25% reserved for history under pressure
 
     T buf_[N];
     size_t head_   = 0;   
@@ -29,21 +34,21 @@ class HistoryBuffer {
     bool evict_for_write() {
         sanitize_state();
         
-        // Если история разрослась во время простоя (> 25%), принудительно сжимаем ее.
+        // If history overgrew during idle (> 25%), force-shrink it.
         if (history_count() > MAX_HIST) {
             tail_ = cursor_ - 1 - MAX_HIST; 
         }
 
-        // Если место есть — пишем без вытеснения.
+        // If space is available - write without eviction.
         if (head_ - tail_ < N) return true;
 
-        // Вытесняем историю по одному элементу ради сохранения новой траектории.
+        // Evict history one element at a time to preserve the new trajectory.
         if (history_count() > 0) {
             ++tail_;
             return true;
         }
 
-        // Буфер переполнен будущим. Запрет записи.
+        // Buffer overflowed by future data. Write rejected.
         return false; 
     }
 

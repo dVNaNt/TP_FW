@@ -132,7 +132,7 @@ public:
     /// @param fs_hz Sampling frequency in Hz
     /// @return Calculated alpha value (1-255)
     void set_cutoff(uint16_t fcut_hz, uint16_t fsampl_hz) {
-        if (fsampl_hz == 0) return; // Защита от деления на 0
+        if (fsampl_hz == 0) return; // Guard against division by zero
 
         // Alpha = 2*pi * Ts * Fc * 255
         // Alpha = (2*pi * 255) * (Fc / Fs)

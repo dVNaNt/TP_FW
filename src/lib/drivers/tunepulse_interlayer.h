@@ -15,6 +15,8 @@
  *
  * This header defines no code of its own; it exists so that application code
  * can depend on one stable include instead of the individual driver paths.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include "flash_eeprom.h"

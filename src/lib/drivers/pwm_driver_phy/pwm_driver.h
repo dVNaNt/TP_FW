@@ -7,6 +7,8 @@
  * PhyDriverPWM is the top-level driver structure that owns and coordinates:
  * - **CurrentSensePHY** — 3-channel current sensing with overcurrent protection
  * - **SupplyVoltagePHY** — filtered voltage sensing with OV/UV protection
+ * - **TemperaturePHY** — heavily-filtered temperature sensing with warning (WT)
+ *   and overtemperature (OT) thresholds and immediate fault release
  * - **PwmWrapper** — hardware PWM output with chainable setup and SeqLock-protected duty cycle
  * - **OutputWrapper** — gate driver enable/disable
  * - **InputWrapper** — external hardware fault pin
@@ -75,8 +77,9 @@
 #include "../generic/output.h"
 #include "../generic/setup.h"
 #include "current.h"
-#include "motor_selector.h"
+#include "motor_control.h"
 #include "pwm.h"
+#include "temperature.h"
 #include "voltage.h"
 
 /**
@@ -90,7 +93,8 @@
 struct PhyDriverPWM {
     friend struct CurrentSensePHY;
     friend struct SupplyVoltagePHY;
-    friend struct MotorSelectorPHY;
+    friend struct MotorControlPHY;
+    friend struct TemperaturePHY;
 
 private:
     std::atomic<uint8_t> fault_flags_ = 0;  ///< Bitfield holding current active faults
@@ -422,28 +426,33 @@ private:
     Vec3D duty_abc_ = {INT16_MIN, INT16_MIN, INT16_MIN};
 
 public:
-    MotorSelectorPHY motor_sel_;
+    MotorControlPHY motor_ctrl_;
     PwmWrapper pwm;                   ///< PWM output wrapper with chainable setup and SeqLock-protected duty cycle
     OutputWrapper enable_;            ///< Digital output to enable/disable the gate driver
     InputWrapper error_;              ///< Digital input reading the hardware fault pin
     Setup init_;                      ///< Callback wrapper for hardware initialization
     CurrentSensePHY current_sense;    ///< Public instance for current ADC input and configuration
     SupplyVoltagePHY supply_voltage;  ///< Public instance for voltage ADC input and configuration
+    TemperaturePHY temperature;       ///< Public instance for temperature ADC input, WT/OT protection
 
     /**
      * @brief Construct a new PhyDriverPWM object.
      *
-     * Initializes all sub-systems: current sensing, voltage sensing, PWM output,
-     * enable pin, and error pin.
+     * Initializes all sub-systems: current sensing, voltage sensing,
+     * temperature sensing, PWM output, enable pin, and error pin.
      *
      * @param ch1_fs_ma Full-scale current for Phase A in mA (0 = sensor missing)
      * @param ch2_fs_ma Full-scale current for Phase B in mA (0 = sensor missing)
      * @param ch3_fs_ma Full-scale current for Phase C in mA (0 = sensor missing)
      * @param v_alpha EMA filter alpha coefficient for voltage sensing (0..255)
      * @param v_max_mv Maximum voltage in millivolts for Q15 scaling
+     * @param t_max_c Temperature in degC corresponding to the temperature
+     *                channel's ADC full scale (Q15 normalization reference)
      */
-    PhyDriverPWM(float ch1_fs = 0, float ch2_fs = 0, float ch3_fs = 0, uint8_t v_alpha = 64, float v_max = 24.0f)
-        : motor_sel_(), current_sense(ch1_fs, ch2_fs, ch3_fs, motor_sel_), supply_voltage(v_alpha, v_max) {}
+    PhyDriverPWM(float ch1_fs = 0, float ch2_fs = 0, float ch3_fs = 0, uint8_t v_alpha = 64,
+                 float v_max = 24.0f, float t_max_c = 150.0f)
+        : motor_ctrl_(), current_sense(ch1_fs, ch2_fs, ch3_fs, motor_ctrl_),
+          supply_voltage(v_alpha, v_max), temperature(20, t_max_c) {}
 
     /**
      * @brief Get reference to the enable output.
@@ -497,11 +506,18 @@ public:
     inline void tick() {
         current_sense.tick();
         supply_voltage.tick();
+        temperature.tick();
     }
 
     inline const Vec2D_f32 get_current_ab_amps() { return current_sense.current_ab_amps; }
 
     inline float get_supply_volts() { return supply_voltage.get_voltage(); }
+
+    /**
+     * @brief Get the latest filtered temperature in degrees Celsius.
+     * @return Filtered temperature [degC] (see TemperaturePHY)
+     */
+    inline float get_temperature_c() { return temperature.get_temperature_c(); }
 
     inline void set_voltage_ab_volts(Vec2D_f32 voltages) {
         // Check for NaN values using proper NaN detection (NaN != NaN is always true)
@@ -516,7 +532,7 @@ public:
         else {
             int16_t duty_a = supply_voltage.volts2duty(voltages.a);
             int16_t duty_b = supply_voltage.volts2duty(voltages.b);
-            duty_abc_ = motor_sel_.tick_voltage(Vec2D(duty_a, duty_b));
+            duty_abc_ = motor_ctrl_.tick_voltage(Vec2D(duty_a, duty_b));
         }
         pwm.set_duty(duty_abc_);
     }
@@ -539,6 +555,10 @@ public:
         update_fault_bit(FAULT_OVERCURRENT, current_sense.overcurrent.tick_timer());
         update_fault_bit(FAULT_OVERVOLTAGE, supply_voltage.overvoltage.tick_timer());
         update_fault_bit(FAULT_UNDERVOLTAGE, supply_voltage.undervoltage.tick_timer());
+        // Temperature has no recovery latch: the flag follows the (heavily
+        // filtered) measurement and is released as soon as the threshold is
+        // passed back below.
+        update_fault_bit(FAULT_OVERHEAT, temperature.overheat.tick_timer());
 
         // 2. External hardware fault pin
         int ext = error_.check();

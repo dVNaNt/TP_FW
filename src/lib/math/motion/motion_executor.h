@@ -19,6 +19,8 @@
  *
  * The tick path is branch-optimized for pipelining: state transitions are
  * driven by precomputed durations and flags stored per segment.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 #pragma once
 
@@ -89,7 +91,7 @@ public:
     }
 
     /**
-     * @brief Главный цикл обработки. Вызывается с высокой частотой.
+     * @brief Main processing loop. Called at a high rate.
      */
     __attribute__((always_inline)) MotionExecutorOutput
     tick(uint32_t now_us, int16_t time_scale, uint16_t current_torque, uint8_t current_io, bool& halt, bool& warn) {
@@ -117,12 +119,12 @@ public:
         const uint32_t t_in_seg = now_us - seg_start_us_;
 
         if (time_scale >= 0) {
-            // Мгновенная проверка триггеров. Для ANCHOR вернет true немедленно.
+            // Instant trigger check. Returns true immediately for ANCHOR.
             if (__builtin_expect(needs_forward_transition(t_in_seg, current_torque, current_io), 0)) {
                 do_forward_transition(now_us);
             }
         } else {
-            // Переполнение беззнакового числа означает "отрицательное время"
+            // Unsigned overflow means negative elapsed time
             if (__builtin_expect(t_in_seg > 0x80000000u, 0)) {
                 do_reverse_transition(now_us, halt);
             }
@@ -136,7 +138,7 @@ public:
     }
 
 private:
-    // Флаги предрассчитанных триггеров (Битовая маска)
+    // Pre-computed trigger flags (bitmask)
     static constexpr uint8_t FLAG_TIME   = 1 << 0;
     static constexpr uint8_t FLAG_TORQUE = 1 << 1;
     static constexpr uint8_t FLAG_IO     = 1 << 2;
@@ -161,7 +163,7 @@ private:
     bool enabled_ = true;
     bool paused_ = false;
 
-    // --- Кэш состояния ---
+    // --- State cache ---
     MotionMode base_mode_ = MotionMode::FREERUN;
     uint8_t trigger_flags_ = 0;
     bool is_reversible_ = false;
@@ -188,7 +190,7 @@ private:
     }
 
     /**
-     * @brief Вход в сегмент. Однократный парсинг параметров. Избавляет tick от ветвлений.
+     * @brief Segment entry. One-time parameter parsing; keeps tick() branch-free.
      */
     void enter_segment(const MotionCommandTM& cmd, uint32_t start_us, float v0) {
         seg_start_us_ = start_us;
@@ -205,8 +207,8 @@ private:
         trigger_flags_ = 0;
         is_reversible_ = false;
 
-        // Элегантная проверка наличия триггеров IO. 
-        // Если neg_mask == 0x3F (по умолчанию), триггер выключен.
+        // Elegant check for configured IO triggers. 
+        // If neg_mask == 0x3F (default), the trigger is disabled.
         bool has_io_trigger = (active_pos_mask_ != 0) || (active_neg_mask_ != 0x3F);
         bool has_torque_trigger = (active_torque_trigger_ != TorqueTrigger::DISABLED);
 
@@ -215,24 +217,24 @@ private:
         if (seg_dur_us_ > 0) trigger_flags_ |= FLAG_TIME;
 
         if (base_mode_ == MotionMode::ANCHOR) {
-            // ANCHOR: Мгновенное обновление. Не занимает времени, выполняется сразу!
+            // ANCHOR: instantaneous update. Takes no time, executes right away!
             is_reversible_ = true;
-            trigger_flags_ = FLAG_TIME; // Форсируем переход (time >= 0 мгновенно сработает)
+            trigger_flags_ = FLAG_TIME; // Force the transition (time >= 0 fires instantly)
             seg_dur_us_ = 0;
             buf_.trim_to_active();
-            seg_torque_ = 1.0f; // Сквозная передача
-            seg_cmd_end_vel_ = v0; // Наследуем скорость, чтобы не останавливаться
+            seg_torque_ = 1.0f; // Pass-through
+            seg_cmd_end_vel_ = v0; // Inherit velocity to avoid stopping
             return;
         }
 
         if (base_mode_ == MotionMode::HERMITE) {
             if (has_io_trigger || has_torque_trigger || (seg_dur_us_ == 0 && trigger_flags_ == 0)) {
-                // Если добавлены триггеры ИЛИ это Hold Unlimited (dur=0, trig=0), режим НЕВОЗВРАТНЫЙ
+                // If triggers are set OR this is Hold Unlimited (dur=0, trig=0), the mode is NON-REVERSIBLE
                 is_reversible_ = false;
                 buf_.trim_all_history();
                 seg_torque_ = has_torque_trigger ? 1.0f : ((cmd.torque != UINT16_MAX) ? (cmd.torque * (1.0f / 65535.0f)) : 1.0f);
             } else {
-                // Возвратный Эрмит (включая классический Hold Limited)
+                // Reversible Hermite (including classic Hold Limited)
                 is_reversible_ = true;
                 buf_.trim_to_active();
                 seg_torque_ = (cmd.torque != UINT16_MAX) ? (cmd.torque * (1.0f / 65535.0f)) : 1.0f;
@@ -242,11 +244,11 @@ private:
                 hermite_.prepare(cmd.motion.displacement, seg_dur_us_, v0, cmd.motion.end_velocity);
             }
         } else {
-            // FREERUN (Невозвратные режимы)
+            // FREERUN (non-reversible modes)
             buf_.trim_all_history();
             seg_torque_ = has_torque_trigger ? 1.0f : ((cmd.torque != UINT16_MAX) ? (cmd.torque * (1.0f / 65535.0f)) : 1.0f);
             
-            anchor_q32_ = real_pos_q32_; // Привязываем к реальности, сброс смещения
+            anchor_q32_ = real_pos_q32_; // Bind to reality, reset the offset
             seg_target_pos_q32_ = sat_add_i64(anchor_q32_, (int64_t)cmd.motion.displacement << 16);
             
             if (cmd.motion.displacement != 0) trigger_flags_ |= FLAG_POS;
@@ -254,16 +256,16 @@ private:
     }
 
     /**
-     * @brief Сверхбыстрая O(1) битовая проверка триггеров.
+     * @brief Ultra-fast O(1) bitwise trigger check.
      */
     __attribute__((always_inline)) bool needs_forward_transition(uint32_t t_in_seg, uint16_t current_torque, uint8_t current_io) const {
         if (static_cast<uint8_t>(base_mode_) == 0xFF) return buf_.has_future(); // HALT recovery
 
-        // Бесконечный Hold (или FREERUN) без триггеров. Переходит как только появится команда.
+        // Infinite Hold (or FREERUN) without triggers. Transitions as soon as a command arrives.
         if (trigger_flags_ == 0) return buf_.has_future();
 
         if (trigger_flags_ & FLAG_TIME) {
-            if (t_in_seg >= seg_dur_us_) return true; // Для ANCHOR сработает всегда (0 >= 0)
+            if (t_in_seg >= seg_dur_us_) return true; // For ANCHOR always fires (0 >= 0)
         }
 
         if (trigger_flags_ & FLAG_TORQUE) {
@@ -272,11 +274,11 @@ private:
         }
 
         if (trigger_flags_ & FLAG_IO) {
-            // Элегантная безветвленевая проверка (bitwise):
-            // Прямая маска: ищем хотя бы одну совпадающую единицу.
+            // Elegant branchless check (bitwise):
+            // Direct mask: look for at least one matching one.
             if ((current_io & active_pos_mask_) != 0) return true;
-            // Инверсная маска: ищем хотя бы один совпадающий ноль. 
-            // (~current_io содержит единицы там где пин = 0). 
+            // Inverted mask: look for at least one matching zero. 
+            // (~current_io has ones where the pin reads 0). 
             if ((~current_io & ~active_neg_mask_ & 0x3F) != 0) return true;
         }
 
@@ -313,18 +315,18 @@ private:
                 return;
             }
 
-            // Математически точный сдвиг базиса ТОЛЬКО для возвратных и якорей
+            // Mathematically exact basis shift ONLY for reversible segments and anchors
             if (base_mode_ == MotionMode::HERMITE || base_mode_ == MotionMode::ANCHOR) {
                 anchor_q32_ = sat_add_i64(anchor_q32_, (int64_t)active.motion.displacement << 16);
             } else {
-                anchor_q32_ = real_pos_q32_; // Привязка к реальности для защиты от рывков
+                anchor_q32_ = real_pos_q32_; // Bind to reality to protect against jerks
             }
 
             float exit_v = active.motion.end_velocity;
             if (base_mode_ == MotionMode::HERMITE && seg_dur_us_ == 0) {
                 exit_v = 0.0f; // Hold Unlimited exit
             } else if (base_mode_ == MotionMode::ANCHOR) {
-                exit_v = seg_cmd_end_vel_; // Пропуск скорости через ANCHOR насквозь
+                exit_v = seg_cmd_end_vel_; // Pass the exit velocity through the ANCHOR
             }
 
             uint32_t seg_end_us = (trigger_flags_ & FLAG_TIME) ? (seg_start_us_ + seg_dur_us_) : now_us;
@@ -339,7 +341,7 @@ private:
             MotionCommandTM next;
             if (buf_.peek_active(next)) enter_segment(next, seg_end_us, exit_v);
             
-            // ANCHOR сбросит это условие в true и мы продолжим цикл (мгновенно!)
+            // ANCHOR resets this condition to true and the loop continues (instantly!)
             if (!needs_forward_transition(0, 0, 0)) return; 
         }
     }
@@ -364,7 +366,7 @@ private:
                 return;
             }
 
-            // Корректно "откатываем" математику назад
+            // Correctly roll the math back
             if ((prev.mode.getMode() == MotionMode::HERMITE && prev.motion.duration > 0) ||
                  prev.mode.getMode() == MotionMode::ANCHOR) {
                 anchor_q32_ = sat_add_i64(anchor_q32_, -((int64_t)prev.motion.displacement << 16));
@@ -387,7 +389,7 @@ private:
 
         switch (base_mode_) {
             case MotionMode::HERMITE: {
-                if (seg_dur_us_ > 0) { // Обычный Эрмит или Hold Limited
+                if (seg_dur_us_ > 0) { // Regular Hermite or Hold Limited
                     uint32_t t = (t_in_seg > seg_dur_us_) ? seg_dur_us_ : t_in_seg;
                     int32_t dp_q16_32 = 0;
                     hermite_.eval(t, dp_q16_32, out.velocity_rps);
@@ -417,9 +419,9 @@ private:
                 break;
             }
             case MotionMode::ANCHOR:
-            default: { // ANCHOR и HALT (0xFF)
-                // ANCHOR никогда не будет выполняться (в normal flow) так как он проскакивает мгновенно,
-                // но если он последний (и уперся в HALT), скорость будет унаследована.
+            default: { // ANCHOR and HALT (0xFF)
+                // ANCHOR never actually runs (in the normal flow) since it is skipped instantly,
+                // but if it is the last segment (ending at HALT), its velocity is inherited.
                 out.position_q32 = anchor_q32_;
                 out.velocity_rps = seg_cmd_end_vel_ * time_scale * inv_time_scale;
                 break;

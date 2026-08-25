@@ -1,3 +1,8 @@
+/**
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
+ */
+
 #pragma once  // Ensure this header is included only once during compilation
 
 #include "../../common.h"                          // Include common migration definitions and types
@@ -93,8 +98,8 @@ private:
     HfiPll pll_;
 
 private:
-    float corr_cos_;  // Косинус угла коррекции
-    float corr_sin_;  // Синус угла коррекции
+    float corr_cos_;  // Cosine of the correction angle
+    float corr_sin_;  // Sine of the correction angle
 
     // Private members:
 float sign_product_filtered_;
@@ -156,7 +161,7 @@ polarity_ = 1;
         while (corr_angle_rad > (float)M_PI) corr_angle_rad -= 2.0f * (float)M_PI;
         phase_correction_ = corr_angle_rad;
 
-        // ДОБАВИТЬ ЭТО:
+        // TODO: add this:
         corr_cos_ = cosf(phase_correction_);
         corr_sin_ = sinf(phase_correction_);
 
@@ -216,11 +221,11 @@ polarity_ = 1;
         debug_amplitude = amplitude;
 
         // --- Stage 4: Reconstruction (OPTIMIZED) ---
-        // Вычисляем i_gamma_f напрямую через поворот вектора
+        // Compute i_gamma_f directly through vector rotation
         // i_gamma = Real * cos(phi) - Imag * sin(phi)
-        // Примечание: амплитуда должна быть масштабирована коэффициентом (2.0 / window_size),
-        // который уже учтен в amplitude_f, но sdft_real/imag "сырые".
-        // Поэтому применяем масштаб (2.0 / window_size) здесь или используем сырые данные и масштабируем итог.
+        // Note: the amplitude must be scaled by the factor (2.0 / window_size),
+        // which is already accounted for in amplitude_f, but sdft_real/imag are raw.
+        // Therefore apply the (2.0 / window_size) scale here, or use raw data and scale the result.
 
         float scale_factor = (2.0f / (float)window_size_);
         float i_gamma_raw = sdft_real_ * corr_cos_ - sdft_imag_ * corr_sin_;

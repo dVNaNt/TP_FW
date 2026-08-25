@@ -15,6 +15,8 @@
  *   setup.set_callback().init(cb_init).start(cb_start);
  * @endcode
  * Passing nullptr to any registration resets that slot back to the no-op.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include <stdint.h>

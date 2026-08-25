@@ -49,11 +49,11 @@
 #include <atomic>
 #include "../../common.h"
 #include "../generic/setup.h"
-#include "motor_selector.h"
+#include "motor_control.h"
 
 // Forward declaration of PhyDriverPWM to allow friend declaration
 struct PhyDriverPWM;
-struct MotorSelector;
+struct MotorControl;
 
 /// Function pointer type for comparator overcurrent threshold update callback.
 /// @param threshold 16-bit DAC threshold value to program into the hardware comparator
@@ -73,12 +73,12 @@ typedef void (*CalibrationCallback)();
 struct CurrentSensePHY {
     friend struct PhyDriverPWM;      ///< Allow PhyDriverPWM to call private tick()
     friend struct OvercurrentProxy;  ///< Allow proxy to access calibration/scale members
-    friend struct MotorSelectorPHY;  ///< Allow PhyDriverPWM to call private tick()
+    friend struct MotorControlPHY;  ///< Allow PhyDriverPWM to call private tick()
 
 private:
     // --- Dependencies ---
     Setup setup;  ///< Callback wrapper for hardware initialization
-    MotorSelectorPHY& motor_sel_;
+    MotorControlPHY& motor_ctrl_;
 
     // --- Configuration ---
     /// Full-scale current amplitude in mA for each channel (0 => sensor missing).
@@ -117,10 +117,10 @@ public:
      * @param ch3_fs_amps Full-scale current for Phase C in amps (0.0f = sensor missing)
      * @note Negative full-scale values indicate an inverted current sensor.
      */
-    CurrentSensePHY(float ch1_fs_amps, float ch2_fs_amps, float ch3_fs_amps, MotorSelectorPHY& motor_sel)
+    CurrentSensePHY(float ch1_fs_amps, float ch2_fs_amps, float ch3_fs_amps, MotorControlPHY& motor_ctrl)
         : full_scale_ma_((int32_t)(ch1_fs_amps * 1000.0f), (int32_t)(ch2_fs_amps * 1000.0f), (int32_t)(ch3_fs_amps * 1000.0f)),
           overcurrent{*this},
-          motor_sel_(motor_sel) {
+          motor_ctrl_(motor_ctrl) {
         if (!(ch1_fs_amps == 0.0f && ch2_fs_amps == 0.0f && ch3_fs_amps == 0.0f)) {
             int32_t max_scale = 0;
             // Find maximum absolute full-scale to use as denominator for Q15 scaling
@@ -166,7 +166,7 @@ private:
                 abc_norm[ch] = process_channel(ch, local_currents[ch]);
             }
             out_norm_ = abc_norm;
-            Vec2D currents_ab_norm = motor_sel_.tick_current(abc_norm);
+            Vec2D currents_ab_norm = motor_ctrl_.tick_current(abc_norm);
             current_ab_amps.a = norm2amps(currents_ab_norm.a);
             current_ab_amps.b = norm2amps(currents_ab_norm.b);
         }

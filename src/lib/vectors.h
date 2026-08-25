@@ -15,6 +15,8 @@
  * The 2D types use an anonymous union of overlapping named views so the same
  * storage can be interpreted as x/y, cos/sin, alpha/beta (Clarke frame),
  * d/q (Park frame) or flux/torque depending on context.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include "common.h"
@@ -89,7 +91,7 @@ struct Vec2D {
         int32_t new_x = x_val * rot_cos - y_val * rot_sin;
         int32_t new_y = x_val * rot_sin + y_val * rot_cos;
 
-        // Возвращаем (X, Y)
+        // Return (X, Y)
         return Vec2D(
             (int16_t)(new_x >> 15), 
             (int16_t)(new_y >> 15)

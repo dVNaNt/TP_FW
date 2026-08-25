@@ -23,6 +23,8 @@
  *   its address can be injected into the calibrator at construction time.
  * - LED handling is platform-independent through function-pointer callbacks
  *   registered by the board layer (see tunepulse.h).
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include "common.h"

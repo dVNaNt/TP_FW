@@ -13,6 +13,8 @@
  *   the PWM timer period.
  * - Include-order-critical utilities: clamp_i32() must be visible before the
  *   headers that use it, hence it is defined here ahead of those includes.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 #include <limits.h>
 #include <math.h>

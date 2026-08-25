@@ -6,6 +6,8 @@
  * definitions (SYS_PARAMS) and pulls in all peripheral setup headers. The
  * macros SupplyVoltage/Motor/MotorType/PhasePattern/ControlMode/DriverStatus
  * defined here are #undef'd by tunepulse.h after inclusion.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #pragma once

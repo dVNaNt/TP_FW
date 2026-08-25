@@ -5,6 +5,8 @@
  * PWM_Init() configures TIM1 (center-aligned, complementary outputs, dead
  * time); TIM1_Set_PWM_Values() writes the three compare registers;
  * PWM_Set_All_HiZ()/PWM_Set_All_Low() implement the fault safe states.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #ifndef TIMER_PWM_CLN17V3_H  // Include guard to prevent multiple inclusions of this header file

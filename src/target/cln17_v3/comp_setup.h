@@ -84,8 +84,8 @@ static inline void MX_DAC1_Init(void) {         // Begin function to initialize 
     while ((DAC1->SR & (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY)) != (DAC_SR_DAC1RDY | DAC_SR_DAC2RDY))
         __NOP();  // Prevent compiler optimization of the loop while waiting for hardware stabilization
 
-    // ОПТИМИЗАЦИЯ: Устанавливаем максимальный порог (4095), чтобы исключить ложные срабатывания 
-    // компараторов тока в момент старта до того, как управляющий код задаст реальный порог.
+    // OPTIMIZATION: A conservative startup threshold avoids false trips of the current 
+    // comparators at power-up, before the control code programs the real threshold.
     DAC1->DHR12R1 = 256U;  
     DAC1->DHR12R2 = 256U;  
 }  // End of MX_DAC1_Init function
@@ -103,7 +103,7 @@ static inline void MX_DAC3_Init(void) {         // Begin function to initialize 
         __NOP();  // Execute no-operation instruction to save power during short hardware spinlock
 
     DAC3->DHR12R1 = 1024U;  // Apply default startup threshold for overvoltage protection to Channel 1
-    DAC3->DHR12R2 = 256U;  // ОПТИМИЗАЦИЯ: Безопасный порог для OC при старте
+    DAC3->DHR12R2 = 256U;  // OPTIMIZATION: Safe OC startup threshold
 }  // End of MX_DAC3_Init function
 
 void DAC_Set_COMP2_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase A overcurrent threshold
@@ -189,7 +189,7 @@ static inline void MX_DRV_FAULT_GPIO_Init(void) {
     // Configure EXTI line 10 for PB10
     LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTB, LL_SYSCFG_EXTI_LINE10);  // Connect EXTI10 to GPIOB
 
-    // ИСПРАВЛЕНО: Запрос пользователя - прерывание на ОБА фронта для снятия флага
+    // FIXED: Both-edge interrupts so the fault flag can also be cleared
     LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_10);           
     LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_10);   // Rising edge trigger (clear fault)
     LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_10);  // Falling edge trigger (set fault)
@@ -249,7 +249,7 @@ static inline void COMP_EXTI_Init(void) {
  * Disables all PWM outputs (Hi-Z state) immediately and sets error flag
  */
 inline void COMP_Set_OC_Protection_State(void) {
-    // ОПТИМИЗАЦИЯ: Массивы объявлены как static const, чтобы не тратить время на стек в ISR
+    // OPTIMIZATION: Arrays declared static const so the ISR spends no time on stack stores
     static const int16_t pwm_hiz[3] = {INT16_MIN, INT16_MIN, INT16_MIN};  // All phases Hi-Z
     TIM1_Set_PWM_Values(pwm_hiz);                                         // Apply immediately in ISR
 }
@@ -259,7 +259,7 @@ inline void COMP_Set_OC_Protection_State(void) {
  * Enables regenerative braking (low-side ON, high-side OFF) immediately and sets error flag
  */
 inline void COMP_Set_OV_Protection_State(void) {
-    // ОПТИМИЗАЦИЯ: Массивы объявлены как static const, чтобы не тратить время на стек в ISR
+    // OPTIMIZATION: Arrays declared static const so the ISR spends no time on stack stores
     static const int16_t pwm_regen[3] = {0, 0, 0};  // All phases regenerative braking
     TIM1_Set_PWM_Values(pwm_regen);                 // Apply immediately in ISR
 }
@@ -332,9 +332,9 @@ extern "C" void EXTI15_10_IRQHandler(void) {
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_10)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_10);  // Clear pending flag
 
-        // ИСПРАВЛЕНО: Логика запроса. Сигнал активен низким уровнем (Active Low).
-        // Если rising edge (пин HIGH) -> false (снимаем флаг)
-        // Если falling edge (пин LOW) -> true (ставим флаг)
+        // FIXED: Request logic. The signal is active-low.
+        // Rising edge (pin HIGH) -> false (clear the flag)
+        // Falling edge (pin LOW) -> true (set the flag)
         bool is_fault = (LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_10) == 0U); 
         SerialUSB.println("E");
         if (g_heart_ptr != nullptr) {

@@ -25,6 +25,8 @@
  * triggering. The ISR only latches a millis() timestamp on the falling
  * edge (one subtraction = "time between fronts"), and poll() performs a
  * single comparison to decide when the 3 s hold has elapsed.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #ifndef BOOTLOADER_JUMP_CLN17V3_H

@@ -19,6 +19,8 @@ inline DMA_HandleTypeDef hdma_adc1; // Global HAL handle for DMA structure
 /**
  * @brief Initialize DMA for ADC12 (Dual Mode Master)
  * As requested, this DMA and NVIC configuration is strictly UNTOUCHED.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 inline void MX_DMA_ADC1_Init(void) { // Initialize the DMA mechanism
     __HAL_RCC_DMAMUX1_CLK_ENABLE(); // Enable the hardware clock for the DMA Multiplexer

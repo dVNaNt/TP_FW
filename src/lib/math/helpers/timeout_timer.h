@@ -1,3 +1,8 @@
+/**
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
+ */
+
 // Timeout timer helper class for countdown operations
 // Provides simple countdown timer with zero-detection
 

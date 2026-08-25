@@ -5,6 +5,8 @@
  * Aggregates the physical driver (PhyDriverPWM), the FOC current controller
  * (foc-current.h), the motor description (Motor) and the calibration state
  * machines into the single application-facing driver used by TunePulseHeart.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #pragma once
@@ -82,10 +84,10 @@ private:
             torque_nm = 0.042f;
         }
         if (pole_pairs <= 0.0f) {
-            pole_pairs = (drv.motor_sel_.get_motor_type() == MotorType_BLDC) ? 7.0f : 50.0f;
+            pole_pairs = (drv.motor_ctrl_.get_motor_type() == MotorType_BLDC) ? 7.0f : 50.0f;
         }
 
-        foc_current_ = FocCurrentController(drv.motor_sel_.get_motor_type(), R_ohm, L_h, torque_nm, rated_current_a, pole_pairs);
+        foc_current_ = FocCurrentController(drv.motor_ctrl_.get_motor_type(), R_ohm, L_h, torque_nm, rated_current_a, pole_pairs);
         setup_status.set_driver_status(OperationStatus::Ready);
     }
 

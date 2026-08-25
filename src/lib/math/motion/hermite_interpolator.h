@@ -6,6 +6,8 @@
  * duration and boundary velocities; eval() then produces position (Q16.32-ish
  * fixed point) and velocity per microsecond tick using only multiplies and
  * shifts - suitable for the ISR-hot trajectory path.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 // =============================================================================

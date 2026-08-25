@@ -15,6 +15,8 @@
  * All output goes to SerialUSB. When DEV_LOG_ENABLE is not defined, every
  * macro expands to nothing and the compiler removes the call sites entirely,
  * so logging has zero cost in release builds.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 // Define DEV_LOG_ENABLE in your project settings or uncomment the line below

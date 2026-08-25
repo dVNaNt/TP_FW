@@ -1,12 +1,12 @@
 #pragma once
 
 /**
- * @file motor_selector.h
- * @brief Unified phase selector combining inverse-Clarke voltage synthesis,
- *        Clarke current recombination, phase-pattern remapping and SVPWM
- *        centering/scaling.
+ * @file motor_control.h
+ * @brief Unified motor-control phase stage combining inverse-Clarke voltage
+ *        synthesis, Clarke current recombination, phase-pattern remapping and
+ *        SVPWM centering/scaling.
  *
- * MotorSelectorPHY provides two data paths used every control cycle:
+ * MotorControlPHY provides two data paths used every control cycle:
  *
  * - @c tick_voltage : alpha-beta command voltages -> remapped 3-phase PWM
  *   duties (inverse Clarke for BLDC, direct coil mapping for steppers), with
@@ -17,6 +17,9 @@
  *
  * Phase-pattern remapping (ABC / ACB / CBA wiring) is folded into both paths
  * using precomputed index permutations for zero runtime overhead.
+ *
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include "../../common.h"
@@ -45,7 +48,7 @@
 struct PhyDriverPWM;
 struct CurrentSensePHY;
 
-struct MotorSelectorPHY {
+struct MotorControlPHY {
 private:
     friend struct PhyDriverPWM;
     friend struct CurrentSensePHY;
@@ -204,7 +207,7 @@ private:
      *                        currently unused inside this class).
      * @param current_epsilon Balance tolerance for the current-sum check (Q15).
      */
-    MotorSelectorPHY(MotorType motor_type = MotorType_STEP,
+    MotorControlPHY(MotorType motor_type = MotorType_STEP,
                   PhasePattern phase_pattern = PhasePattern_ABC,
                   uint16_t duty_permille = 995u,
                   int16_t current_epsilon = 256)

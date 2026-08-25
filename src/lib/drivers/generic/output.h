@@ -8,6 +8,8 @@
  * OutputWrapper stores one function pointer taking a bool state. Unlike
  * InputWrapper, no default no-op is installed; set() performs a null check
  * before invoking, so an unconfigured wrapper is simply silent.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include <stdbool.h>

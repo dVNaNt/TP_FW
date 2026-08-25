@@ -59,6 +59,8 @@ struct ObserverState { // Define a structure to hold the output estimates of the
  * Edge cases: Handles encoder wrap-around natively using 32-bit integer overflow mechanics.
  * 
  * Reference: "Active Disturbance Rejection Control" by J. Han / Zhiqiang Gao.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 class LinearObserver { // Define the LinearObserver class
 private: // Begin private access modifier block

@@ -6,6 +6,8 @@
  * displacement, end velocity, torque limit, trigger configuration) plus the
  * supporting enums MotionMode, TorqueTrigger and IO trigger masks. Commands
  * are produced by the application layer and consumed by MotionExecutor.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #pragma once
@@ -14,60 +16,60 @@
 
 /**
  * @struct MotionCommand
- * @brief Базовая математическая структура сегмента траектории.
+ * @brief Base mathematical structure of a trajectory segment.
  */
 struct MotionCommand {
-    uint32_t duration = 0;     // Длительность сегмента в мкс (0 = бесконечно или мгновенно, зависит от режима)
-    int32_t displacement = 0;  // Перемещение (в тиках/шагах)
-    float end_velocity = 0.0f; // Конечная скорость сегмента (RPS)
+    uint32_t duration = 0;     // Segment duration in us (0 = infinite or instantaneous, mode-dependent)
+    int32_t displacement = 0;  // Displacement (in ticks/steps)
+    float end_velocity = 0.0f; // Segment end velocity (RPS)
 };
 
 /**
  * @struct MotionExecutorOutput
- * @brief Выходная телеметрия генератора траектории на каждый тик часов.
+ * @brief Output telemetry of the trajectory generator for every clock tick.
  */
 struct MotionExecutorOutput {
-    int64_t position_q32; /**< Интерполированная абсолютная позиция Q32.32 */
-    float velocity_rps;   /**< Мгновенная целевая скорость (RPS) */
-    float torque;         /**< Нормализованный лимит момента (0.0f ... 1.0f) */
+    int64_t position_q32; /**< Interpolated absolute position Q32.32 */
+    float velocity_rps;   /**< Instantaneous target velocity (RPS) */
+    float torque;         /**< Normalized torque limit (0.0f ... 1.0f) */
 };
 
 /**
- * @brief Перечисление базовых режимов движения (2 бита)
+ * @brief Basic motion modes enumeration (2 bits)
  */
 enum class MotionMode : uint8_t {
-    FREERUN = 0b00,       // Открытый контур: постоянная скорость (displacement - это лимит позиции)
-    FREERUN_LERP = 0b01,  // Открытый контур: линейная интерполяция скорости LERP
-    ANCHOR = 0b10,        // МГНОВЕННОЕ математическое смещение якоря (выполняется за 0 тактов)
-    HERMITE = 0b11        // Закрытый контур: Сплайновая траектория Эрмита (может быть Hold при disp=0)
+    FREERUN = 0b00,       // Open loop: constant speed (displacement acts as a position limit)
+    FREERUN_LERP = 0b01,  // Open loop: linear velocity interpolation (LERP)
+    ANCHOR = 0b10,        // INSTANTANEOUS mathematical anchor shift (executes in 0 ticks)
+    HERMITE = 0b11        // Closed loop: Hermite spline trajectory (becomes Hold when disp=0)
 };
 
 /**
- * @brief Режимы работы триггера по моменту/току (2 бита)
+ * @brief Torque/current trigger operating modes (2 bits)
  */
 enum class TorqueTrigger : uint8_t {
-    DISABLED = 0b00,     // Триггер выключен
-    LOWER_THAN = 0b01,   // Срабатывание при падении момента ниже порога
-    HIGHER_THAN = 0b10,  // Срабатывание при превышении порога момента
-    RESERVED = 0b11      // Резерв
+    DISABLED = 0b00,     // Trigger disabled
+    LOWER_THAN = 0b01,   // Fires when torque drops below the threshold
+    HIGHER_THAN = 0b10,  // Fires when torque exceeds the threshold
+    RESERVED = 0b11      // Reserved
 };
 
 /**
- * @brief Упакованный 16-битный регистр режима движения и триггеров.
- * Оптимизирован для атомарной передачи по сети и копирования.
+ * @brief Packed 16-bit register of motion mode and triggers.
+ * Optimized for atomic network transfer and copying.
  */
 union MotionConfig {
     struct {
-        uint16_t mode : 2;      // Бит 0-1: Режим движения (MotionMode)
-        uint16_t torque : 2;    // Бит 2-3: Режим триггера момента (TorqueTrigger)
-        uint16_t pos_mask : 6;  // Бит 4-9: Маска положительного направления IO
-        uint16_t neg_mask : 6;  // Бит 10-15: Маска отрицательного направления IO (инверсная)
+        uint16_t mode : 2;      // Bits 0-1: Motion mode (MotionMode)
+        uint16_t torque : 2;    // Bits 2-3: Torque trigger mode (TorqueTrigger)
+        uint16_t pos_mask : 6;  // Bits 4-9: Positive-direction IO mask
+        uint16_t neg_mask : 6;  // Bits 10-15: Negative-direction IO mask (inverted)
     } fields;
 
     uint16_t raw;
 
-    // Конструктор по умолчанию: neg маска инициализируется как 0x3F (все единицы), 
-    // что означает отсутствие триггера по низкому уровню.
+    // Default constructor: the neg mask is initialized to 0x3F (all ones), 
+    // meaning no active-low trigger is configured.
     constexpr MotionConfig(MotionMode m = MotionMode::FREERUN,
                            TorqueTrigger t = TorqueTrigger::DISABLED,
                            uint8_t pos = 0,
@@ -89,11 +91,11 @@ union MotionConfig {
 
 /**
  * @struct MotionCommandTM
- * @brief Полный пакет команды (Телеметрия + Режим), отправляемый в буфер
+ * @brief Full command packet (Telemetry + Mode) pushed into the buffer
  */
 struct MotionCommandTM {
 public:
     MotionCommand motion;
-    uint16_t torque = UINT16_MAX; /**< Лимит момента ИЛИ порог для триггера (если триггер активен) */
+    uint16_t torque = UINT16_MAX; /**< Torque limit OR trigger threshold (when trigger is active) */
     MotionConfig mode = MotionMode::ANCHOR; 
 };

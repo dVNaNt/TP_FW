@@ -416,3 +416,24 @@ FLASH: 58752 bytes (44.82% of 131072 bytes): +10432 bytes
 RAM: 7644 bytes (23.33% of 32768 bytes): +240 bytes
 
 
+## 2026-08-25 - motor_selector rename; Temperature protection; Documentation pass
+**Changes:**
+- Renamed motor_selector.h to motor_control.h (MotorControlPHY, motor_ctrl_)
+- Added temperature.h with WT/OT limits, shift-based long filter and immediate release
+- Integrated into PhyDriverPWM + ADC IRQ glue
+- English-only comments and copyright headers across src/lib and cln17_v3
+
+**Reasoning:**
+- Consistent naming
+- Thermal safety per voltage-protection pattern
+- License/documentation compliance
+
+**Notes:**
+- New fluent API: set_limit_celsius().wt_lim_celsius().ot_lim_celsius()
+- FAULT_OVERHEAT wired in tick_icr
+- New docs: optimization_plan.md, refactor_plan.md, suggestions.md
+
+FLASH: 61040 bytes (46.57% of 131072 bytes): +2288 bytes
+RAM: 7820 bytes (23.86% of 32768 bytes): +176 bytes
+
+

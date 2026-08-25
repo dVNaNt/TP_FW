@@ -5,6 +5,8 @@
  * Implements the MotorStatus state machine stages: winding-resistance
  * measurement (DC injection), high-frequency-injection inductance measurement
  * on the D/Q axes, and pole-pair/direction detection during slow rotation.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 // 3-phase PWM driver with FOC (Field Oriented Control) current regulation
@@ -29,16 +31,16 @@ static constexpr uint8_t CAL_OVERSAMPLING_SHIFT = 6;   // log2(64) for shift opt
 // ~0.1 % of maximum driver output power. Otherwise we can bound ADC resolution easily and cant control driver
 static constexpr float CAL_UNDERPOWER_RATIO = 0.001f;
 
-// Старый шаг составлял 2 Q15-единицы за тик.
-// Теперь это безразмерная доля Vbus, из которой на каждом тике получается шаг в Вольтах.
+// The old step was 2 Q15 units per tick.
+// It is now a dimensionless fraction of Vbus, from which a per-tick step in volts is derived.
 static constexpr float CAL_VOLTAGE_RAMP_STEP_RATIO = 0.0005;
 
 static constexpr float CAL_VOLTAGE_LIMIT_RATIO = 0.5f;
 
-// Сos(45°) для коррекции амплитуды тестового вектора.
+// Cos(45 deg) for test-vector amplitude correction.
 static constexpr float COS_45 = 0.70710678118f;
 
-// Минимальный ток для безопасного деления при расчёте R и Z.
+// Minimum current for safe division in the R and Z calculations.
 static constexpr float MIN_MEASUREMENT_CURRENT_AMPS = 0.001f;
 
 static constexpr int16_t CAL_ANGLE_45D = 8192;    // +45 deg
@@ -50,11 +52,11 @@ static constexpr int16_t SETTLE_TIMEOUT = 900;
 static constexpr int16_t ROTATION_TIMEOUT = 1800;
 static constexpr uint32_t CALIB_PAUSE_CYCLES = 1800;  // 100ms pause @ 18kHz
 
-// Увеличено время измерения индуктивности для большей точности (500 периодов на 1кГц)
+// Increased inductance measurement time for accuracy (500 periods at 1 kHz)
 static constexpr uint32_t INDUCTANCE_MEASURE_CYCLES_F1 = 9000;  // 0.5 sec at 18kHz
 static constexpr uint32_t INDUCTANCE_MEASURE_CYCLES_F2 = 9000;  // 0.5 sec at 18kHz
 
-// Частоты для двойной валидации индуктивности
+// Frequencies for dual inductance validation
 static constexpr uint16_t HFI_FREQ_1 = 1000;  // 1000 Hz
 static constexpr uint16_t HFI_FREQ_2 = 1500;  // 1500 Hz
 
@@ -79,7 +81,7 @@ private:
     float hfi_accum_amps_;
     uint16_t hfi_periods_;
 
-    // Результаты измерений на двух частотах
+    // Measurement results at the two frequencies
     float Ld_f1_, Ld_f2_;
     float Lq_f1_, Lq_f2_;
 
@@ -95,7 +97,7 @@ private:
     int32_t inductance_a_sum_;  // Phase A inductance accumulator for HFI measurement
     int32_t inductance_b_sum_;  // Phase B inductance accumulator for HFI measurement
 
-    // --- НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ КОРРЕКЦИИ СОПРОТИВЛЕНИЯ ---
+    // --- NEW VARIABLES FOR RESISTANCE CORRECTION ---
     bool is_resistance_correction_;
     float first_ia_amps_;
     float first_ib_amps_;
@@ -144,10 +146,10 @@ public:
           measure_current_b_sum_amps_(0.0f),
           inductance_a_sum_(0),
           inductance_b_sum_(0),
-          is_resistance_correction_(false),       // Инициализация
-          first_ia_amps_(0.0f),                   // Инициализация
-          first_ib_amps_(0.0f),                   // Инициализация
-          uncorrected_total_resistance_ohms_(0),  // Инициализация
+          is_resistance_correction_(false),       // Initialization
+          first_ia_amps_(0.0f),                   // Initialization
+          first_ib_amps_(0.0f),                   // Initialization
+          uncorrected_total_resistance_ohms_(0),  // Initialization
           timeout_(CALIB_PAUSE_CYCLES),
           stability_check_(0.05, 240),
           drv(drv),
@@ -237,14 +239,14 @@ public:
 
         reset_voltage();
         stability_check_.reset();
-        is_resistance_correction_ = false;  // Сбрасываем флаг
+        is_resistance_correction_ = false;  // Clear the flag
 
         soft_power_limit_watts_ = motor_ohmic_power_watts * 0.75f;
 
         // #REPLACE with just simple storing value + value threshold check
 
-        drv.motor_sel_.set_motor_type(MotorType_STEP);
-        drv.motor_sel_.set_phase_pattern(PhasePattern_ABC);
+        drv.motor_ctrl_.set_motor_type(MotorType_STEP);
+        drv.motor_ctrl_.set_phase_pattern(PhasePattern_ABC);
 
         angle_ref = CAL_ANGLE_45D;
         timeout_.set_timeout(WARMUP_TIMEOUT);
@@ -267,7 +269,7 @@ public:
                 voltage_d_out_volts_ = voltage_volts_;
                 voltage_q_out_volts_ = 0.0f;
 
-                // [OPT] measured_current нужен только здесь — вычисляем только здесь
+                // [OPT] measured_current is only needed here - compute it only here
                 const float measured_current_amps = fabsf(current_a_amps + current_b_amps);
 
                 // #REPLACE with just simple storing value + value threshold check
@@ -306,7 +308,7 @@ public:
                 voltage_d_out_volts_ = voltage_volts_;
                 voltage_q_out_volts_ = 0.0f;
 
-                // ИЗМЕНЕНИЕ: Добавлен аргумент power для вычисления корректировки
+                // CHANGED: added the power argument for correction computation
                 // #REPLACE norm value should be removed and replaced with float power
                 process_resistance_measure(current_a_amps, current_b_amps, power_watts, supply_voltage_volts, status_tracker,
                                            motor, setup_status, angle_ref);
@@ -314,7 +316,7 @@ public:
             }
 
             case MotorStatus::SlowRotation: {
-                // ... (Оригинальный код не менялся)
+                // ... (original code unchanged)
                 voltage_d_out_volts_ = voltage_volts_;
                 voltage_q_out_volts_ = 0.0f;
 
@@ -336,7 +338,7 @@ public:
                 break;
             }
 
-            // ... Остальные состояния HFI без изменений ...
+            // ... remaining HFI states unchanged ...
             case MotorStatus::InductanceMeasureWarmup: {
                 voltage_d_out_volts_ = holding_voltage_volts_;
                 voltage_q_out_volts_ = 0.0f;
@@ -366,7 +368,7 @@ public:
             case MotorStatus::InductanceMeasureQ: {
                 hfi_gen_.set_frequency_target(HFI_FREQ_1);
 
-                // Изменено false, true -> false, false
+                // Changed false, true -> false, false
                 process_hfi_axis(current_q_amps, false, false, supply_voltage_volts, status_tracker, motor, setup_status,
                                  MotorStatus::InductanceMeasureQ2, INDUCTANCE_MEASURE_CYCLES_F2, &Lq_f1_, HFI_FREQ_1);
                 break;
@@ -460,7 +462,7 @@ private:
             // PID-like adaptation for amplitude
             float target_ripple_min_amps = target_current_amps_ * 0.20f;
 
-            // [OPT] 25% от target_current_ = деление на 4 = правый сдвиг на 2 бита
+            // [OPT] 25% of target_current_ = divide by 4 = shift right by 2 bits
             float target_ripple_max_amps = target_current_amps_ * 0.25f;
 
             if (ripple_amps < target_ripple_min_amps) {
@@ -485,17 +487,17 @@ private:
             float avg_ripple_amps = (hfi_periods_ > 1) ? (hfi_accum_amps_ / static_cast<float>(hfi_periods_ - 1)) : 0.0f;
 
             // Calculate accurate Inductance taking Ohmic Resistance into account
-            // [OPT] Кэшируем norm2mv(hfi_amplitude_) — вызывается дважды: для v_peak и для лога
+            // [OPT] Cache norm2mv(hfi_amplitude_) - used twice: for v_peak and for logging
             float v_peak_volts = hfi_amplitude_volts_;
 
             float i_peak_amps = avg_ripple_amps * 0.5f;
             float omega_rad_per_sec = 2.0f * 3.14159265f * static_cast<float>(current_freq);
 
-            // Motor API пока возвращает миллиОмы; внутри класса сразу работаем только в Омах.
+            // Motor API still returns milliohms; inside the class we work in ohms only.
             float resistance_ohms = motor.get_total_resistance();  // in Ohms
 
-            // [OPT] Z вычисляется заранее: устраняем повторное деление v_peak/i_peak в логе
-            //       и защищаем от деления на ~0 (i_peak <= 0.001f был вне блока if ниже — это был баг)
+            // [OPT] Z is precomputed: removes repeated v_peak/i_peak division in logging
+            //       and guards against ~0 division (i_peak <= 0.001f was outside the if below - a bug)
             float impedance_ohms = (i_peak_amps > MIN_MEASUREMENT_CURRENT_AMPS) ? (v_peak_volts / i_peak_amps) : 0.0f;
 
             if (i_peak_amps > MIN_MEASUREMENT_CURRENT_AMPS) {
@@ -510,9 +512,9 @@ private:
                 *result_L = 0.0f;
             }
 
-            // [OPT] Используем кэшированный amp_mv вместо повторного вызова norm2mv
+            // [OPT] Use the cached amp_mv instead of calling norm2mv again
 
-            // [OPT] Используем кэшированный Z вместо повторного деления v_peak / i_peak
+            // [OPT] Use the cached Z instead of dividing v_peak / i_peak again
 
             if (is_final_step) {
                 // Final validation logic
@@ -552,8 +554,8 @@ private:
                                       Motor& motor,
                                       DriverStatus& setup_status,
                                       int16_t& angle_ref) {
-        motor.set_motor_type(drv.motor_sel_.get_motor_type());
-        motor.set_phase_pattern(drv.motor_sel_.get_phase_pattern());
+        motor.set_motor_type(drv.motor_ctrl_.get_motor_type());
+        motor.set_phase_pattern(drv.motor_ctrl_.get_phase_pattern());
         setup_status.motor_type_not_verified = 0;
         setup_status.voltage_unsafe = supply_voltage_volts <= 0.0f;
 
@@ -597,11 +599,11 @@ private:
     }
 
     void trigger_resistance_correction(MotorStatus& status_tracker, Motor& motor, float ia_amps, float ib_amps) {
-        // Сохраняем токи первого прохода (в mA) для доминантной фазы
+        // Store first-pass currents (mA) for the dominant phase
         first_ia_amps_ = ia_amps;
         first_ib_amps_ = ib_amps;
 
-        // Motor API пока возвращает миллиОмы; внутри класса сразу переводим в Омы.
+        // Motor API still returns milliohms; inside the class we convert to ohms right away.
         uncorrected_total_resistance_ohms_ = motor.get_total_resistance();
 
         is_resistance_correction_ = true;
@@ -632,7 +634,7 @@ private:
 
         // Decrement the timeout counter (samples) by 1. When it reaches 0, all 64 measurements are collected
         if (timeout_.tick() == 0) {
-            // Сos(45°) в Q16 = round(cos(π/4) * 65536)
+            // Cos(45 deg) in Q16 = round(cos(pi/4) * 65536)
             float voltage_corrected_volts = voltage_volts_ * COS_45;  // Voltage amplitude fix
 
             // Get the averaged phase A and B currents over the entire measurement period
@@ -646,7 +648,7 @@ private:
                 const float abs_first_ia = fabsf(first_ia_amps_);
                 const float abs_first_ib = fabsf(first_ib_amps_);
 
-                // Выбираем доминантную фазу (лучший SNR)
+                // Select the dominant phase (best SNR)
                 bool use_phase_a = abs_first_ia >= abs_first_ib;
 
                 float abs_first_i_amps = use_phase_a ? abs_first_ia : abs_first_ib;
@@ -655,18 +657,18 @@ private:
 
                 float abs_second_i_amps = fabsf(second_i_amps);
 
-                // delta_i должна быть > 0, так как I1 > I2 при V1 > V2
+                // delta_i must be > 0 since I1 > I2 when V1 > V2
                 float delta_i_amps = abs_first_i_amps - abs_second_i_amps;
 
                 float corrected_total_resistance_ohms = uncorrected_total_resistance_ohms_;
 
-                // Формула: R_corrected = R_uncorrected * I1 / (2 * delta_i)
-                // Напряжение полностью сокращается при точном V2 = V1/2
+                // Formula: R_corrected = R_uncorrected * I1 / (2 * delta_i)
+                // Voltage cancels out completely for exact V2 = V1/2
                 if (delta_i_amps > 0.0f && abs_first_i_amps > MIN_MEASUREMENT_CURRENT_AMPS) {
                     corrected_total_resistance_ohms = corrected_total_resistance_ohms * abs_first_i_amps / (2.0f * delta_i_amps);
                 }
 
-                // Граница старого Motor API: передаём миллиОмы.
+                // Legacy Motor API boundary: pass milliohms.
                 motor.set_total_resistance(corrected_total_resistance_ohms);
 
                 is_resistance_correction_ = false;
@@ -694,7 +696,7 @@ private:
                         // Store temporary resistance as arithmetic mean of phases A and B
                         float average_resistance_ohms = (resistance_a_ohms + resistance_b_ohms) * 0.5f;
 
-                        // Граница старого Motor API: передаём миллиОмы.
+                        // Legacy Motor API boundary: pass milliohms.
                         motor.set_total_resistance(average_resistance_ohms);
 
                         // Slowly rotate the vector by 30° for verification. Target angle 16384 (current + 45° el. (BLDC: +30°))
@@ -711,13 +713,13 @@ private:
                         status_tracker = MotorStatus::SlowRotation;
 
                         if ((ia_amps * 0.25f) >= ib_amps) {
-                            drv.motor_sel_.set_phase_pattern(PhasePattern_CBA);
+                            drv.motor_ctrl_.set_phase_pattern(PhasePattern_CBA);
 
                             // Set target angle to -16384 (corresponds to CBA connection)
                             angle_ref = -CAL_ANGLE_90D;
                             return;
                         } else if ((ib_amps * 0.25f) >= ia_amps) {
-                            drv.motor_sel_.set_phase_pattern(PhasePattern_ACB);
+                            drv.motor_ctrl_.set_phase_pattern(PhasePattern_ACB);
 
                             // Set target angle to -32768 (corresponds to ACB connection)
                             angle_ref = CAL_ANGLE_180D;
@@ -739,7 +741,7 @@ private:
                         motor.set_total_resistance(average_resistance_ohms);
 
                         // Set motor type in the selector as BLDC
-                        drv.motor_sel_.set_motor_type(MotorType_BLDC);
+                        drv.motor_ctrl_.set_motor_type(MotorType_BLDC);
 
                         trigger_resistance_correction(status_tracker, motor, ia_amps, ib_amps);
                         return;
@@ -770,7 +772,7 @@ private:
                 }
             }
 
-            drv.motor_sel_.set_motor_type(MotorType_Invalid);
+            drv.motor_ctrl_.set_motor_type(MotorType_Invalid);
             set_error(status_tracker, motor, setup_status);
         }
     }

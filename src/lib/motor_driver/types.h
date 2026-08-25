@@ -11,6 +11,8 @@
  * - @c OperationStatus: high-level driver lifecycle states.
  * - @c DriverStatus   : packed one-byte status word combining the operation
  *                       status with per-subsystem fault flags.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include "../common.h"

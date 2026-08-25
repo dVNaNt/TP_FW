@@ -521,7 +521,7 @@ TP_LOG_ARRAY("ECCArr ", ecc_table); // Output the entire calibration array for d
         // Compute mechanical angle mapped into one electrical period safely
     uint16_t el = (uint16_t)(((uint32_t)result * (uint32_t)cal_size) / (uint32_t)el_angle_div);
 
-    // Компенсация того, что первый калибровочный сэмпл был снят после +1 electrical step
+    // Compensate for the first calibration sample being taken after +1 electrical step
     const uint16_t phase_shift = (uint16_t)(0x10000u / (uint32_t)el_angle_div);
 
     return (uint16_t)(el - phase_shift);    } // End of correct_el_angle() method
@@ -534,19 +534,19 @@ TP_LOG_ARRAY("ECCArr ", ecc_table); // Output the entire calibration array for d
      * The ECC table stores inverse error as a function of raw encoder angle.
      * Linear interpolation between neighboring bins provides a smooth correction.
      */
-// Финальная и самая точная версия коррекции:
+// Final and most accurate correction version:
 uint16_t correct_position(uint16_t position) const {
     if (cal_size == 0) return position;
 
-    // Сдвиг на 11 бит для ECC_TABLE_SIZE = 32 (работает быстрее деления)
+    // Shift by 11 bits for ECC_TABLE_SIZE = 32 (faster than division)
     uint16_t idx = position >> 11; 
-    uint16_t next_idx = (idx + 1) & 31; // Маска для 32
-    uint16_t fraction = position & 2047; // Маска остатка
+    uint16_t next_idx = (idx + 1) & 31; // Mask for 32 entries
+    uint16_t fraction = position & 2047; // Fractional remainder mask
 
     int16_t offset1 = ecc_table[idx];
     int16_t offset2 = ecc_table[next_idx];
 
-    // Интерполяция (сдвиг обратно на 11 бит)
+    // Interpolation (shift back by 11 bits)
     int32_t interp_error = offset1 + (((offset2 - offset1) * (int32_t)fraction) >> 11);
 
     return (uint16_t)(position - interp_error); 

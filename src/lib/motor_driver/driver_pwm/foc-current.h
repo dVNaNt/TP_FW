@@ -69,8 +69,8 @@ struct FocCurrentController {
     // ============================================================
     float prev_id_target = 0.0f;
     float prev_iq_target = 0.0f;
-    float prev_ud_out = 0.0f;  // Добавлено для предиктивного расчета мощности
-    float prev_uq_out = 0.0f;  // Добавлено для предиктивного расчета мощности
+    float prev_ud_out = 0.0f;  // Added for predictive power computation
+    float prev_uq_out = 0.0f;  // Added for predictive power computation
 
     // ============================================================
     //                 Calculated Power Metrics [W]
@@ -195,7 +195,7 @@ public:
     float get_pwr_mech() const { return pwr_mech; }
 
     // ============================================================
-    //                 Основной шаг регулятора
+    //                 Main regulator step
     // ============================================================
     Vec2D_f32 tick(float iq_target_a,
                    float id_measured_a,
@@ -208,31 +208,31 @@ public:
         cmd_q_a = iq_target_a;
 
         // --------------------------------------------------------
-        // 0) Regenerative braking (Ограничение генерации)
+        // 0) Regenerative braking (generation limiting)
         // --------------------------------------------------------
         // Above-threshold generated power (positive when generating)
-        // Внимание: pwr_mech уже отфильтрована на предыдущем шаге
+        // Note: pwr_mech has already been filtered on the previous step
         const float gen_pwr = -pwr_mech;
         const float demand = (gen_pwr > brake_pwr_threshold) ? (gen_pwr - brake_pwr_threshold) : 0.0f;
 
         if (demand > 0.0f) {
-            // Приоритет 1: Сброс мощности через D-ось в пределах безопасного бюджета
-            // Мы пытаемся рассеять столько, сколько возможно до лимита peak_loss_pwr
+            // Priority 1: dump power through the D-axis within the safe budget
+            // We dissipate as much as possible up to the peak_loss_pwr limit
             const float pwr_to_dissipate = clampf(demand, 0.0f, peak_loss_pwr);
             const float id_brake = sqrtf(pwr_to_dissipate / (power_scale_factor * R));
 
-            // Вливаем ток в положительную ось D; жестко ограничиваем по тепловому лимиту
+            // Inject current into the positive D-axis; hard-limited by the thermal budget
             id_target_a += clampf(id_brake, 0.0f, brake_id_max_a);
 
-            // Приоритет 2: Кольцевое ограничение по мощности для Q-оси (тормозного момента)
-            // Рассчитываем соответствие (k) между фактической генерацией и тем, что мы способны сбросить
+            // Priority 2: circular power limiting for the Q-axis (braking torque)
+            // Compute the ratio (k) between actual generation and our dissipation capability
             const float k = peak_loss_pwr / gen_pwr;
 
-            // Вычисляем допустимую амплитуду Iq на основе предыдущего задания
-            // (+0.01f гарантирует, что алгоритм сможет стартовать, если prev_iq был равен 0)
+            // Compute the permissible Iq amplitude based on the previous command
+            // (+0.01f guarantees the algorithm can start when prev_iq was 0)
             const float max_allowed_iq_mag = (fabsf(prev_iq_target) + 0.01f) * k;
 
-            // Ограничиваем запрошенный ток Iq так, чтобы мощность рекуперации вписалась в бюджет
+            // Clamp the requested Iq so regeneration power fits into the budget
             if (iq_target_a > 0.0f) {
                 iq_target_a = clampf(iq_target_a, 0.0f, max_allowed_iq_mag);
             } else {
@@ -241,22 +241,22 @@ public:
         }
 
         // --------------------------------------------------------
-        // 0.5) Positive Power Limiting (Ограничение потребления)
+        // 0.5) Positive power limiting (consumption clamp)
         // --------------------------------------------------------
-        // Максимально доступная мощность от источника питания
+        // Maximum power available from the power supply
         const float max_supply_pwr = supply_current_a * bus_voltage_v;
 
-        // Предиктивная оценка электрической мощности (с использованием напряжений прошлого такта)
-        // Если мы разгоняемся, мощность будет положительной
+        // Predictive estimate of electrical power (using previous-tick voltages)
+        // While accelerating the power is positive
         const float predicted_pwr = power_scale_factor * (prev_ud_out * id_target_a + prev_uq_out * iq_target_a);
 
-        // Если планируемая мощность превышает лимит блока питания
+        // If the projected power exceeds the supply limit
         if (predicted_pwr > max_supply_pwr && predicted_pwr > 0.001f) {
-            // Вычисляем коэффициент масштабирования тока
+            // Compute the current scaling factor
             const float pwr_scale = max_supply_pwr / predicted_pwr;
 
-            // Ограничиваем только моментный ток Iq.
-            // Id оставляем как есть, так как он может использоваться для field weakening
+            // Only the torque current Iq is clamped.
+            // Id is left unchanged since it may be used for field weakening
             iq_target_a *= pwr_scale;
         }
 
@@ -264,7 +264,7 @@ public:
         target_iq_ = iq_target_a;
 
         // --------------------------------------------------------
-        // 1) Динамический расчет полосы пропускания (Gain Scheduling)
+        // 1) Dynamic bandwidth computation (gain scheduling)
         // --------------------------------------------------------
         float current_bw = bw_min_hz + bw_slope_hz_per_rads * fabsf(omega_el_rad_s);
         current_bw = clampf(current_bw, bw_min_hz, bw_max_hz);
@@ -275,13 +275,13 @@ public:
         ki = R * omega_c * 0.25f;
 
         // --------------------------------------------------------
-        // 2) Максимально допустимый модуль вектора напряжения
+        // 2) Maximum permissible voltage-vector magnitude
         // --------------------------------------------------------
         const float u_max = bus_voltage_v * voltage_limit_fraction;
         const float u_max_sq = u_max * u_max;
 
         // --------------------------------------------------------
-        // 3) Производные задания тока
+        // 3) Derivatives of the current command
         // --------------------------------------------------------
         const float did_target_dt = (id_target_a - prev_id_target) * kInvDt;
         const float diq_target_dt = (iq_target_a - prev_iq_target) * kInvDt;
@@ -290,27 +290,27 @@ public:
         prev_iq_target = iq_target_a;
 
         // --------------------------------------------------------
-        // 4) Feedforward по оси d
+        // 4) D-axis feedforward
         // --------------------------------------------------------
         const float ud_ff_resistive = R * id_target_a;
         const float ud_ff_dynamic = L * did_target_dt;
         const float ud_ff_cross = -omega_el_rad_s * L * iq_target_a;
 
         // --------------------------------------------------------
-        // 5) Feedforward по оси q
+        // 5) Q-axis feedforward
         // --------------------------------------------------------
         const float uq_ff_resistive = R * iq_target_a;
         const float uq_ff_dynamic = L * diq_target_dt;
         const float uq_ff_cross = omega_el_rad_s * L * id_target_a;
 
         // --------------------------------------------------------
-        // 6) Ошибки тока для PI
+        // 6) Current errors for the PI controllers
         // --------------------------------------------------------
         const float err_d = id_target_a - id_measured_a;
         const float err_q = iq_target_a - iq_measured_a;
 
         // --------------------------------------------------------
-        // 7) PI коррекция и суммирование с FF
+        // 7) PI correction summed with feedforward
         // --------------------------------------------------------
         const float ud_pi = kp * err_d + integrator_d;
         const float uq_pi = kp * err_q + integrator_q;
@@ -322,7 +322,7 @@ public:
         float uq_out = uq_unlimited;
 
         // --------------------------------------------------------
-        // 8) Круговой лимит по напряжению
+        // 8) Circular voltage limit
         // --------------------------------------------------------
         const float u_sq = ud_unlimited * ud_unlimited + uq_unlimited * uq_unlimited;
         Vec2D_f32 out;
@@ -344,30 +344,30 @@ public:
         out.d = ud_out;
         out.q = uq_out;
 
-        // Сохраняем напряжения для предиктивного контроля мощности на следующем такте
+        // Store voltages for predictive power control on the next tick
         prev_ud_out = ud_out;
         prev_uq_out = uq_out;
 
         // --------------------------------------------------------
-        // 10) Расчет мощностей (Power Estimation) и динамическая фильтрация
+        // 10) Power estimation and dynamic filtering
         // --------------------------------------------------------
-        // Рассчитываем мгновенные значения мощностей
+        // Compute instantaneous power values
         const float inst_pwr_el = power_scale_factor * (ud_out * id_measured_a + uq_out * iq_measured_a);
         const float inst_pwr_loss = power_scale_factor * R * (id_measured_a * id_measured_a + iq_measured_a * iq_measured_a);
 
-        // Расчет динамической альфы фильтра: зависит И от скорости И от напряжения
+        // Dynamic filter alpha: depends on BOTH speed AND voltage
         const float voltage_excess = clampf(bus_voltage_v - brake_voltage_threshold, 0.0f, brake_voltage_range);
-        const float voltage_factor = voltage_excess / brake_voltage_range;  // От 0.0 до 1.0
+        const float voltage_factor = voltage_excess / brake_voltage_range;  // 0.0 to 1.0
 
-        // Повышаем частоту фильтрации при превышении порога напряжения с учетом скорости
+        // Raise the filter cutoff above the voltage threshold, speed-dependent
         const float dynamic_alpha =
             clampf(brake_filter_alpha + voltage_factor * fabsf(omega_el_rad_s) * brake_speed_scale, brake_filter_alpha, 1.0f);
 
-        // Фильтруем обе компоненты с одинаковой альфой
+        // Filter both components with the same alpha
         pwr_el += dynamic_alpha * (inst_pwr_el - pwr_el);
         pwr_loss += dynamic_alpha * (inst_pwr_loss - pwr_loss);
 
-        // Механическая мощность - это разница отфильтрованных компонент
+        // Mechanical power is the difference of the filtered components
         pwr_mech = pwr_el - pwr_loss;
 
         return out;

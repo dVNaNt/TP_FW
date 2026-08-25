@@ -18,6 +18,8 @@
  * PLL_P: 2
  * PLL_Q: 2
  * PLL_R: 2
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 void SystemClock_Config(void) {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -53,9 +55,9 @@ void SystemClock_Config(void) {
         Error_Handler();
     }
 
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;  // Включаем блок DWT
-    DWT->CYCCNT = 0;                                 // Обнуляем счетчик
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;             // Запускаем счетчик тактов
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;  // Enable the DWT block
+    DWT->CYCCNT = 0;                                 // Zero the counter
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;             // Start the cycle counter
 
     // Update SystemCoreClock variable
     SystemCoreClockUpdate();

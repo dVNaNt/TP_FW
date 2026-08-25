@@ -9,6 +9,8 @@
  * When no callback is registered the wrapper falls back to a built-in
  * "null" provider that always returns -1, so check() never dereferences a
  * null pointer and needs no branch on the hot path.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include <stdbool.h>

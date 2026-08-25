@@ -16,6 +16,8 @@
  * 32-byte records (8 x uint32_t words), matching typical STM32 double-word /
  * row programming granularity; reads are word-granular with an optional
  * sequential cursor for table scanning.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include <cstdint>
@@ -164,7 +166,7 @@ public:
         if (addr + 32 > max_size || !hw_write_cb) {
             return false;
         }
-        // Передаем адрес напрямую, так как смещение добавляется на уровне железа
+        // Address passed as-is; the section offset is added by the hardware layer
         return hw_write_cb(addr, data);
     }
 
@@ -181,7 +183,7 @@ public:
         }
 
         result.addr = current_read_offset;
-        // Читаем по текущему смещению
+        // Read at the current offset
         result.success = hw_read_cb(current_read_offset, &result.value);
         
         if (result.success) {
@@ -228,7 +230,7 @@ public:
         }
 
         result.addr = addr;
-        // Передаем адрес напрямую
+        // Address passed as-is
         result.success = hw_read_cb(addr, &result.value);
         
         return result;

@@ -11,6 +11,8 @@
  * callbacks (calibration_* / user_*); all bounds checking and address
  * translation is centralized in the private section-guard helpers, so a
  * consumer bound to one partition can never access another one.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #ifndef FLASH_EEPROM_HW_HPP
@@ -19,12 +21,12 @@
 #include <cstdint>
 #include "stm32g431xx.h" 
 
-// Если не используем HAL, задаем размер памяти вручную (128 KB для STM32G431)
+// If HAL is not used, define the flash size manually (128 KB for STM32G431)
 #ifndef FLASH_SIZE
 #define FLASH_SIZE (128UL * 1024UL)
 #endif
 
-// Выносим вычисление адресов в макросы, чтобы избежать проблем с constexpr и reinterpret_cast
+// Address computation kept in macros to avoid constexpr/reinterpret_cast issues
 #define PAGE_SIZE      2048UL
 
 // ============================================================================
@@ -66,7 +68,7 @@
  */
 class FlashG4_LL {
 private:
-    // Таймаут для операций с Flash (примерно 10-20 мс при 170 МГц)
+    // Timeout for flash operations (~10-20 ms at 170 MHz)
     static constexpr uint32_t FLASH_TIMEOUT  = 0xFFFFF; 
 
     static bool wait_bsy() {
@@ -78,7 +80,7 @@ private:
     }
 
     static void clear_errors() {
-        // Очистка флагов ошибок (запись 1 сбрасывает бит)
+        // Clear error flags (write 1 to reset each bit)
         FLASH->SR = (FLASH_SR_PGSERR | FLASH_SR_SIZERR | FLASH_SR_PGAERR | 
                      FLASH_SR_WRPERR | FLASH_SR_PROGERR | FLASH_SR_OPERR);
     }
@@ -100,7 +102,7 @@ private:
     }
 
     static void flush_caches() {
-        // Сброс кэшей инструкций и данных (критично после изменения Flash!)
+        // Invalidate instruction and data caches (critical after any flash modification!)
         if (FLASH->ACR & FLASH_ACR_DCEN) {
             FLASH->ACR &= ~FLASH_ACR_DCEN;
             FLASH->ACR |= FLASH_ACR_DCRST;
@@ -150,17 +152,17 @@ private:
         const uint32_t first_page = rel_offset / PAGE_SIZE;  // Page index within the region
         const uint32_t page_count = size / PAGE_SIZE;        // Pages covered by this section
 
-        // Отключаем прерывания на время работы с Flash, чтобы избежать задержек и сбоев
+        // Disable interrupts during flash operations to avoid stalls and faults
         __disable_irq();
 
         for (uint32_t i = 0; i < page_count; ++i) {
             if (!wait_bsy()) { success = false; break; }
 
-            // Настройка страницы для стирания
+            // Select the page to erase
             FLASH->CR &= ~FLASH_CR_PNB_Msk;
             FLASH->CR |= ((first_page + i) << FLASH_CR_PNB_Pos) | FLASH_CR_PER;
 
-            // Старт
+            // Start the operation
             FLASH->CR |= FLASH_CR_STRT;
 
             if (!wait_bsy() || check_errors()) {
@@ -170,11 +172,11 @@ private:
         }
 
         FLASH->CR &= ~FLASH_CR_PER;
-        __enable_irq(); // Возвращаем прерывания
+        __enable_irq(); // Re-enable interrupts
 
         clear_errors();
         lock_flash();
-        flush_caches(); // Обязательно сбрасываем кэш
+        flush_caches(); // Cache reset is mandatory
 
         return success;
     }
@@ -190,7 +192,7 @@ private:
      */
     static bool write_section(uint32_t rel_base, uint32_t limit,
                               uint32_t addr, const uint32_t data[8]) {
-        // Проверка: границы СВОЕГО раздела и выравнивание 8 байт (64 бит)
+        // Check: own-section bounds and 8-byte (64-bit) alignment
         if (!in_bounds(addr, 32, limit) || (addr % 8 != 0)) {
             return false;
         }
@@ -201,7 +203,7 @@ private:
         unlock_flash();
         clear_errors();
 
-        __disable_irq(); // Критическая секция
+        __disable_irq(); // Critical section
         FLASH->CR |= FLASH_CR_PG;
 
         bool success = true;
@@ -209,13 +211,13 @@ private:
         for (uint32_t i = 0; i < 4; ++i) {
             if (!wait_bsy()) { success = false; break; }
 
-            // ПРАВИЛЬНАЯ последовательность записи для STM32G4:
-            // Строго два последовательных 32-битных присваивания!
+            // CORRECT write sequence for STM32G4:
+            // Strictly two consecutive 32-bit assignments!
             volatile uint32_t* p_reg = reinterpret_cast<volatile uint32_t*>(hw_addr + i * 8);
 
-            p_reg[0] = data[i * 2];       // Сначала младшее слово
-            __ISB();                      // Барьер инструкций (рекомендуется)
-            p_reg[1] = data[i * 2 + 1];   // Затем старшее слово
+            p_reg[0] = data[i * 2];       // Low word first
+            __ISB();                      // Instruction barrier (recommended)
+            p_reg[1] = data[i * 2 + 1];   // Then the high word
 
             if (!wait_bsy() || check_errors()) {
                 success = false;
@@ -224,11 +226,11 @@ private:
         }
 
         FLASH->CR &= ~FLASH_CR_PG;
-        __enable_irq(); // Конец критической секции
+        __enable_irq(); // End of critical section
 
         clear_errors();
         lock_flash();
-        flush_caches(); // Обязательно сбрасываем кэш
+        flush_caches(); // Cache reset is mandatory
 
         return success;
     }
@@ -319,18 +321,18 @@ private:
         const volatile uint32_t* hw_addr =
             reinterpret_cast<volatile const uint32_t*>(EEPROM_BASE + rel_base + addr);
 
-        // Спекулятивное чтение под защитой ECC-guard: если слово стерто,
-        // NMI-обработчик вернет управление со значением-заполнителем
-        // 0xFFFFFFFF и выставит флаг ошибки - вместо HARDFAULT/NMI-зависания.
+        // Speculative read under ECC-guard protection: if the word is erased,
+        // the NMI handler returns control with the placeholder value
+        // 0xFFFFFFFF and sets the error flag - instead of a HARDFAULT/NMI stall.
         ecc_guard_enter();
         uint32_t raw = guarded_load(hw_addr);
         bool ok = !ecc_guard_exit();
 
         *value = static_cast<int32_t>(raw);
 
-        // Флаг одинарной ошибки ECC (исправляется аппаратно на лету)
+        // Single-bit ECC flag (corrected by hardware on the fly)
         if (ok && (FLASH->ECCR & FLASH_ECCR_ECCC)) {
-            FLASH->ECCR |= FLASH_ECCR_ECCC; // Сбрасываем флаг (записью 1)
+            FLASH->ECCR |= FLASH_ECCR_ECCC; // Clear the flag (write 1)
         }
 
         return ok;

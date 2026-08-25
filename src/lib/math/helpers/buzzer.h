@@ -1,3 +1,8 @@
+/**
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
+ */
+
 #pragma once
 
 // Motor speaker - plays melody through motor coils and provides test tones for HFI/Inductance measurement

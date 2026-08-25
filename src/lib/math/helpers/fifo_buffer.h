@@ -1,3 +1,8 @@
+/**
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
+ */
+
 #pragma once // Ensures this header file is included only once during compilation
 
 // Licensed under the Apache License, Version 2.0 // License declaration

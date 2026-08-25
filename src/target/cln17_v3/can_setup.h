@@ -10,8 +10,8 @@
 #define CAN_SETUP_CLN17V3_H
 
 #include <Arduino.h>
-#include <atomic>    // Добавлено для потокобезопасных счетчиков
-#include <algorithm> // Для std::min
+#include <atomic>    // Added for thread-safe counters
+#include <algorithm> // For std::min
 #include "stm32g4xx_hal.h"
 #include "stm32g4xx_hal_fdcan.h"
 
@@ -82,22 +82,22 @@ private:
 
     static constexpr uint8_t RX_BUFFER_SIZE = 16;
     
-    // --- ИСПОЛЬЗУЕМ AoS ДЛЯ УЛУЧШЕНИЯ CACHE LOCALITY ---
+    // --- AoS LAYOUT FOR IMPROVED CACHE LOCALITY ---
     CANMessage rx_buffer[RX_BUFFER_SIZE];
     
     volatile uint8_t rx_buffer_head = 0;
     volatile uint8_t rx_buffer_tail = 0;
 
-    // --- ATOMIC STATS (Защита от Data Race между main и ISR) ---
+    // --- ATOMIC STATS (data-race protection between main context and ISR) ---
     std::atomic<uint32_t>tx_count{0};
     std::atomic<uint32_t>rx_count{0};
     std::atomic<uint32_t>error_count{0};
     std::atomic<uint32_t>rx_overrun_count{0};
 
-    // Шаблон для сверхбыстрой отправки (избавляемся от лишних аллокаций в send)
+    // Pre-configured TX header template for ultra-fast sends (no extra setup in send)
     FDCAN_TxHeaderTypeDef tx_header_template;
 
-    // --- ЛЮТЫ (Look-Up Tables) ДЛЯ УЛЬТРАБЫСТРОЙ КОНВЕРТАЦИИ ---
+    // --- LOOK-UP TABLES FOR ULTRA-FAST CONVERSION ---
     static constexpr uint8_t dlc_to_bytes_lut[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
 
     CANTiming calculate_timing(uint32_t baudrate, uint32_t clock_freq, bool is_data_phase) const {
@@ -161,7 +161,7 @@ private:
         GPIOC->MODER = (GPIOC->MODER & ~GPIO_MODER_MODE14_Msk) | (1U << GPIO_MODER_MODE14_Pos);
         GPIOC->OTYPER &= ~GPIO_OTYPER_OT14_Msk; 
         
-        // Оптимизация: использование CMSIS макросов для ясности кода
+        // Optimization: CMSIS macros used for code clarity
         if (is_enabled)
             GPIOC->BSRR = GPIO_BSRR_BR14; // Reset PC14
         else
@@ -177,7 +177,7 @@ public:
     CANDriver() {
         hfdcan.Instance = FDCAN1;
 
-        // Преднастройка статических полей шаблона TX для оптимизации send()
+        // Pre-configure the static TX header fields to optimize send()
         tx_header_template.IdType = FDCAN_STANDARD_ID;
         tx_header_template.TxFrameType = FDCAN_DATA_FRAME;
         tx_header_template.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
@@ -231,7 +231,7 @@ public:
      */
     bool init() {
         if (is_initialized) {
-            deinit(); // Перезапуск периферии, если она уже была активна
+            deinit(); // Restart the peripheral if it was already active
         }
 
         init_gpio();
@@ -335,8 +335,8 @@ public:
         uint8_t next_head = (rx_buffer_head + 1) % RX_BUFFER_SIZE;
 
         if (next_head == rx_buffer_tail) {
-            // КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Обязательно вычитываем сообщение (Flush), 
-            // чтобы сбросить флаг прерывания в регистрах FDCAN. Иначе — зависание МК.
+            // CRITICAL FIX: The message must be read out (flushed) 
+            // to clear the interrupt flag in the FDCAN registers. Otherwise the MCU hangs.
             FDCAN_RxHeaderTypeDef dummy_header;
             uint8_t dummy_data[64];
             HAL_FDCAN_GetRxMessage(&hfdcan, FDCAN_RX_FIFO0, &dummy_header, dummy_data);
@@ -346,8 +346,8 @@ public:
 
         FDCAN_RxHeaderTypeDef rx_header;
 
-        // ZERO-COPY ОПТИМИЗАЦИЯ: читаем данные прямо в наш AoS буфер. 
-        // Минус локальный массив на стеке, минус std::memcpy.
+        // ZERO-COPY OPTIMIZATION: read data directly into the AoS buffer. 
+        // Saves the local stack array and the std::memcpy call.
         if (HAL_FDCAN_GetRxMessage(&hfdcan, FDCAN_RX_FIFO0, &rx_header, rx_buffer[rx_buffer_head].data) != HAL_OK) {
             error_count++;
             return;
@@ -356,7 +356,7 @@ public:
         rx_buffer[rx_buffer_head].id = rx_header.Identifier;
         rx_buffer[rx_buffer_head].payload_size = dlc_to_bytes_lut[rx_header.DataLength & 0x0FU];
 
-        // КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Ждем завершения записи в RAM до обновления индекса
+        // CRITICAL FIX: Wait for RAM writes to complete before updating the index
         __DMB(); 
 
         rx_buffer_head = next_head;
@@ -369,17 +369,17 @@ public:
     bool send(uint32_t id, const uint8_t* payload, uint8_t payload_size, bool use_fd = true) {
         if (!is_initialized || !is_enabled) return false;
 
-        // Прямое чтение флага переполнения FIFO из регистра. Значительно быстрее вызова HAL.
+        // Read the FIFO-full flag directly from the register. Much faster than a HAL call.
         if ((hfdcan.Instance->TXFQS & FDCAN_TXFQS_TFQF) != 0U) {
             error_count++;
             return false;
         }
 
-        // Оптимизированный clip размера (без if-else лестницы)
+        // Optimized size clipping (no if-else ladder)
         uint8_t max_size = use_fd ? 64 : 8;
         payload_size = std::min(payload_size, max_size);
 
-        // Обновляем только изменяемые поля в нашем заранее подготовленном шаблоне
+        // Update only the variable fields of the pre-configured template
         tx_header_template.Identifier = id & 0x7FF;
         tx_header_template.DataLength = bytes_to_dlc(payload_size);
         
@@ -391,7 +391,7 @@ public:
             tx_header_template.FDFormat = FDCAN_CLASSIC_CAN;
         }
 
-        // Отправка (копирование в Message RAM)
+        // Transmit (copy into Message RAM)
         if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan, &tx_header_template, (uint8_t*)payload) == HAL_OK) {
             tx_count++;
             return true;
@@ -404,18 +404,18 @@ public:
     bool receive(uint32_t& id, uint8_t* payload, uint8_t& payload_size) {
         if (!is_initialized || rx_buffer_head == rx_buffer_tail) return false;
 
-        // Чтение из новой структуры AoS
+        // Read from the new AoS structure
         id = rx_buffer[rx_buffer_tail].id;
         payload_size = rx_buffer[rx_buffer_tail].payload_size;
 
         if (payload_size > 0) {
-            // Копируем данные вызывающей функции. Тут memcpy уместен.
+            // Copy data out to the caller. memcpy is appropriate here.
             for(uint8_t i = 0; i < payload_size; ++i) {
                 payload[i] = rx_buffer[rx_buffer_tail].data[i];
             }
         }
 
-        // КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Убеждаемся, что чтение RAM окончено до смещения хвоста
+        // CRITICAL FIX: Ensure RAM reads are complete before advancing the tail
         __DMB(); 
 
         rx_buffer_tail = (rx_buffer_tail + 1) % RX_BUFFER_SIZE;

@@ -31,6 +31,8 @@
  * back-to-back without any gaps. Both the load scan and the save write move
  * EXACTLY ONE 8-word block per service call, so a system tick never spends
  * more than one row-program/read inside flash (no blocking).
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #include "../common.h"

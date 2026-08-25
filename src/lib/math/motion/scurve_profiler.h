@@ -1,6 +1,8 @@
 /**
  * @file scurve_profiler.h
  * @brief 7-segment S-Curve motion profile generator with Q16 fixed-point outputs.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #pragma once
@@ -8,7 +10,7 @@
 #include <cmath>
 #include <climits>
 #include <algorithm>
-#include <cstring> // Для безопасного std::memcpy
+#include <cstring> // For safe std::memcpy
 #include "motion_command.h"
 
 /**
@@ -53,8 +55,8 @@ public:
         if (displacement == 0) [[unlikely]] return 0;
         if (max_vel <= 0.0f || max_acc <= 0.0f || max_jrk <= 0.0f) [[unlikely]] return 0;
 
-        // Локальный буфер на стеке для генерации сегментов перед отправкой
-        // Позволяет безопасно сделать фиксацию последнего сегмента (компенсацию потерь).
+        // Local on-stack buffer used to generate segments before pushing them
+        // Allows safely committing a final correction segment (loss compensation).
         MotionCommand out[kMaxSegments];
 
         const float sg = (displacement < 0) ? -1.0f : 1.0f;
@@ -67,7 +69,7 @@ public:
         const float t_j_sq = t_j * t_j;
         const float dv_ramp = max_acc * t_j;
 
-        // --- Лямбда для расчета половины профиля ускорения ---
+        // --- Lambda computing one half of the acceleration profile ---
         auto accel_half = [&](float v_half) noexcept -> HalfProfile {
             if (v_half <= 0.0f) return {0.0f, 0.0f};
 
@@ -108,7 +110,7 @@ public:
         const float d_cruise = fmaxf(0.0f, D - 2.0f * d_acc_half);
         const float t_cruise = (v_peak > 0.0f) ? (d_cruise / v_peak) : 0.0f;
 
-        // --- Масштабирование времени (используем только float) ---
+        // --- Time scaling (float only) ---
         float scale_t = 1.0f;
         float scale_v = 1.0f;
 
@@ -122,48 +124,48 @@ public:
             }
         }
 
-        const float kEps = 1.0e-5f; // Реалистичный эпсилон для f32
+        const float kEps = 1.0e-5f; // Realistic epsilon for f32
         const bool has_flat_acc = (v_peak >= dv_ramp) && ((v_peak - dv_ramp) * inv_A > kEps);
         const bool has_cruise = (t_cruise > kEps);
 
         int n = 0;
 
-        // --- Delta-DDA Аккумуляторы (Без double и без абсолютных координат) ---
+        // --- Delta-DDA accumulators (no double, no absolute coordinates) ---
         float rem_disp_q16 = 0.0f;
         float rem_time_us = 0.0f;
         
         int32_t total_emitted_disp = 0;
         int64_t total_emitted_time = 0;
 
-        // Лямбда генерации и разбиения сегментов
+        // Lambda generating and splitting segments
         auto emit = [&](float delta_d, float delta_t, float v_end) noexcept {
-            // Вычисляем точный шаг в float, прибавляя остаток от предыдущего шага
+            // Compute the exact step in float, adding the previous step remainder
             const float step_disp_f = delta_d * sg * kQ16Scale + rem_disp_q16;
             const float step_time_f = delta_t * scale_t * 1000000.0f + rem_time_us;
 
-            // Квантуем в целые числа
+            // Quantize to integers
             int32_t disp_step = static_cast<int32_t>(step_disp_f);
             int64_t time_step = static_cast<int64_t>(step_time_f);
 
-            // Сохраняем дробные остатки для следующего вызова
+            // Keep fractional remainders for the next call
             rem_disp_q16 = step_disp_f - static_cast<float>(disp_step);
             rem_time_us = step_time_f - static_cast<float>(time_step);
 
             if (time_step <= 0) [[unlikely]] return;
             if (n >= kMaxSegments) [[unlikely]] return;
 
-            // Учитываем то, что фактически передаем в буфер
+            // Account for what is actually pushed into the buffer
             total_emitted_disp += disp_step;
             total_emitted_time += time_step;
 
             const float vel = sg * v_end * scale_v;
             constexpr int64_t kMaxDurUs = 0x7FFFFFFFL; 
 
-            // Безопасное разбиение длинных сегментов чисто целочисленной математикой
+            // Safe splitting of long segments with purely integer math
             while (time_step > kMaxDurUs) [[unlikely]] {
                 if (n >= kMaxSegments - 1) break; 
 
-                // Вычисляем пропорцию через int64_t без float-деления
+                // Compute the proportion via int64_t without float division
                 const int32_t disp_slice = static_cast<int32_t>(
                     (static_cast<int64_t>(disp_step) * kMaxDurUs) / time_step
                 );
@@ -179,7 +181,7 @@ public:
             }
         };
 
-        // --- Расчет геометрии ---
+        // --- Geometry computation ---
         float d1 = 0, d2 = 0, d3 = 0;
         float t1 = 0, t2 = 0, t3 = 0;
         float v1 = 0, v2 = 0;
@@ -203,7 +205,7 @@ public:
             d3 = d_acc_half - d1;
         }
 
-        // --- Генерация сегментов ---
+        // --- Segment generation ---
         emit(d1, t1, v1);
 
         if (has_flat_acc) emit(d2, t2, v2);
@@ -220,14 +222,14 @@ public:
 
         emit(d1, t1, 0.0f);
 
-        // --- Идеальная подгонка конечных условий ---
+        // --- Perfect final-condition fitting ---
         if (n > 0) {
             out[n - 1].end_velocity = 0.0f;
 
-            // Компенсируем потерянные дробные микро-шаги float прямо в последний сегмент
+            // Compensate lost fractional float micro-steps directly in the last segment
             out[n - 1].displacement += (displacement - total_emitted_disp);
 
-            // Идеально вписываемся в запрашиваемое время
+            // Fit exactly into the requested time
             if (time_us > 0U) {
                 const int64_t dur_fix = static_cast<int64_t>(time_us) - total_emitted_time;
                 const int64_t new_dur = static_cast<int64_t>(out[n - 1].duration) + dur_fix;
@@ -238,7 +240,7 @@ public:
             }
         }
 
-        // --- Отправка готовых сегментов через Callback ---
+        // --- Push finished segments through the callback ---
         for (int i = 0; i < n; ++i) {
             MotionCommandTM tm;
             tm.motion = out[i];
@@ -257,14 +259,14 @@ private:
     };
 
     /**
-     * @brief Быстрый кубический корень без UB (Undefined Behavior).
+     * @brief Fast cube root without UB (Undefined Behavior).
      */
     [[nodiscard]] static inline float fast_cbrtf(float x) noexcept {
         if (x == 0.0f) return 0.0f;
         const float ax = (x < 0.0f) ? -x : x;
 
         uint32_t i;
-        std::memcpy(&i, &ax, sizeof(i)); // Безопасный bit-cast (для C++11 и выше)
+        std::memcpy(&i, &ax, sizeof(i)); // Safe bit-cast (C++11 and later)
         i = i / 3u + 0x2A517D3Cu;
         
         float r;

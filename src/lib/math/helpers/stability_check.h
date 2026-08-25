@@ -4,6 +4,8 @@
  *
  * Provides saturation/divergence checks used by the cascaded controllers to
  * detect runaway integrators or NaN propagation and force safe fallbacks.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #pragma once

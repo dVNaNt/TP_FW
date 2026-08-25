@@ -4,6 +4,8 @@
  *
  * Configures LED pins (PB1/PB2/PC4), gate-driver enable (PB11), comparator
  * inputs, encoder SPI pins and analog channels; provides IO_Init().
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #ifndef GPIO_SETUP_CLN17V3_H

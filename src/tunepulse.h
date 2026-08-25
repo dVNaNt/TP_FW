@@ -289,6 +289,15 @@ inline void tunepulse_init() {
     TUNE_HEART.driver_phy.current_sense.overcurrent.set_limit_amps().oc_ia(4.0).oc_ib(4.0).oc_ic(6.2);
     TUNE_HEART.driver_phy.supply_voltage.overvoltage.set_lim_callback(DAC_Set_COMP3_OV_Threshold);
     TUNE_HEART.driver_phy.supply_voltage.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(48.0);
+
+    // Thermal protection (TemperaturePHY, see temperature.h):
+    // - WT (warning temperature) 60 degC — informational flag only
+    // - OT (overtemperature)     85 degC — forces FAULT_OVERHEAT (Hi-Z safe state)
+    // The filter time constant is 2^20 ticks (~52 s at 20 kHz); the fault
+    // releases automatically as soon as the filtered temperature drops back
+    // below the OT threshold.
+    TUNE_HEART.driver_phy.temperature.set_limit_celsius().wt_lim_celsius(60.0f).ot_lim_celsius(85.0f);
+
     TUNE_HEART.driver_phy.current_sense.on_calibration_start(start_curnt_cal);
     TUNE_HEART.driver_phy.current_sense.on_calibration_complete(end_curnt_cal);
 
@@ -321,7 +330,8 @@ inline void tunepulse_init() {
         .oc_cb(PWM_Set_All_HiZ)
         .ov_cb(PWM_Set_All_Low)
         .ext_cb(PWM_Set_All_HiZ)
-        .uv_cb(PWM_Set_All_HiZ);
+        .uv_cb(PWM_Set_All_HiZ)
+        .ot_cb(PWM_Set_All_HiZ);  // Software overtemperature: same Hi-Z safe state as hardware faults
     TUNE_HEART.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
 
     // Current-sense offset calibration:

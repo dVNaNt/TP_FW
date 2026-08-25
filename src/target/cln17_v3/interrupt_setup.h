@@ -5,6 +5,8 @@
  * NVIC_Init() assigns priorities; the ISR handlers bridge hardware events
  * (ADC end-of-conversion, comparators, timers) into the global TUNE_HEART
  * object through g_heart_ptr.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
  */
 
 #ifndef NVIC_CLN17V3_H  // Include guard to prevent multiple inclusions of this header file
@@ -48,6 +50,7 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
     
     TUNE_HEART.driver_phy.current_sense.set_currents(current_values);
     TUNE_HEART.driver_phy.supply_voltage.set_voltage_irq(voltage_supply);
+    TUNE_HEART.driver_phy.temperature.set_temperature_irq(temperature_adc);  // Feed the thermal protection pipeline (raw 16-bit left-aligned)
 
 
 }  // End of ADC_READY_Callback function
