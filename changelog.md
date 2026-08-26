@@ -437,3 +437,151 @@ FLASH: 61040 bytes (46.57% of 131072 bytes): +2288 bytes
 RAM: 7820 bytes (23.86% of 32768 bytes): +176 bytes
 
 
+## 2026-08-25 - Temperature sensor moved into the ADC DMA group; bare-minimum integer filter; OT-only hysteresis protection
+**Changes:**
+- Temp sensor (ADC1 ch16) added as rank 3 of the regular dual-mode sequence read by the shared DMA
+- removed the injected-channel software polling state machine
+- rewrote TemperaturePHY with a u16 Q12.4 shift-EMA filter (err>>12 + carried division remainder, no mul/div/float)
+- removed WT/warning threshold
+- OT now releases via configurable hysteresis with thresholds precomputed in the raw domain
+
+**Reasoning:**
+- Eliminate all CPU cost of thermal sampling in the 20 kHz ISR and simplify the hot path to pure integer ALU ops
+
+**Notes:**
+- SMP16 sampling time fixed (was SMP10 field)
+- regular sequence grew by ~6 us due to mandatory 247.5-cycle t_S_temp, DMA TC ISR fires accordingly later in the 50 us period
+- filter tau = 4096 ticks (~205 ms @ 20 kHz)
+
+FLASH: 61196 bytes (46.69% of 131072 bytes): +156 bytes
+RAM: 7844 bytes (23.94% of 32768 bytes): +24 bytes
+
+
+## 2026-08-25 - Shorter temp-sensor sampling; EMA filter inlined into TemperaturePHY
+**Changes:**
+- Reduced SMP16 sampling from 247.5 to 47.5 cycles (~6.1 us -> ~1.4 us per rank-3 conversion)
+- removed the FilterFastEMA helper class and unrolled the Q12.4 shift-EMA directly into TemperaturePHY fields and tick()
+
+**Reasoning:**
+- Cut the added regular-sequence time to under 1 us (negligible DMA TC latency)
+- simplify the code by dropping the helper class
+
+**Notes:**
+- Sampling window is now below the datasheet-recommended t_S_temp, absolute accuracy may drift a few degrees -- noise/drift is absorbed by the integer EMA filter
+
+FLASH: 61196 bytes (46.69% of 131072 bytes): +0 bytes
+RAM: 7844 bytes (23.94% of 32768 bytes): +0 bytes
+
+
+## 2026-08-25 - Fix: restored spec temperature-sensor sampling time
+**Changes:**
+- SMP16 back to 247.5 cycles (~5.8 us), meeting the datasheet t_S_temp >= 5 us requirement
+
+**Reasoning:**
+- Undersampled S/H capacitor retained residual charge from the preceding current-sense rank, producing a constant ~46 degC offset that tracked phase currents
+- the EMA filter cannot remove such DC bias
+
+**Notes:**
+- Regular sequence is ~6 us longer again inside the 50 us control period -- required for valid thermal data
+
+FLASH: 61260 bytes (46.74% of 131072 bytes): +64 bytes
+RAM: 7844 bytes (23.94% of 32768 bytes): +0 bytes
+
+
+## 2026-08-26 - Power measurement + OP protection; motor_driver rename
+**Changes:**
+- Added power.h (PowerPHY): raw/filtered power-stage power from AB currents x commanded AB voltages, EMA filtering, derived input current, overpower fault (bit 5, HiZ) with recovery timer, per-tick available-power coefficient
+- Renamed src/lib/motor_driver to src/lib/motor_control and updated includes
+
+**Reasoning:**
+- Protect the driver from excessive input power/current symmetrically in +/- (regen included) and expose power telemetry
+
+**Notes:**
+- OP trip: |P_filt|>P_lim OR |I_filt|>I_lim where I_filt=P_filt/V_filt
+- limits via driver.power.set_limit().op_lim_watts().op_lim_amps()
+- defaults 100 W / 15 A
+- wire .op_cb() in fault callback chain
+
+FLASH: 61748 bytes (47.11% of 131072 bytes): +488 bytes
+RAM: 7892 bytes (24.08% of 32768 bytes): +48 bytes
+
+
+## 2026-08-26 - Signed power_coeff; FOC OC-fault guard
+**Changes:**
+- Replaced available-power coefficient with signed power_coeff in [-1..+1] (share of P_lim, + motor / - regen)
+- Added PhyDriverPWM::is_oc_fault() and OC guard in CurrentControl::tick_control_foc that resets FOC state and outputs zero voltage during overcurrent fault
+
+**Reasoning:**
+- Expose energy-flow direction telemetry
+- prevent PI integrator windup against HiZ outputs and torque kick on fault release
+
+**Notes:**
+- power_coeff = sat(P_filt/P_lim, -1, +1), getter get_power_coeff()
+- guard resets integrators, step memory and power filters via foc_current_.reset()
+
+FLASH: 61928 bytes (47.25% of 131072 bytes): +180 bytes
+RAM: 7900 bytes (24.11% of 32768 bytes): +8 bytes
+
+
+## 2026-08-26 - Signed power_coeff; FOC OC-fault guard
+**Changes:**
+- Replaced available-power coefficient with signed power_coeff in [-1..+1] (share of P_lim, + motor / - regen)
+- Added PhyDriverPWM::is_oc_fault() and OC guard in CurrentControl::tick_control_foc that resets FOC state and outputs zero voltage during overcurrent fault
+
+**Reasoning:**
+- Expose energy-flow direction telemetry
+- prevent PI integrator windup against HiZ outputs and torque kick on fault release
+
+**Notes:**
+- power_coeff = sat(P_filt/P_lim, -1, +1), getter get_power_coeff()
+- guard resets integrators, step memory and power filters via foc_current_.reset()
+
+FLASH: 61928 bytes (47.25% of 131072 bytes): +0 bytes
+RAM: 7900 bytes (24.11% of 32768 bytes): +0 bytes
+
+
+## 2026-08-26 - PHY naming cleanup + driver API map
+**Changes:**
+- Renamed folder pwm_driver_phy to pwm_driver
+- types PhyDriverPWM-CurrentSensePHY-SupplyVoltagePHY-TemperaturePHY-PowerPHY-MotorControlPHY to DriverPWM-CurrentSense-SupplyVoltage-Temperature-Power-MotorControl
+- members current_sense to current and supply_voltage to supply across lib/tunepulse/target layers
+- Removed dead FAULT_HIZ_MASK/FAULT_SAFE_MASK, stale MotorControl forward decl, duplicate fault check in tick_icr
+- Added driver_api_map.md with public API map and mermaid diagrams
+
+**Reasoning:**
+- Remove outdated PHY prefix
+- document the driver public surface
+
+**Notes:**
+- No functional changes
+- flash -36 bytes from dead code removal
+
+FLASH: 61892 bytes (47.22% of 131072 bytes): -36 bytes
+RAM: 7900 bytes (24.11% of 32768 bytes): +0 bytes
+
+
+## 2026-08-26 - Driver refactor: file/type/naming cleanup + external API map
+**Changes:**
+- Renamed files to match types (pwm_driver.h to driver_pwm.h, pwm.h to pwm_wrapper.h, current.h to current_sense.h)
+- unified guards to pragma once
+- single shared types.h (CompThresholdCallback, kDefaultRecoveryCycles)
+- renamed proxies to CallbackProxy/LimitProxy, typedefs to PwmPhasesCallback/SamplePointCallback, rst_cb to restore_cb, SupplyVoltage::reset to seed_filter
+- made FAULT_* public
+- removed dead Setup init_ member
+- const-correct getters
+- InputWrapper::setCallback now returns reference
+- norm2amps uses ||
+- magic numbers named (kDutyMaskThreshold)
+- driver_api_map.md rewritten as external-only API map with mermaid
+
+**Reasoning:**
+- Align naming/organization with the codebase style and document the true external API surface
+
+**Notes:**
+- No algorithm changes
+- RAM -24 bytes (dead member), Flash +32 bytes (shared constants)
+
+FLASH: 61924 bytes (47.24% of 131072 bytes): +32 bytes
+RAM: 7876 bytes (24.04% of 32768 bytes): -24 bytes
+
+

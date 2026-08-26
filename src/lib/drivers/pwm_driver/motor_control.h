@@ -6,7 +6,7 @@
  *        synthesis, Clarke current recombination, phase-pattern remapping and
  *        SVPWM centering/scaling.
  *
- * MotorControlPHY provides two data paths used every control cycle:
+ * MotorControl provides two data paths used every control cycle:
  *
  * - @c tick_voltage : alpha-beta command voltages -> remapped 3-phase PWM
  *   duties (inverse Clarke for BLDC, direct coil mapping for steppers), with
@@ -23,35 +23,14 @@
  */
 
 #include "../../common.h"
-// Combines ABC2AB (current), AB2ABC (voltage), and integrated phase remapping
-// into a single interface for motor control with minimal overhead.
-//
-// Input:
-//   - vec2d voltages (alpha-beta)
-//   - three current channels (ABC)
-//   - motor type
-//   - phase pattern (commutation type)
-//   - control mode (voltage/current)
-//
-// Output:
-//   - ABC voltages (after phase remapping)
-//   - vec2d currents (alpha-beta)
-//   - error flags
-//   - access to current and voltage values
-//
-// Two main methods:
-//   - tick_voltage: processes voltage path (AB -> ABC with phase remapping)
-//   - tick_current: processes current path (ABC -> AB)
-//
-// Phase remapping is integrated directly for zero-overhead abstraction
-// ============================================================================
-struct PhyDriverPWM;
-struct CurrentSensePHY;
 
-struct MotorControlPHY {
+struct DriverPWM;
+struct CurrentSense;
+
+struct MotorControl {
 private:
-    friend struct PhyDriverPWM;
-    friend struct CurrentSensePHY;
+    friend struct DriverPWM;
+    friend struct CurrentSense;
     // --- State variables for Current processing (formerly ABC2AB) ---
     FilterEMA lpf_;                           // LPF filter for phase balance
     static constexpr uint8_t LPF_ALPHA = 42;  // Filter coefficient (0-255)
@@ -207,7 +186,7 @@ private:
      *                        currently unused inside this class).
      * @param current_epsilon Balance tolerance for the current-sum check (Q15).
      */
-    MotorControlPHY(MotorType motor_type = MotorType_STEP,
+    MotorControl(MotorType motor_type = MotorType_STEP,
                   PhasePattern phase_pattern = PhasePattern_ABC,
                   uint16_t duty_permille = 995u,
                   int16_t current_epsilon = 256)
@@ -232,7 +211,7 @@ private:
      *                second member = beta).
      * @return Reference-free copy of the remapped ABC duty vector (Q15).
      */
-    const Vec3D tick_voltage(Vec2D voltage) {
+    Vec3D tick_voltage(Vec2D voltage) {
         // Convert AB to ABC using internal voltage converter
         Vec3D abc = ab2abc_tick(voltage, motor_type_, err_voltage_);
 
@@ -246,15 +225,22 @@ private:
 
     /// Process current path: ABC currents -> AB currents
     /// Physical channels are remapped to logical ABC, then converted to AB
+    /// Current-sensor masking threshold in Q15 duty: samples taken above this
+    /// duty are invalid (shunt not observable) and are replaced by INT16_MIN.
+    static constexpr int16_t kDutyMaskThreshold = 30720;  // ~93.8% duty cycle
+
+    /// Process current path: ABC currents -> AB currents
+    /// Physical channels are remapped to logical ABC, then converted to AB
     /// @param physical Physical channel currents [Ch0, Ch1, Ch2] in Q15 format (INT16_MIN = sensor missing)
     Vec2D tick_current(Vec3D physical) {
-        // Apply high duty cycle masking: if PWM duty > 30720, invalidate corresponding current sensor
-        // Apply inline inverse phase remapping (physical channels -> logical ABC)
-        constexpr int16_t DUTY_THRESHOLD = 30720;  // ~93.8% duty cycle
+        // Apply high duty cycle masking: if PWM duty exceeds kDutyMaskThreshold,
+        // invalidate the corresponding current sensor (sampled during an
+        // unobservable window). Combined with inline inverse phase remapping
+        // (physical channels -> logical ABC).
         Vec3D logical;
-        logical[idx0_] = (abc_voltages_.a > DUTY_THRESHOLD) ? INT16_MIN : physical[0];
-        logical[idx1_] = (abc_voltages_.b > DUTY_THRESHOLD) ? INT16_MIN : physical[1];
-        logical[idx2_] = (abc_voltages_.c > DUTY_THRESHOLD) ? INT16_MIN : physical[2];
+        logical[idx0_] = (abc_voltages_.a > kDutyMaskThreshold) ? INT16_MIN : physical[0];
+        logical[idx1_] = (abc_voltages_.b > kDutyMaskThreshold) ? INT16_MIN : physical[1];
+        logical[idx2_] = (abc_voltages_.c > kDutyMaskThreshold) ? INT16_MIN : physical[2];
 
         // Convert logical ABC to AB using internal current converter
         return  abc2ab_tick(logical, motor_type_);
@@ -306,7 +292,7 @@ public:
     }
 
     /// Get the currently configured phase-connection pattern.
-    inline PhasePattern get_phase_pattern() { return phase_pattern_; }
+    inline PhasePattern get_phase_pattern() const { return phase_pattern_; }
 
     /// Set balance tolerance for current converter
     /// @param epsilon Balance tolerance in Q15 format

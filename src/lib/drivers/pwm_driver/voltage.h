@@ -26,20 +26,20 @@
  * - Optional hardware comparator DAC callbacks for each threshold
  *
  * @note trigger() and reset() on VoltageProtectionProxy are private —
- *       only SupplyVoltagePHY (tick) and PhyDriverPWM (FaultProxy) may invoke them.
+ *       only SupplyVoltage (tick) and DriverPWM (FaultProxy) may invoke them.
  *
  * ## Fluent Configuration API
  *
  * Callback setup:
  * @code
- *   driver.supply_voltage.set_callback()
+ *   driver.supply.set_callback()
  *       .ov_hw(ov_comp_cb)
  *       .uv_hw(uv_comp_cb);
  * @endcode
  *
  * Limit setup:
  * @code
- *   driver.supply_voltage.set_limit_volts()
+ *   driver.supply.set_limit_volts()
  *       .ov_lim_volts(36.0f)
  *       .uv_lim_volts(9.0f);
  * @endcode
@@ -53,36 +53,33 @@
 #include <atomic>
 #include "../../common.h"
 #include "../../math/filters/ema.h"
-#include "../generic/setup.h"
+#include "types.h"
 
-struct PhyDriverPWM;
-
-/// Function pointer type for comparator threshold update callback.
-/// @param threshold 16-bit DAC threshold value to program into the hardware comparator
-typedef void (*DAC_SET_COMP_Callback)(uint16_t threshold);
+struct DriverPWM;
 
 /**
- * @struct SupplyVoltagePHY
+ * @struct SupplyVoltage
  * @brief Filtered supply voltage sensing with overvoltage and undervoltage protection.
  *
  * Owns the voltage sensing pipeline: raw ADC ingestion (atomic state register),
  * EMA low-pass filtering, Q15 normalization, and two VoltageProtectionProxy
  * sub-objects for overvoltage/undervoltage fault management.
  */
-struct SupplyVoltagePHY {
-    friend struct PhyDriverPWM;
+struct SupplyVoltage {
+    friend struct DriverPWM;
     friend struct VoltageProtectionProxy;
 
 private:
     static inline void empty_comp_callback(uint16_t) {}  ///< Noop callback replaces nullptr
 
-    DAC_SET_COMP_Callback comp_ov_callback_ = &empty_comp_callback;  ///< HW overvoltage comparator callback
-    DAC_SET_COMP_Callback comp_uv_callback_ = &empty_comp_callback;  ///< HW undervoltage comparator callback
+    CompThresholdCallback comp_ov_callback_ = &empty_comp_callback;  ///< HW overvoltage comparator callback
+    CompThresholdCallback comp_uv_callback_ = &empty_comp_callback;  ///< HW undervoltage comparator callback
 
     FilterEMA filter_;         ///< First-order EMA low-pass filter
     const float max_voltage_;  ///< Maximum representable voltage in VOLTS (Q15 full scale).
     int32_t scale_;            ///< Precomputed scale factor ((max_voltage_*1000) >> 5), in mV units.
     float voltage_v_;          ///< Latest filtered voltage in VOLTS.
+    float inv_voltage_ = 0.0f;  ///< Cached 1/voltage_v_ (0 = invalid); recomputed only when the filtered voltage changes.
     int16_t voltage_norm_;     ///< Latest filtered voltage in Q15.
 
     int16_t overvoltage_limit_norm_ = INT16_MAX;   ///< Overvoltage limit in Q15
@@ -96,11 +93,11 @@ private:
     static constexpr uint32_t MASK_DATA = 0x7FFFFFFF;
 
     /**
-     * @brief Construct a SupplyVoltagePHY instance.
+     * @brief Construct a SupplyVoltage instance.
      * @param alpha EMA filter coefficient (0..255, higher = less filtering)
      * @param max_voltage_volts Maximum voltage in volts for Q15 scaling
      */
-    SupplyVoltagePHY(uint8_t alpha, float max_voltage_volts)
+    SupplyVoltage(uint8_t alpha, float max_voltage_volts)
         : filter_(0, alpha),
           max_voltage_(max_voltage_volts),
           scale_(0),
@@ -115,7 +112,7 @@ private:
     }
 
     /**
-     * @brief Main processing tick — called every cycle by PhyDriverPWM::tick().
+     * @brief Main processing tick — called every cycle by DriverPWM::tick().
      *
      * Atomically reads and marks the voltage state register, advances the EMA
      * filter, and checks software OV/UV limits against the configured thresholds.
@@ -136,6 +133,10 @@ private:
             voltage_norm_ = filter_.get_output() >> 1;
 
             voltage_v_ = (float)(((int32_t)voltage_norm_ * scale_) >> 10) * 0.001;
+
+            // OPTIMIZATION (P2.3): maintain the reciprocal here (slow path,
+            // once per new sample) so volts2duty() stays multiply-only.
+            inv_voltage_ = (voltage_v_ > 0.0f) ? (1.0f / voltage_v_) : 0.0f;
 
             // Software limit checks (always active). Restart timer if exceeded.
             if (voltage_norm_ >= overvoltage_limit_norm_) {
@@ -171,17 +172,19 @@ private:
      * @brief Convert target volts to duty cycle (Q15).
      *
      * Calculates the PWM duty cycle needed to achieve a target voltage,
-     * given the current measured supply voltage (voltage_mv_).
+     * given the current measured supply voltage. Uses the cached reciprocal
+     * (inv_voltage_) so the per-cycle hot path performs multiplications only
+     * — no float division (see optimization plan P2.3).
      *
      * @param target_volts Target voltage in volts
-     * @return Duty cycle in Q15 (0..32767), or 0 if voltage_mv_ <= 0
+     * @return Duty cycle in Q15 (0..32767), or 0 if the bus voltage is not valid yet
      */
     inline int16_t volts2duty(float target_volts) const {
-        if (voltage_v_ <= 0)
+        float inv = inv_voltage_;  // Single volatile-free local load
+        if (inv <= 0.0f)
             return 0;
 
-        float duty = (target_volts / voltage_v_);
-        int32_t duty_int = (int32_t)(duty * 32768.0);
+        int32_t duty_int = (int32_t)(target_volts * inv * 32768.0f);
         return clamp_i32(duty_int, INT16_MAX);
     }
 
@@ -212,13 +215,13 @@ public:
     }
 
     /**
-     * @brief Reset the filter to a specific ADC value and process immediately.
+     * @brief Seed the filter with a known ADC value and process immediately.
      *
      * Useful for initialization to avoid filter convergence delay on startup.
      *
      * @param raw_adc Initial ADC value to seed the filter
      */
-    inline void reset(uint16_t raw_adc) {
+    inline void seed_filter(uint16_t raw_adc) {
         filter_.reset(raw_adc);
         set_voltage_irq(raw_adc);
         tick();
@@ -240,24 +243,24 @@ public:
      *
      * Each proxy maintains an independent atomic recovery timer and optional
      * hardware comparator DAC callback. Two instances are created as public
-     * members of SupplyVoltagePHY:
+     * members of SupplyVoltage:
      * - @c overvoltage — protects against excessive supply voltage
      * - @c undervoltage — protects against insufficient supply voltage
      *
-     * @note trigger() and reset() are private — accessible only to SupplyVoltagePHY
-     *       and PhyDriverPWM via friend declarations.
+     * @note trigger() and reset() are private — accessible only to SupplyVoltage
+     *       and DriverPWM via friend declarations.
      */
     struct VoltageProtectionProxy {
-        friend struct SupplyVoltagePHY;
-        friend struct PhyDriverPWM;
+        friend struct SupplyVoltage;
+        friend struct DriverPWM;
 
     private:
-        SupplyVoltagePHY& self;                ///< Reference to parent SupplyVoltagePHY
-        DAC_SET_COMP_Callback& callback_ref_;  ///< Reference to the hardware comparator callback
+        SupplyVoltage& self;                ///< Reference to parent SupplyVoltage
+        CompThresholdCallback& callback_ref_;  ///< Reference to the hardware comparator callback
         int16_t& limit_norm_ref_;              ///< Reference to the Q15 limit value
 
-        std::atomic<int32_t> error_cycles_{0};              ///< Active recovery timer (0 = no error)
-        std::atomic<int32_t> error_timeout_cycles_{10000};  ///< Configured timeout loaded on trigger()
+        std::atomic<int32_t> error_cycles_{0};  ///< Active recovery timer (0 = no error)
+        std::atomic<int32_t> error_timeout_cycles_{kDefaultRecoveryCycles};  ///< Configured timeout loaded on trigger()
 
         /**
          * @brief Decrement the recovery timer atomically.
@@ -284,7 +287,7 @@ public:
          * default empty function.
          */
         void update_dac() {
-            if (callback_ref_ != &SupplyVoltagePHY::empty_comp_callback) {
+            if (callback_ref_ != &SupplyVoltage::empty_comp_callback) {
                 // <<1 maps the Q15 half-scale representation onto the full
                 // unsigned 16-bit DAC/comparator range (Q15 16384 -> 32768).
                 uint16_t dac_value = (uint16_t)limit_norm_ref_ << 1;
@@ -292,7 +295,7 @@ public:
             }
         }
 
-        // --- Private: only SupplyVoltagePHY and PhyDriverPWM may invoke ---
+        // --- Private: only SupplyVoltage and DriverPWM may invoke ---
 
         /**
          * @brief Start or restart the recovery timer.
@@ -300,8 +303,8 @@ public:
          * Atomically loads the configured timeout and stores it into the active
          * recovery timer. Safe to call from interrupt context.
          *
-         * @note Private. Invoked by SupplyVoltagePHY::tick() (software check)
-         *       and PhyDriverPWM::FaultProxy (external trigger).
+         * @note Private. Invoked by SupplyVoltage::tick() (software check)
+         *       and DriverPWM::FaultProxy (external trigger).
          */
         inline void trigger() {
             error_cycles_.store(error_timeout_cycles_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -311,7 +314,7 @@ public:
          * @brief Immediately reset the error (clear timer to 0).
          *
          * @note Private. Does NOT call any callbacks — only clears internal state.
-         *       Invoked by PhyDriverPWM::FaultProxy when clearing a fault.
+         *       Invoked by DriverPWM::FaultProxy when clearing a fault.
          */
         inline void reset() { error_cycles_.store(0, std::memory_order_relaxed); }
 
@@ -319,11 +322,11 @@ public:
         /**
          * @brief Construct a VoltageProtectionProxy.
          *
-         * @param s Reference to the owning SupplyVoltagePHY
+         * @param s Reference to the owning SupplyVoltage
          * @param cb Reference to the hardware comparator callback variable
          * @param limit Reference to the Q15 limit variable
          */
-        VoltageProtectionProxy(SupplyVoltagePHY& s, DAC_SET_COMP_Callback& cb, int16_t& limit)
+        VoltageProtectionProxy(SupplyVoltage& s, CompThresholdCallback& cb, int16_t& limit)
             : self(s), callback_ref_(cb), limit_norm_ref_(limit) {}
 
         /**
@@ -350,8 +353,8 @@ public:
          *
          * @param cb Function pointer (nullptr = software-only mode)
          */
-        void set_lim_callback(DAC_SET_COMP_Callback cb) {
-            callback_ref_ = cb ? cb : &SupplyVoltagePHY::empty_comp_callback;
+        void set_lim_callback(CompThresholdCallback cb) {
+            callback_ref_ = cb ? cb : &SupplyVoltage::empty_comp_callback;
             update_dac();
         }
 
@@ -378,26 +381,26 @@ public:
      *
      * Usage:
      * @code
-     *   supply_voltage.set_callback().ov_hw(ov_cb).uv_hw(uv_cb);
+     *   supply.set_callback().ov_hw(ov_cb).uv_hw(uv_cb);
      * @endcode
      */
-    struct CallbackSetter {
+    struct CallbackProxy {
     private:
-        SupplyVoltagePHY& parent;  ///< Reference to the owning SupplyVoltagePHY
+        SupplyVoltage& parent;  ///< Reference to the owning SupplyVoltage
 
     public:
         /**
-         * @brief Construct a CallbackSetter bound to a SupplyVoltagePHY.
-         * @param p Reference to the owning SupplyVoltagePHY
+         * @brief Construct a CallbackProxy bound to a SupplyVoltage.
+         * @param p Reference to the owning SupplyVoltage
          */
-        CallbackSetter(SupplyVoltagePHY& p) : parent(p) {}
+        CallbackProxy(SupplyVoltage& p) : parent(p) {}
 
         /**
          * @brief Set overvoltage hardware comparator callback.
          * @param cb Function pointer (nullptr disables hardware comparator)
          * @return Reference to this setter for chaining
          */
-        inline CallbackSetter& ov_lim_cb(DAC_SET_COMP_Callback cb) {
+        inline CallbackProxy& ov_lim_cb(CompThresholdCallback cb) {
             parent.overvoltage.set_lim_callback(cb);
             return *this;
         }
@@ -406,7 +409,7 @@ public:
          * @param cb Function pointer (nullptr disables hardware comparator)
          * @return Reference to this setter for chaining
          */
-        inline CallbackSetter& uv_lim_cb(DAC_SET_COMP_Callback cb) {
+        inline CallbackProxy& uv_lim_cb(CompThresholdCallback cb) {
             parent.undervoltage.set_lim_callback(cb);
             return *this;
         }
@@ -417,26 +420,26 @@ public:
      *
      * Usage:
      * @code
-     *   supply_voltage.set_limit_volts().ov_lim_volts(36.0f).uv_lim_volts(9.0f);
+     *   supply.set_limit_volts().ov_lim_volts(36.0f).uv_lim_volts(9.0f);
      * @endcode
      */
-    struct LimitSetter {
+    struct LimitProxy {
     private:
-        SupplyVoltagePHY& parent;  ///< Reference to the owning SupplyVoltagePHY
+        SupplyVoltage& parent;  ///< Reference to the owning SupplyVoltage
 
     public:
         /**
-         * @brief Construct a LimitSetter bound to a SupplyVoltagePHY.
-         * @param p Reference to the owning SupplyVoltagePHY
+         * @brief Construct a LimitProxy bound to a SupplyVoltage.
+         * @param p Reference to the owning SupplyVoltage
          */
-        LimitSetter(SupplyVoltagePHY& p) : parent(p) {}
+        LimitProxy(SupplyVoltage& p) : parent(p) {}
 
         /**
          * @brief Set overvoltage limit.
          * @param limit_volts Overvoltage threshold in volts
          * @return Reference to this setter for chaining
          */
-        inline LimitSetter& ov_lim_volts(float limit_volts) {
+        inline LimitProxy& ov_lim_volts(float limit_volts) {
             parent.overvoltage.set_limit_volts(limit_volts);
             return *this;
         }
@@ -445,7 +448,7 @@ public:
          * @param limit_volts Undervoltage threshold in volts
          * @return Reference to this setter for chaining
          */
-        inline LimitSetter& uv_lim_volts(float limit_volts) {
+        inline LimitProxy& uv_lim_volts(float limit_volts) {
             parent.undervoltage.set_limit_volts(limit_volts);
             return *this;
         }
@@ -453,13 +456,13 @@ public:
 
     /**
      * @brief Begin a callback configuration chain.
-     * @return CallbackSetter bound to this SupplyVoltagePHY
+     * @return CallbackProxy bound to this SupplyVoltage
      */
-    inline CallbackSetter set_callback() { return CallbackSetter(*this); }
+    inline CallbackProxy set_callback() { return CallbackProxy(*this); }
 
     /**
      * @brief Begin a limit configuration chain.
-     * @return LimitSetter bound to this SupplyVoltagePHY
+     * @return LimitProxy bound to this SupplyVoltage
      */
-    inline LimitSetter set_limit_volts() { return LimitSetter(*this); }
+    inline LimitProxy set_limit_volts() { return LimitProxy(*this); }
 };

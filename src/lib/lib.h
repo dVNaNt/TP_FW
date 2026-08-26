@@ -10,7 +10,7 @@
  *
  * - @c clock_             : system/PWM timing reference.
  * - @c motor_params       : motor description (type, pole pairs, ...).
- * - @c driver             : FOC current/voltage control driver (DriverPWM).
+ * - @c driver             : FOC current/voltage control driver (CurrentControl).
  * - @c calibration_dump   : flash-backed storage for calibration tables.
  * - @c system_dump        : flash-backed storage for generic user data (2 KB).
  * - @c angle_calibrator   : electrical-angle calibration state machine.
@@ -29,15 +29,15 @@
 
 #include "common.h"
 #include "drivers/encoder_phy/encoder.h"
-#include "drivers/pwm_driver_phy/pwm_driver.h"
+#include "drivers/pwm_driver/driver_pwm.h"
 #include "foc_vector_synthesis.h"  // Position-velocity cascaded controller
 #include "math/helpers/frequency_generator.h"
 #include "math/motion/motion_executor.h"  // Real-time motion trajectory execution
 #include "math/motion/motion_governor.h"
-#include "motor_driver/calibration/angle_calibrator.h"
-#include "motor_driver/driver_pwm/driver_pwm.h"
-#include "motor_driver/motor.h"
-#include "motor_driver/types.h"
+#include "motor_control/calibration/angle_calibrator.h"
+#include "motor_control/current_control/current_control.h"
+#include "motor_control/motor.h"
+#include "motor_control/types.h"
 
 #include "drivers/tunepulse_interlayer.h"
 
@@ -97,7 +97,7 @@ struct TunePulseHeart {
 public:
     Frequency clock_;    ///< System/PWM timing reference (170 MHz core, programmable carrier).
     Motor motor_params;  ///< Motor description parameters (type, poles, limits).
-    DriverPWM driver;    ///< FOC control driver operating on driver_phy.
+    CurrentControl driver;    ///< FOC control driver operating on driver_phy.
 
     /**
      * Flash-backed persistent storage for calibration tables.
@@ -123,10 +123,14 @@ public:
     Vec2D_f32 pwm_voltage_ab = {0.0, 0.0};  ///< Last commanded alpha-beta voltage vector [V].
     float current_target_a = 0.5;           ///< Target q-axis current for the FOC loop [A].
     LED_Control_Callback led_callbacks_[3] = {nullptr, nullptr, nullptr};  ///< Registered LED callbacks (index 0..2).
-    volatile bool is_running = false;
+    // FIX (P1.4): re-entrancy guard. Atomic exchange makes the test-and-set
+    // indivisible, so an ISR racing with a running tick() can no longer skip
+    // or duplicate a control pass; the late sample is intentionally dropped
+    // as back-pressure.
+    std::atomic<bool> is_running{false};
 
 public:
-    PhyDriverPWM driver_phy;  ///< Physical driver layer: PWM output, phase-current ADCs, supply-voltage ADC.
+    DriverPWM driver_phy;  ///< Physical driver layer: PWM output, phase-current ADCs, supply-voltage ADC.
     Encoder encoder;          ///< Magnetic encoder interface (SPI).
 
     /**
@@ -239,12 +243,15 @@ public:
      *    using the electrical angle and the target current, then forwards it
      *    to the physical layer.
      */
+
+    float temperature = 0;
     void tick() {
-        if (is_running)
+        if (is_running.exchange(true, std::memory_order_acq_rel))  // Single-owner entry: drop the sample if a pass is in progress
             return;
-        is_running = true;
-        if (driver_phy.current_sense.is_changed() & driver_phy.supply_voltage.is_changed()) {
+        if (driver_phy.current.is_changed() & driver_phy.supply.is_changed()) {
             driver_phy.tick();
+
+            temperature = driver_phy.temperature.get_temperature_c();
 
             uint32_t real_raw_ang = encoder.get_angle();           // Raw mechanical angle (no sign fix)
             int32_t real_pos = encoder.get_position() * err_sign;  // Corrected mechanical position
@@ -287,12 +294,12 @@ public:
                     break;
                 case MotorStatus::NotCalibrated:
                     angle_calibrator.tick(real_raw_pos, (int16_t)driver.motor.get_motor_type());
-                    if (driver_phy.current_sense.is_calibrated() == false) {
+                    if (driver_phy.current.is_calibrated() == false) {
                         // Current offsets unknown yet: short all phases (INFINITY
                         // sentinel handled by the PWM backend) and bail out.
                         pwm_voltage_ab.a = pwm_voltage_ab.b = INFINITY;
                         driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
-                        is_running = false;
+                        is_running.store(false, std::memory_order_release);
                         return;
                     } else if (driver.motor.get_status() == MotorStatus::Success) {
                            if (!angle_calibrator.is_settling()) {
@@ -309,7 +316,7 @@ public:
                     // (active brake / idle) and skip FOC this cycle.
                     pwm_voltage_ab.a = pwm_voltage_ab.b = NAN;
                     driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
-                    is_running = false;
+                    is_running.store(false, std::memory_order_release);
                     return;
                 }
             }
@@ -319,6 +326,6 @@ public:
             pwm_voltage_ab = driver.tick_control_foc((int16_t)angle_el_, targt);
             driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
         }
-        is_running = false;
+        is_running.store(false, std::memory_order_release);
     }
 };

@@ -1,5 +1,4 @@
-#ifndef INPUT_WRAPPER_HPP
-#define INPUT_WRAPPER_HPP
+#pragma once
 
 /**
  * @file input.h
@@ -35,11 +34,9 @@ public:
     /**
      * @brief Register an input getter callback.
      * @param cb Getter function; nullptr restores the built-in null getter.
-     * @return A copy of this wrapper (by value; registration still applies
-     *         to this instance because the callback is stored by reference
-     *         to the same member - see note below).
+     * @return Reference to this wrapper for call-site chaining.
      */
-    InputWrapper setCallback(InputGetCb cb) {
+    InputWrapper& setCallback(InputGetCb cb) {
         getCb_ = cb ? cb : get_null;
         return *this;
     }
@@ -50,5 +47,3 @@ public:
      */
     inline int8_t check() const { return getCb_(); }
 };
-
-#endif  // INPUT_WRAPPER_HPP

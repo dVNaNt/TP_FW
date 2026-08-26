@@ -57,10 +57,7 @@ private:
         return (x < lo) ? lo : ((x > hi) ? hi : x);
     }
 
-    static inline float signf(float x) {
-        return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f);
-    }
-
+    // CLEANUP (P5.1): private signf() removed — reuse the shared one from common.h.
 
     // ── ABY observer state ────────────────────────────────────────
     float obs_pos_rev = 0.0f;

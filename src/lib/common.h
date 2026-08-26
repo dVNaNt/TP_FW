@@ -93,7 +93,7 @@ inline int16_t fast_sign_int(int32_t val) {
 #include "math/filters/median3.h"
 #include "math/helpers/fifo_buffer.h"
 #include "math/helpers/stability_check.h"
-#include "motor_driver/types.h"
+#include "motor_control/types.h"
 #include "vectors.h"
 
 /**

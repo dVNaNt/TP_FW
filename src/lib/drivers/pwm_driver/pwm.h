@@ -27,12 +27,12 @@
 
 /// Callback invoked to write 3-phase compare values to the hardware timer.
 /// @param phases Array of 3 timer-compare values in ticks
-typedef void (*pwm_set_phases_cb)(const int16_t phases[3]);
+typedef void (*PwmPhasesCallback)(const int16_t phases[3]);
 
 /// Callback invoked to configure the current-sense sampling point.
 /// Typically positions a hardware timer to trigger ADC sampling at the
 /// optimal point in the PWM cycle (center of the active vector).
-typedef void (*current_sample_point_cb)(void);
+typedef void (*SamplePointCallback)(void);
 
 
 /**
@@ -59,7 +59,7 @@ typedef void (*current_sample_point_cb)(void);
  */
 class PwmWrapper {
 public:
-    PwmWrapper() : set_phases_cb_(nullptr), current_sample_point_cb_(nullptr), period_(0), seq_(0) {}
+    PwmWrapper() : set_phases_cb_(nullptr), sample_point_cb_(nullptr), period_(0), seq_(0) {}
 
     // =======================================================================
     // SETUP API
@@ -72,13 +72,13 @@ public:
     inline void set_period(uint32_t arr) { period_ = arr; }
 
     /**
-     * @struct callback_chain
+     * @struct CallbackProxy
      * @brief Zero-overhead proxy returned by set_callback() for chaining.
      *
      * Holds a single reference to the owning PwmWrapper. All methods are inline
      * and return *this — the compiler collapses the chain into direct assignments.
      */
-    struct callback_chain {
+    struct CallbackProxy {
         PwmWrapper& pwm_;
 
         /**
@@ -86,7 +86,7 @@ public:
          * @param cb Function pointer (nullptr = unset)
          * @return Reference to this chain for further calls
          */
-        inline callback_chain& apply_phases_cb(pwm_set_phases_cb cb) { pwm_.set_phases_cb_ = cb; return *this; }
+        inline CallbackProxy& apply_phases_cb(PwmPhasesCallback cb) { pwm_.set_phases_cb_ = cb; return *this; }
 
         /**
          * @brief Set the current-sense sampling point callback.
@@ -98,13 +98,13 @@ public:
          * @param cb Function pointer (nullptr = unset)
          * @return Reference to this chain for further calls
          */
-        inline callback_chain& current_sample_point_cb(current_sample_point_cb cb) { pwm_.current_sample_point_cb_ = cb; return *this; }
+        inline CallbackProxy& sample_point_cb(SamplePointCallback cb) { pwm_.sample_point_cb_ = cb; return *this; }
     };
 
     /**
      * @brief Begin the callback configuration chain.
      *
-     * @return callback_chain bound to this PwmWrapper
+     * @return CallbackProxy bound to this PwmWrapper
      *
      * @par Example
      * @code
@@ -113,13 +113,13 @@ public:
      *       .current_sample_point(set_cs_timer);
      * @endcode
      */
-    inline callback_chain set_callback() { return {*this}; }
+    inline CallbackProxy set_callback() { return {*this}; }
 
 
 
 
     // =======================================================================
-    // HARDWARE OUTPUT (called by PhyDriverPWM::tick_icr)
+    // HARDWARE OUTPUT (called by DriverPWM::tick_icr)
     // =======================================================================
 
     /**
@@ -134,14 +134,14 @@ public:
      * @brief Invoke the current-sampling-point callback to configure ADC timing.
      */
     inline void apply_current_sample_point() const {
-        if (current_sample_point_cb_) current_sample_point_cb_();
+        if (sample_point_cb_) sample_point_cb_();
     }
 
 private:
-    friend struct PhyDriverPWM;
+    friend struct DriverPWM;
     
-    pwm_set_phases_cb     set_phases_cb_;            ///< Hardware callback: write CCR registers
-    current_sample_point_cb current_sample_point_cb_; ///< Hardware callback: configure ADC sampling point
+    PwmPhasesCallback     set_phases_cb_;            ///< Hardware callback: write CCR registers
+    SamplePointCallback sample_point_cb_; ///< Hardware callback: configure ADC sampling point
     uint32_t              period_;                   ///< Timer ARR value in ticks
 
     std::atomic<uint32_t> seq_{0};        ///< SeqLock counter for lock-free tick updates

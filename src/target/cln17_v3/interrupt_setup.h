@@ -4,7 +4,7 @@
  *
  * NVIC_Init() assigns priorities; the ISR handlers bridge hardware events
  * (ADC end-of-conversion, comparators, timers) into the global TUNE_HEART
- * object through g_heart_ptr.
+ * object.
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
@@ -23,15 +23,23 @@
 #include "spi_setup.h"        // Include SPI communication setup for the encoder
 #include "timer_pwm_setup.h"  // Include PWM timer hardware definitions and functions
 
-struct TunePulseHeart;                        // Forward declaration of the main FOC controller structure
-extern TunePulseHeart* volatile g_heart_ptr;  // Expose global volatile pointer to access FOC instance inside ISRs
+// OPTIMIZATION (P2.5): cache &TUNE_HEART.driver_phy once instead of walking
+// the global object member chain on every sample. The address is fixed at
+// link time; the first ISR call binds it, afterwards only a register load remains.
+inline DriverPWM* heart_driver_phy() {
+    static DriverPWM* phy = &TUNE_HEART.driver_phy;
+    return phy;
+}
 
 inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA completion event
 
+    DriverPWM* phy = heart_driver_phy();  // Cached driver-physical-layer pointer
+
     uint16_t current_values[3];                              // Declare array to store raw ADC current readings for all 3 phases
-    uint16_t voltage_supply, voltage_vref, temperature_adc;  // Declare variables for auxiliary system measurements
-    ADC_get_values(current_values[0], current_values[1], current_values[2], voltage_supply, voltage_vref,
-                   temperature_adc);  // Fetch all ADC readings simultaneously
+    uint16_t voltage_supply, temperature_adc;  // Declare variables for auxiliary system measurements
+
+    ADC_get_values(current_values[0], current_values[1], current_values[2], voltage_supply, 
+                   temperature_adc);  // Fetch all ADC readings simultaneously (temperature rides in the same DMA group)
 
     constexpr uint16_t upper_th = uint16_t(
         (65535.0f * (3.3f - 0.3f)) / 3.3f);  // Calculate max valid ADC threshold at compile time (excluding non-linear zone)
@@ -48,9 +56,12 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
     if ((uint32_t)(current_values[2] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase C
         current_values[2] = UINT16_MAX;  // Mark Phase C reading as invalid if it falls outside the valid range
     
-    TUNE_HEART.driver_phy.current_sense.set_currents(current_values);
-    TUNE_HEART.driver_phy.supply_voltage.set_voltage_irq(voltage_supply);
-    TUNE_HEART.driver_phy.temperature.set_temperature_irq(temperature_adc);  // Feed the thermal protection pipeline (raw 16-bit left-aligned)
+    phy->current.set_currents(current_values);
+    phy->supply.set_voltage_irq(voltage_supply);
+    // Feed the thermal protection pipeline (raw 12-bit left-aligned). A zero
+    // word means "no injected conversion completed yet" (the sensor reads
+    // ~1.4 V, never 0), so it is skipped to keep the filter unprimed.
+    phy->temperature.set_temperature_irq(temperature_adc);
 
 
 }  // End of ADC_READY_Callback function

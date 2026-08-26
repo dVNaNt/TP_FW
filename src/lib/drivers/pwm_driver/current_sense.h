@@ -24,7 +24,7 @@
  * - An optional hardware comparator callback (DAC threshold update)
  *
  * When the timer is active, OvercurrentProxy::is_active() returns true. The parent
- * PhyDriverPWM reads this state every tick and reflects it into its fault_flags_ bitfield.
+ * DriverPWM reads this state every tick and reflects it into its fault_flags_ bitfield.
  * Any trigger (external ISR or internal software check) calls trigger(), which atomically
  * restarts the recovery timer.
  *
@@ -36,8 +36,8 @@
  * comparator fails to fire or is not configured, the software will catch the overcurrent
  * event and keep the fault active.
  *
- * @note trigger() and reset() are private — only CurrentSensePHY (tick) and
- *       PhyDriverPWM (FaultProxy) may invoke them, never user code.
+ * @note trigger() and reset() are private — only CurrentSense (tick) and
+ *       DriverPWM (FaultProxy) may invoke them, never user code.
  * @warning The digital fallback is a safety net — it must NOT be disabled.
  *
  * @copyright Copyright 2026, creapunk
@@ -50,35 +50,31 @@
 #include "../../common.h"
 #include "../generic/setup.h"
 #include "motor_control.h"
+#include "types.h"
 
-// Forward declaration of PhyDriverPWM to allow friend declaration
-struct PhyDriverPWM;
-struct MotorControl;
-
-/// Function pointer type for comparator overcurrent threshold update callback.
-/// @param threshold 16-bit DAC threshold value to program into the hardware comparator
-typedef void (*DAC_SET_COMP_Callback)(uint16_t);
+// Forward declaration of DriverPWM to allow friend declaration
+struct DriverPWM;
 
 /// Function pointer type for calibration event callbacks (start/complete).
 typedef void (*CalibrationCallback)();
 
 /**
- * @struct CurrentSensePHY
+ * @struct CurrentSense
  * @brief Three-channel current sensing with calibration, normalization, and overcurrent protection.
  *
  * Owns the full current-sensing pipeline: raw ADC ingestion via SeqLock, zero-current
  * calibration, Q15 normalization with per-channel scale factors, and an OvercurrentProxy
  * sub-object that manages hardware comparator thresholds and fault recovery timers.
  */
-struct CurrentSensePHY {
-    friend struct PhyDriverPWM;      ///< Allow PhyDriverPWM to call private tick()
+struct CurrentSense {
+    friend struct DriverPWM;         ///< Allow the driver to run private tick() and read outputs
     friend struct OvercurrentProxy;  ///< Allow proxy to access calibration/scale members
-    friend struct MotorControlPHY;  ///< Allow PhyDriverPWM to call private tick()
+    friend struct MotorControl;      ///< Allow phase-stage access to normalization internals
 
 private:
     // --- Dependencies ---
     Setup setup;  ///< Callback wrapper for hardware initialization
-    MotorControlPHY& motor_ctrl_;
+    MotorControl& motor_ctrl_;
 
     // --- Configuration ---
     /// Full-scale current amplitude in mA for each channel (0 => sensor missing).
@@ -111,13 +107,13 @@ private:
 
 public:
     /**
-     * @brief Construct a CurrentSensePHY instance.
+     * @brief Construct a CurrentSense instance.
      * @param ch1_fs_amps Full-scale current for Phase A in amps (0.0f = sensor missing)
      * @param ch2_fs_amps Full-scale current for Phase B in amps (0.0f = sensor missing)
      * @param ch3_fs_amps Full-scale current for Phase C in amps (0.0f = sensor missing)
      * @note Negative full-scale values indicate an inverted current sensor.
      */
-    CurrentSensePHY(float ch1_fs_amps, float ch2_fs_amps, float ch3_fs_amps, MotorControlPHY& motor_ctrl)
+    CurrentSense(float ch1_fs_amps, float ch2_fs_amps, float ch3_fs_amps, MotorControl& motor_ctrl)
         : full_scale_ma_((int32_t)(ch1_fs_amps * 1000.0f), (int32_t)(ch2_fs_amps * 1000.0f), (int32_t)(ch3_fs_amps * 1000.0f)),
           overcurrent{*this},
           motor_ctrl_(motor_ctrl) {
@@ -141,7 +137,7 @@ public:
 
 private:
     /**
-     * @brief Main processing tick — called every cycle by PhyDriverPWM::tick().
+     * @brief Main processing tick — called every cycle by DriverPWM::tick().
      *
      * @details
      * When new ADC data is available (is_changed() == true):
@@ -150,7 +146,7 @@ private:
      *    and checks the digital overcurrent fallback; if calibrating,
      *    accumulates samples until n_samples is reached
      *
-     * @note Called from PhyDriverPWM::tick() — must be fast and ISR-safe on the read side.
+     * @note Called from DriverPWM::tick() — must be fast and ISR-safe on the read side.
      */
     void tick() {
         if (is_changed()) {
@@ -256,7 +252,7 @@ private:
      *       both operands without short-circuiting.
      */
     inline float norm2amps(int16_t norm) const {
-        if (full_scale_max_ma <= 0 | norm == INT16_MIN)
+        if (full_scale_max_ma <= 0 || norm == INT16_MIN)
             return 0.0f;
         float max_amps = (float)full_scale_max_ma / 1000.0f;
         return ((float)norm / 32768.0f) * max_amps;
@@ -374,42 +370,42 @@ public:
      * @brief Zero-overhead wrapper holding all overcurrent protection state.
      *
      * Manages per-channel hard limits, an atomic recovery timer, and optional
-     * hardware DAC callbacks. Designed as a public member of CurrentSensePHY
+     * hardware DAC callbacks. Designed as a public member of CurrentSense
      * so users can configure protection without touching internal current sensing logic.
      *
      * ## Fluent Configuration API
      *
      * Callback setup (chainable):
      * @code
-     *   driver.current_sense.overcurrent.set_callback()
+     *   driver.current.overcurrent.set_callback()
      *       .oc_ia(hw_comp_callback)
      *       .oc_ib(hw_comp_callback);
      * @endcode
      *
      * Limit setup (chainable):
      * @code
-     *   driver.current_sense.overcurrent.set_limit_amps()
+     *   driver.current.overcurrent.set_limit_amps()
      *       .oc_ia(5.0f)
      *       .oc_ib(5.0f);
      * @endcode
      *
-     * @note trigger() and reset() are private — accessible only to CurrentSensePHY
-     *       and PhyDriverPWM via friend declarations.
+     * @note trigger() and reset() are private — accessible only to CurrentSense
+     *       and DriverPWM via friend declarations.
      */
     struct OvercurrentProxy {
-        friend struct CurrentSensePHY;
-        friend struct CallbackSetter;
-        friend struct PhyDriverPWM;
+        friend struct CurrentSense;
+        friend struct CallbackProxy;
+        friend struct DriverPWM;
 
     private:
-        CurrentSensePHY& self;  ///< Reference to parent CurrentSensePHY (zero overhead)
+        CurrentSense& self;  ///< Reference to parent CurrentSense (zero overhead)
 
         static inline void empty_comp_oc_callback(uint16_t) {}  ///< Noop callback to eliminate nullptr checks
 
-        DAC_SET_COMP_Callback comp_oc_callback_[3] = {&empty_comp_oc_callback, &empty_comp_oc_callback, &empty_comp_oc_callback};
+        CompThresholdCallback comp_oc_callback_[3] = {&empty_comp_oc_callback, &empty_comp_oc_callback, &empty_comp_oc_callback};
 
         std::atomic<int32_t> oc_error_cycles_{0};                          ///< Active recovery timer (0 = no error)
-        std::atomic<int32_t> oc_error_timeout_cycles_{10000};              ///< Configured timeout loaded on trigger()
+        std::atomic<int32_t> oc_error_timeout_cycles_{kDefaultRecoveryCycles};              ///< Configured timeout loaded on trigger()
         Vec3D overcurrent_hard_norm_ = {INT16_MAX, INT16_MAX, INT16_MAX};  ///< Hard limit in Q15
 
         /**
@@ -463,11 +459,11 @@ public:
          * @param ch Channel index (CH1, CH2, or CH3)
          * @param callback Function pointer (nullptr automatically replaced with a noop)
          */
-        inline void set_callback(Channel ch, DAC_SET_COMP_Callback callback) {
+        inline void set_callback(Channel ch, CompThresholdCallback callback) {
             comp_oc_callback_[ch] = callback ? callback : &empty_comp_oc_callback;
         }
 
-        // --- Private: only CurrentSensePHY and PhyDriverPWM may invoke ---
+        // --- Private: only CurrentSense and DriverPWM may invoke ---
 
         /**
          * @brief Trigger overcurrent protection — restart the recovery timer.
@@ -475,8 +471,8 @@ public:
          * Atomically loads the configured timeout and stores it into the active
          * recovery timer. Safe to call from interrupt context.
          *
-         * @note Private. Invoked by CurrentSensePHY::tick() (digital fallback)
-         *       and PhyDriverPWM::FaultProxy (external trigger).
+         * @note Private. Invoked by CurrentSense::tick() (digital fallback)
+         *       and DriverPWM::FaultProxy (external trigger).
          */
         inline void trigger() {
             oc_error_cycles_.store(oc_error_timeout_cycles_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -486,16 +482,16 @@ public:
          * @brief Immediately clear the overcurrent error (reset timer to 0).
          *
          * @note Private. Does NOT call any callbacks — only clears internal state.
-         *       Invoked by PhyDriverPWM::FaultProxy when clearing a fault.
+         *       Invoked by DriverPWM::FaultProxy when clearing a fault.
          */
         inline void reset() { oc_error_cycles_.store(0, std::memory_order_relaxed); }
 
     public:
         /**
-         * @brief Construct an OvercurrentProxy bound to a parent CurrentSensePHY.
-         * @param s Reference to the owning CurrentSensePHY instance
+         * @brief Construct an OvercurrentProxy bound to a parent CurrentSense.
+         * @param s Reference to the owning CurrentSense instance
          */
-        OvercurrentProxy(CurrentSensePHY& s) : self(s) {}
+        OvercurrentProxy(CurrentSense& s) : self(s) {}
 
         /**
          * @brief Check if overcurrent error is currently active.
@@ -526,23 +522,23 @@ public:
          *   overcurrent.set_callback().oc_ia(cb).oc_ib(cb).oc_ic(cb);
          * @endcode
          */
-        struct CallbackSetter {
+        struct CallbackProxy {
         private:
             OvercurrentProxy& parent;  ///< Reference to the owning OvercurrentProxy
 
         public:
             /**
-             * @brief Construct a CallbackSetter bound to an OvercurrentProxy.
+             * @brief Construct a CallbackProxy bound to an OvercurrentProxy.
              * @param p Reference to the owning OvercurrentProxy
              */
-            CallbackSetter(OvercurrentProxy& p) : parent(p) {}
+            CallbackProxy(OvercurrentProxy& p) : parent(p) {}
 
             /**
              * @brief Set overcurrent comparator callback for Phase A.
              * @param cb Function pointer (nullptr is safely replaced by a noop)
              * @return Reference to this setter for chaining
              */
-            inline CallbackSetter& oc_lim_ia_cb(DAC_SET_COMP_Callback cb) {
+            inline CallbackProxy& oc_lim_ia_cb(CompThresholdCallback cb) {
                 if (cb != nullptr) {
                     parent.set_callback(CH1, cb);
                 }
@@ -553,7 +549,7 @@ public:
              * @param cb Function pointer (nullptr is safely replaced by a noop)
              * @return Reference to this setter for chaining
              */
-            inline CallbackSetter& oc_lim_ib_cb(DAC_SET_COMP_Callback cb) {
+            inline CallbackProxy& oc_lim_ib_cb(CompThresholdCallback cb) {
                 if (cb != nullptr) {
                     parent.set_callback(CH2, cb);
                 }
@@ -564,7 +560,7 @@ public:
              * @param cb Function pointer (nullptr is safely replaced by a noop)
              * @return Reference to this setter for chaining
              */
-            inline CallbackSetter& oc_lim_ic_cb(DAC_SET_COMP_Callback cb) {
+            inline CallbackProxy& oc_lim_ic_cb(CompThresholdCallback cb) {
                 if (cb != nullptr) {
                     parent.set_callback(CH3, cb);
                 }
@@ -580,23 +576,23 @@ public:
          *   overcurrent.set_limit_amps().oc_ia(5.0f).oc_ib(5.0f).oc_ic(5.0f);
          * @endcode
          */
-        struct LimitSetter {
+        struct LimitProxy {
         private:
             OvercurrentProxy& parent;  ///< Reference to the owning OvercurrentProxy
 
         public:
             /**
-             * @brief Construct a LimitSetter bound to an OvercurrentProxy.
+             * @brief Construct a LimitProxy bound to an OvercurrentProxy.
              * @param p Reference to the owning OvercurrentProxy
              */
-            LimitSetter(OvercurrentProxy& p) : parent(p) {}
+            LimitProxy(OvercurrentProxy& p) : parent(p) {}
 
             /**
              * @brief Set overcurrent limit for Phase A.
              * @param limit_amps Limit in amperes
              * @return Reference to this setter for chaining
              */
-            inline LimitSetter& oc_ia(float limit_amps) {
+            inline LimitProxy& oc_ia(float limit_amps) {
                 parent.set_limit_amps(CH1, limit_amps);
                 return *this;
             }
@@ -605,7 +601,7 @@ public:
              * @param limit_amps Limit in amperes
              * @return Reference to this setter for chaining
              */
-            inline LimitSetter& oc_ib(float limit_amps) {
+            inline LimitProxy& oc_ib(float limit_amps) {
                 parent.set_limit_amps(CH2, limit_amps);
                 return *this;
             }
@@ -614,7 +610,7 @@ public:
              * @param limit_amps Limit in amperes
              * @return Reference to this setter for chaining
              */
-            inline LimitSetter& oc_ic(float limit_amps) {
+            inline LimitProxy& oc_ic(float limit_amps) {
                 parent.set_limit_amps(CH3, limit_amps);
                 return *this;
             }
@@ -622,15 +618,15 @@ public:
 
         /**
          * @brief Begin a callback configuration chain.
-         * @return CallbackSetter bound to this proxy
+         * @return CallbackProxy bound to this proxy
          */
-        inline CallbackSetter set_callback() { return CallbackSetter(*this); }
+        inline CallbackProxy set_callback() { return CallbackProxy(*this); }
 
         /**
          * @brief Begin a limit configuration chain.
-         * @return LimitSetter bound to this proxy
+         * @return LimitProxy bound to this proxy
          */
-        inline LimitSetter set_limit_amps() { return LimitSetter(*this); }
+        inline LimitProxy set_limit_amps() { return LimitProxy(*this); }
 
         /**
          * @brief Set the overcurrent recovery timeout in tick cycles.

@@ -9,7 +9,7 @@
  * Pulls in, with a single include:
  * - flash_eeprom.h            : EEPROM-emulation middleware (calibration
  *                               table persistence).
- * - pwm_driver_phy/pwm_driver.h : physical PWM/ADC driver layer (PhyDriverPWM,
+ * - pwm_driver/driver_pwm.h : physical PWM/ADC driver layer (DriverPWM,
  *                               current sensing, supply voltage monitoring).
  * - encoder_phy/encoder.h     : magnetic encoder interface.
  *
@@ -20,7 +20,7 @@
  */
 
 #include "flash_eeprom.h"
-#include "pwm_driver_phy/pwm_driver.h"
+#include "pwm_driver/driver_pwm.h"
 #include "encoder_phy/encoder.h"
 
 #endif

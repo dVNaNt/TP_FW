@@ -34,6 +34,13 @@ volatile uint8_t PWM_DEADTIME_RUNTIME = PWM_DEADTIME_TICKS;  // Allow deadtime t
 volatile int16_t ADC_DELAY_TICKS = SYS_PARAMS::ADC_DELAY_TICKS_CONST;  // Set volatile ADC delay for FOC trigger offset
 volatile int16_t ADC_TRIGGER_POINT = 0;                                // Initialize volatile ADC trigger point to zero
 
+// OPTIMIZATION (P2.1): last written CCR4 delay / BDTR deadtime. Both values
+// change rarely, so the per-period register rewrites are skipped until the
+// requested value actually differs. Seeded with impossible values so the
+// first cycle after boot always performs the write.
+static int16_t adc_delay_written = -1;          // Cached clamped ADC delay currently present in CCR4
+static uint8_t deadtime_written = 0xFF;         // Cached deadtime currently present in BDTR (0xFF never configured)
+
 TIM_HandleTypeDef htim1;  // Declare the HAL structure globally to satisfy HAL_TIM_IRQHandler requirement
 
 inline void MX_TIM1_Init(void) {         // Define an inline function for bare-metal register initialization
@@ -69,8 +76,6 @@ inline void MX_TIM1_Start() {  // Define an inline function to activate timer ou
     TIM1->CR1 |= TIM_CR1_CEN;    // Set Counter Enable bit to start the primary TIM1 timer counting
     TIM1->BDTR |= TIM_BDTR_MOE;  // Set Main Output Enable bit to route timer signals to physical GPIO pins
 }  // End of MX_TIM1_Start bare-metal function
-
-extern TunePulseHeart* volatile g_heart_ptr;  // Expose the global control state pointer for protection checks
 
 /**
  * @brief Force all PWM outputs to High-Impedance (All FETs OFF)
@@ -151,12 +156,9 @@ __attribute__((always_inline, optimize("O3"))) inline void TIM1_Set_PWM_Values(
     int32_t d1 = pwmValues[1];     // Load requested duty cycle for Phase B
     int32_t d2 = pwmValues[2];     // Load requested duty cycle for Phase C
 
-    TunePulseHeart* heart = g_heart_ptr;      // Safely cache the volatile pointer to a local register for speed
-    if (heart != nullptr) {                   // Check if the pointer has been properly initialized
-        if (heart->driver_phy.get_fault()) {  // Check Over-Voltage state first (highest priority)
-            return;
-        }  // End of protection condition checks
-    }  // End of pointer safety check
+    if (TUNE_HEART.driver_phy.get_fault()) {  // Check active fault state (single global object, no pointer indirection)
+        return;
+    }  // End of protection condition check
 
     uint32_t ccr0, ccr1, ccr2;                                        // Compare values computed per phase
     uint32_t m0 = pwm_phase_ccr(d0, ccr0);                            // Phase A: compare value + channel mask
@@ -174,12 +176,20 @@ __attribute__((always_inline, optimize("O3"))) inline void TIM1_Set_PWM_Values(
     // Direct assignment is significantly faster than Read-Modify-Write (|=) because we know all exact bit states
     TIM1->CCER = ccer_mask;  // Overwrite CCER register completely in one atomic hardware cycle
 
+    // OPTIMIZATION (P2.1): CCR4/BDTR only when the requested values change.
     int16_t delay = ADC_DELAY_TICKS;  // Fetch volatile ADC delay variable exactly once to prevent race conditions
-    uint32_t safe_delay = (delay < 0) ? 0 : ((delay > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : delay);  // Branchless clamp
-    TIM1->CCR4 = PWM_TIMER_PERIOD - safe_delay;  // Assign safe calculated delay directly to CCR4 register
+    if (delay != adc_delay_written) {  // Write the trigger point only on an actual parameter change
+        uint32_t safe_delay = (delay < 0) ? 0 : ((delay > PWM_TIMER_PERIOD) ? PWM_TIMER_PERIOD : delay);  // Branchless clamp
+        TIM1->CCR4 = PWM_TIMER_PERIOD - safe_delay;  // Assign safe calculated delay directly to CCR4 register
+        adc_delay_written = delay;                   // Remember what the hardware now holds
+    }
 
-    // Direct assignment overwriting BDTR completely, preserving MOE and updating runtime deadtime instantly
-    TIM1->BDTR = TIM_BDTR_MOE | (PWM_DEADTIME_RUNTIME & 0xFFU);  // Update deadtime safely without Read-Modify-Write
+    uint8_t deadtime = (uint8_t)(PWM_DEADTIME_RUNTIME & 0xFFU);  // Fetch volatile runtime deadtime exactly once
+    if (deadtime != deadtime_written) {  // Rewrite BDTR only on an actual deadtime change
+        // Direct assignment overwriting BDTR completely, preserving MOE and updating runtime deadtime instantly
+        TIM1->BDTR = TIM_BDTR_MOE | deadtime;  // Update deadtime safely without Read-Modify-Write
+        deadtime_written = deadtime;           // Remember what the hardware now holds
+    }
 }  // End of TIM1_Set_PWM_Values ultra-fast function
 
 extern void FOC_TimTrig_Callback();                // Forward declare the ultra-fast callback located in the NVIC file

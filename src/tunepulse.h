@@ -55,17 +55,6 @@ TunePulseHeart TUNE_HEART(PWM_TIMER_FREQ_HZ,
                           SYS_PARAMS::IB_MAX_CURRENT_FS,
                           SYS_PARAMS::IC_MAX_CURRENT_FS);
 
-/**
- * @brief Volatile global pointer to the application heart object.
- *
- * Used by hardware comparator ISR handlers (interrupt_setup.h) to reach the
- * error/fault manager of the single global TunePulseHeart instance from
- * C-style interrupt service routines that have no object context.
- * Declared @c volatile because it is written/read across execution contexts
- * (main thread and ISRs).
- */
-TunePulseHeart* volatile g_heart_ptr = &TUNE_HEART;
-
 #include "target/cln17_v3/bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
 #include "target/cln17_v3/interrupt_setup.h"
 
@@ -116,7 +105,7 @@ void LED_Blue_Control(bool state) {
  * @brief Callback invoked when an ADC current-offset calibration cycle starts.
  *
  * Drives the output voltage vector to (+INFINITY, +INFINITY), which the PWM
- * backend (PhyDriverPWM::set_voltage_ab_volts) maps to INT16_MAX duty on all
+ * backend (DriverPWM::set_voltage_ab_volts) maps to INT16_MAX duty on all
  * three phases, i.e. ALL HIGH-SIDE switches ON. All motor terminals are then
  * tied to the DC bus: zero differential voltage, no torque, and the current
  * amplifiers read their pure offset without back-EMF contribution.
@@ -279,27 +268,35 @@ inline void tunepulse_init() {
     // Register DAC callbacks for hardware protection (must be done before setting limits)
     SerialUSB.println("   Registering DAC callbacks...");
     SerialUSB.flush();
-    TUNE_HEART.driver_phy.current_sense.overcurrent.set_callback()
+    TUNE_HEART.driver_phy.current.overcurrent.set_callback()
         .oc_lim_ia_cb(DAC_Set_COMP2_OC_Threshold)
         .oc_lim_ib_cb(DAC_Set_COMP1_OC_Threshold)
         .oc_lim_ic_cb(DAC_Set_COMP4_OC_Threshold);
     // Hardware overcurrent thresholds (amps): phases A/B at 4.0 A, phase C at
     // 6.2 A. NOTE: the comment below previously claimed 4.6 A / 6.9 A which did
     // not match the actual configured values.
-    TUNE_HEART.driver_phy.current_sense.overcurrent.set_limit_amps().oc_ia(4.0).oc_ib(4.0).oc_ic(6.2);
-    TUNE_HEART.driver_phy.supply_voltage.overvoltage.set_lim_callback(DAC_Set_COMP3_OV_Threshold);
-    TUNE_HEART.driver_phy.supply_voltage.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(48.0);
+    TUNE_HEART.driver_phy.current.overcurrent.set_limit_amps().oc_ia(4.0).oc_ib(4.0).oc_ic(6.2);
+    TUNE_HEART.driver_phy.supply.overvoltage.set_lim_callback(DAC_Set_COMP3_OV_Threshold);
+    TUNE_HEART.driver_phy.supply.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(48.0);
 
-    // Thermal protection (TemperaturePHY, see temperature.h):
-    // - WT (warning temperature) 60 degC — informational flag only
-    // - OT (overtemperature)     85 degC — forces FAULT_OVERHEAT (Hi-Z safe state)
-    // The filter time constant is 2^20 ticks (~52 s at 20 kHz); the fault
-    // releases automatically as soon as the filtered temperature drops back
-    // below the OT threshold.
-    TUNE_HEART.driver_phy.temperature.set_limit_celsius().wt_lim_celsius(60.0f).ot_lim_celsius(85.0f);
+    // Thermal protection (Temperature, see temperature.h):
+    // - OT (overtemperature) trip at 85 degC — forces FAULT_OVERHEAT (Hi-Z safe state)
+    // - Hysteresis band 10 degC — the fault releases only after the filtered
+    //   temperature falls back below 75 degC (no chatter around one threshold).
+    // The integer EMA filter time constant is 4096 ticks (~205 ms at 20 kHz);
+    // thresholds are precomputed into the raw ADC domain once, so tick() does
+    // pure integer comparisons only.
+    TUNE_HEART.driver_phy.temperature.set_limit_celsius().ot_lim_celsius(85.0f).ot_hyst_celsius(10.0f);
+    TUNE_HEART.driver_phy.power.set_limit().op_lim_watts(10.0f).op_lim_amps(2.0f);
+    // Raw -> degC recalculation callback (STM32G4 factory calibration, adc_setup.h):
+    // Temperature converts the filtered internal-sensor reading into real
+    // degrees Celsius and compares the OT limits against that value. Installing
+    // the callback re-inverts the configured thresholds through the calibration
+    // curve, so the call order relative to set_limit_celsius() does not matter.
+    TUNE_HEART.driver_phy.temperature.set_temperature_callback(ADC_Temperature_To_Celsius);
 
-    TUNE_HEART.driver_phy.current_sense.on_calibration_start(start_curnt_cal);
-    TUNE_HEART.driver_phy.current_sense.on_calibration_complete(end_curnt_cal);
+    TUNE_HEART.driver_phy.current.on_calibration_start(start_curnt_cal);
+    TUNE_HEART.driver_phy.current.on_calibration_complete(end_curnt_cal);
 
     SerialUSB.println("   [OK] DAC callbacks registered");
     SerialUSB.flush();
@@ -331,21 +328,22 @@ inline void tunepulse_init() {
         .ov_cb(PWM_Set_All_Low)
         .ext_cb(PWM_Set_All_HiZ)
         .uv_cb(PWM_Set_All_HiZ)
-        .ot_cb(PWM_Set_All_HiZ);  // Software overtemperature: same Hi-Z safe state as hardware faults
+        .ot_cb(PWM_Set_All_HiZ)   // Software overtemperature: same Hi-Z safe state as hardware faults
+        .op_cb(PWM_Set_All_HiZ);  // Software overpower: Hi-Z safe state on power/current limit violation
     TUNE_HEART.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
 
     // Current-sense offset calibration:
     // start_curnt_cal() ties all phases to VBUS (all high-side ON) and
     // end_curnt_cal() ties them to GND (all low-side ON); in both states the
     // differential voltage is zero, so the ADC captures amplifier offsets only.
-    TUNE_HEART.driver_phy.current_sense.calibrate();
+    TUNE_HEART.driver_phy.current.calibrate();
     SerialUSB.println("Start current calibration");
 
     // Blocking wait for completion. Completion is expected to be signalled
     // from the ADC/interrupt context; the periodic tick() call is disabled
     // here, so if no interrupt advances the calibration state machine this
     // loop will spin forever (see CODE_ISSUES.md).
-    while (TUNE_HEART.driver_phy.current_sense.is_calibrated() == false) {
+    while (TUNE_HEART.driver_phy.current.is_calibrated() == false) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
     }
 

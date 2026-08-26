@@ -1,10 +1,19 @@
 /**
- * @file driver_pwm.h
- * @brief High-level PWM motor driver object.
+ * @file current_control.h
+ * @brief High-level current-control motor driver object.
  *
- * Aggregates the physical driver (PhyDriverPWM), the FOC current controller
+ * Aggregates the physical driver (DriverPWM), the FOC current controller
  * (foc-current.h), the motor description (Motor) and the calibration state
  * machines into the single application-facing driver used by TunePulseHeart.
+ *
+ * ## Overcurrent protection interaction
+ *
+ * While the physical layer reports an active overcurrent (OC) fault,
+ * tick_control_foc() bypasses regulation entirely: the FOC controller state
+ * (PI integrators, feedforward step memory, power filters) is reset and a
+ * zero voltage vector is emitted. This prevents the integrators from winding
+ * up against the Hi-Z outputs during the fault and eliminates the recovery
+ * transient when the drive returns to active operation.
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
@@ -14,7 +23,7 @@
 
 #include <cmath>  // For sqrtf and fabsf
 #include "../../common.h"
-#include "../../drivers/pwm_driver_phy/pwm_driver.h"
+#include "../../drivers/pwm_driver/driver_pwm.h"
 #include "../../math/helpers/frequency_generator.h"  // Frequency generator for HFI
 #include "../../math/helpers/stability_check.h"      // Stability check for current monitoring
 #include "../../math/helpers/timeout_timer.h"        // Timeout timer for countdown operations
@@ -24,7 +33,7 @@
 #include "motor_calibration.h"
 
 static constexpr float test_pwr = 5.0;
-struct DriverPWM {
+struct CurrentControl {
 public:
     Motor& motor;
     DriverStatus setup_status;
@@ -46,9 +55,9 @@ public:
     Vec2D_f32 voltage_ab_ = {0, 0};
     Vec2D_f32 voltage_dq_ = {0, 0};
     bool is_saturated = false;
-    PhyDriverPWM& drv;
+    DriverPWM& drv;
 
-    DriverPWM(Motor& motor_ref, PhyDriverPWM& drv)
+    CurrentControl(Motor& motor_ref, DriverPWM& drv)
         : motor(motor_ref),
           setup_status(),
           motor_calib_status(MotorStatus::NotCalibrated),
@@ -99,6 +108,20 @@ public:
 
         int16_t angular_speed = angle_ - angle_prev_;
         angle_prev_ = angle_;
+
+        // Overcurrent guard: while the physical-layer OC protection is
+        // engaged, the PWM outputs are forced into HiZ, so regulating against
+        // them would wind up the PI integrators against an invisible load and
+        // produce a violent torque kick on fault release. Instead, freeze and
+        // reset the entire FOC state machine and emit zero voltage; the
+        // controller resumes from a clean state once the fault clears.
+        if (drv.get_fault()) {
+            foc_current_.reset();                 // Zero d/q integrators, step memory and power filters
+            voltage_dq_ = Vec2D_f32(0.0f, 0.0f);  // Invalidate stored voltage used by the power estimate
+            is_saturated = false;                 // Clear saturation flag (no regulation happened)
+            power = 0.0f;                         // No valid power can be produced this cycle
+            return Vec2D_f32(0.0f, 0.0f);         // Zero alpha-beta voltage command
+        }
 
         // Prepearing angles for future rotations
         Pol2D angle_polar = Pol2D(angle_, INT16_MAX);

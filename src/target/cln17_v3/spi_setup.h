@@ -202,7 +202,9 @@ static inline void Encoder_SmartInit() {
     // 5. Validate the response
     if (DMA1->ISR & DMA_ISR_TCIF1) {
         DMA1->IFCR = DMA_IFCR_CGIF1;
-        while (SPI3->SR & SPI_SR_BSY) { __NOP(); }
+        // OPTIMIZATION (P1.3): sleep in WFE instead of a NOP spin; SysTick
+        // (1 ms) and any pending event wake the core until SPI finishes.
+        while (SPI3->SR & SPI_SR_BSY) { __WFE(); }
         SPI3_ChipSelect(false);
 
         // If MISO floats, data will be either 0x00 or 0xFF
@@ -280,7 +282,11 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
 
         if (ENCODER_USE_EXTERNAL) {
             // Process the external MT6835
-            while (SPI3->SR & SPI_SR_BSY) { __NOP(); } // Wait for the physical SPI completion
+            // OPTIMIZATION (P1.3): at 2.7-5.3 MHz SPI the last bytes are still
+            // shifting after DMA-complete. Sleep in WFE (woken by the
+            // higher-priority ADC/TIM1 interrupts that fire every cycle)
+            // instead of busy-spinning NOPs inside this priority-5 ISR.
+            while (SPI3->SR & SPI_SR_BSY) { __WFE(); } // Wait for the physical SPI completion
             SPI3_ChipSelect(false);
 
             POSITION_ENCODER_MT_RAW = ((uint32_t)SPI3_RX_BUF[2] << 13) | ((uint32_t)SPI3_RX_BUF[3] << 5) | ((uint32_t)SPI3_RX_BUF[4] >> 3);

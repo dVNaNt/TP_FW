@@ -58,10 +58,6 @@
 #include "stm32g4xx_ll_gpio.h"
 #include "stm32g4xx_ll_system.h"
 
-// Forward declaration of TunePulseHeart for error flag access
-struct TunePulseHeart;
-extern TunePulseHeart* volatile g_heart_ptr;  // Global volatile pointer for ISR access
-
 // Forward declaration for immediate PWM protection in ISR
 extern void TIM1_Set_PWM_Values(const int16_t pwmValues[3]);
 
@@ -272,20 +268,16 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
     // Check COMP1 (Phase B overcurrent) - EXTI line 21
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_21)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_21);  // Clear pending flag
-        
-        if (g_heart_ptr != nullptr) {
-            g_heart_ptr->driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        }
-         SerialUSB.println("B");
+
+        TUNE_HEART.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
+        SerialUSB.println("B");
     }
 
     // Check COMP2 (Phase A overcurrent) - EXTI line 22
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_22)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_22);  // Clear pending flag
-        
-        if (g_heart_ptr != nullptr) {
-            g_heart_ptr->driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        }
+
+        TUNE_HEART.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
         SerialUSB.println("A");
     }
 
@@ -295,11 +287,9 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
 
         // Check if rising edge (fault) or falling edge (clear)
         if (LL_COMP_ReadOutputLevel(COMP3) == LL_COMP_OUTPUT_LEVEL_HIGH) {
-            if (g_heart_ptr != nullptr)
-                g_heart_ptr->driver_phy.set_fault().overvoltage(true);  // Set fatal overvoltage error
+            TUNE_HEART.driver_phy.set_fault().overvoltage(true);  // Set fatal overvoltage error
         } else {
-            if (g_heart_ptr != nullptr)
-                g_heart_ptr->driver_phy.set_fault().overvoltage(false);  // Clear overvoltage error
+            TUNE_HEART.driver_phy.set_fault().overvoltage(false);  // Clear overvoltage error
         }
         SerialUSB.println("V");
     }
@@ -313,10 +303,8 @@ extern "C" void COMP4_IRQHandler(void) {
     // Check COMP4 (Phase C overcurrent) - EXTI line 30
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_30)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_30);  // Clear pending flag
-        
-        if (g_heart_ptr != nullptr) {
-            g_heart_ptr->driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        }
+
+        TUNE_HEART.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
         SerialUSB.println("C");
     }
 }
@@ -337,10 +325,7 @@ extern "C" void EXTI15_10_IRQHandler(void) {
         // Falling edge (pin LOW) -> true (set the flag)
         bool is_fault = (LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_10) == 0U); 
         SerialUSB.println("E");
-        if (g_heart_ptr != nullptr) {
-            g_heart_ptr->driver_phy.set_fault().external(is_fault);
-        }
-        
+        TUNE_HEART.driver_phy.set_fault().external(is_fault);
     }
 }
 

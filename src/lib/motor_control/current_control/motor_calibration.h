@@ -13,7 +13,7 @@
 
 #include <cmath>  // For sqrtf and fabsf
 #include "../../common.h"
-#include "../../drivers/pwm_driver_phy/pwm_driver.h"
+#include "../../drivers/pwm_driver/driver_pwm.h"
 #include "../../math/helpers/buzzer.h"
 #include "../../math/helpers/frequency_generator.h"  // Frequency generator for HFI
 #include "../../math/helpers/stability_check.h"      // Stability check for current monitoring
@@ -107,7 +107,7 @@ private:
     // Calibration-specific timers and checkers
     timeout_timer timeout_;
     StabilityCheck stability_check_;
-    PhyDriverPWM& drv;
+    DriverPWM& drv;
 
     // Flash-restored profile snapshot (captured before identification overwrites
     // the values) - used for the post-calibration "same motor" decision.
@@ -121,7 +121,7 @@ private:
 
 public:
     // Constructor - initialize all calibration variables
-    MotorCalibration(PhyDriverPWM& drv)
+    MotorCalibration(DriverPWM& drv)
         : hfi_gen_(20000),  // Default 20kHz sys freq
           voltage_volts_(0.0f),
           voltage_increment_volts_(0.0f),

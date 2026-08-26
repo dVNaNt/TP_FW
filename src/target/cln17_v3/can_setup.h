@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include <atomic>    // Added for thread-safe counters
 #include <algorithm> // For std::min
+#include <cstring>   // For std::memcpy
 #include "stm32g4xx_hal.h"
 #include "stm32g4xx_hal_fdcan.h"
 
@@ -409,10 +410,9 @@ public:
         payload_size = rx_buffer[rx_buffer_tail].payload_size;
 
         if (payload_size > 0) {
-            // Copy data out to the caller. memcpy is appropriate here.
-            for(uint8_t i = 0; i < payload_size; ++i) {
-                payload[i] = rx_buffer[rx_buffer_tail].data[i];
-            }
+            // OPTIMIZATION (P2.4): the aligned AoS source lets memcpy expand
+            // into word copies instead of a byte-wise loop.
+            std::memcpy(payload, rx_buffer[rx_buffer_tail].data, payload_size);
         }
 
         // CRITICAL FIX: Ensure RAM reads are complete before advancing the tail

@@ -1,6 +1,4 @@
-#ifndef GENERIC_SETUP_H
-#define GENERIC_SETUP_H
-
+#pragma once
 /**
  * @file setup.h
  * @brief Generic lifecycle-callback container with zero-overhead dispatch.
@@ -85,5 +83,3 @@ public:
         return CallbackProxy(*this);
     }
 };
-
-#endif // GENERIC_SETUP_H

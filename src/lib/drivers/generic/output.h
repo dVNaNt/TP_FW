@@ -1,6 +1,4 @@
-#ifndef OUTPUT_WRAPPER_HPP
-#define OUTPUT_WRAPPER_HPP
-
+#pragma once
 /**
  * @file output.h
  * @brief Minimal callback wrapper for a binary output (LED, pin, relay...).
@@ -45,5 +43,3 @@ public:
         if (setCb_) setCb_(state);
     }
 };
-
-#endif // OUTPUT_WRAPPER_HPP

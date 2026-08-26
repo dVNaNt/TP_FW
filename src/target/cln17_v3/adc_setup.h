@@ -12,7 +12,10 @@
 extern void ADC_READY_Callback(); // Forward declaration for the FOC execution callback
 
 // OPTIMIZATION: 4-byte memory alignment to prevent Cortex-M4 cache and bus fetch delays
-alignas(4) inline volatile uint32_t dma_buffer_adc12[2] = {0}; // Dual ADC DMA buffer holding both ranks
+// Three words: one per rank pair of the dual regular simultaneous sequence.
+// Word 3 lower half = ADC1 ch16 (internal temperature sensor), upper half =
+// ADC2 dummy rank kept only to equalize the master/slave sequence lengths.
+alignas(4) inline volatile uint32_t dma_buffer_adc12[3] = {0}; // Triple-rank dual ADC DMA buffer
 
 inline DMA_HandleTypeDef hdma_adc1; // Global HAL handle for DMA structure
 
@@ -46,7 +49,7 @@ inline void MX_DMA_ADC1_Init(void) { // Initialize the DMA mechanism
     HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn); // Enable DMA Channel 5 interrupt in the NVIC
 
     // START DMA: Reading continuously from the COMMON Data Register (CDR)
-    HAL_DMA_Start(&hdma_adc1, (uint32_t)&ADC12_COMMON->CDR, (uint32_t)dma_buffer_adc12, 2); // Map CDR to array
+    HAL_DMA_Start(&hdma_adc1, (uint32_t)&ADC12_COMMON->CDR, (uint32_t)dma_buffer_adc12, 3); // Map CDR to array (one word per rank pair)
     
     __HAL_DMA_ENABLE_IT(&hdma_adc1, DMA_IT_TC | DMA_IT_TE); // Enable Transfer Complete and Transfer Error interrupts
 } // End of MX_DMA_ADC1_Init function
@@ -85,25 +88,53 @@ inline void MX_ADCs_Init() { // Unified bare-metal initialization function for b
 
     // 4. ADC12 Common Register Configuration (Dual Mode Setup)
     // CKMODE = 3 (Synchronous PCLK/4), MDMA = 2 (12/10-bit mode for DMA), DUAL = 6 (Regular Simultaneous Mode)
-    ADC12_COMMON->CCR = (3U << ADC_CCR_CKMODE_Pos) | (2U << ADC_CCR_MDMA_Pos) | (6U << ADC_CCR_DUAL_Pos); // Write common setup
+    // VSENSESEL = 1: enable the internal temperature sensor conversion path
+    // (on STM32G431 the sensor is wired to ADC1 channel 16 only).
+    ADC12_COMMON->CCR = (3U << ADC_CCR_CKMODE_Pos) | (2U << ADC_CCR_MDMA_Pos) | (6U << ADC_CCR_DUAL_Pos) |
+                        ADC_CCR_VSENSESEL; // Write common setup
 
     // 5. ADC1 (Master) Configuration
     // ALIGN = 1 (Left-aligned), DMACFG = 1 (Circular DMA), DMAEN = 1 (Enable DMA requests)
     ADC1->CFGR = ADC_CFGR_ALIGN | ADC_CFGR_DMACFG | ADC_CFGR_DMAEN; // Write CFGR register
     
-    // Sequencer SQR1: L = 1 (Length = 2 ranks). SQ1 = 4 (PA3/I_A), SQ2 = 15 (PB0/I_C)
-    ADC1->SQR1 = (1U << ADC_SQR1_L_Pos) | (4U << ADC_SQR1_SQ1_Pos) | (15U << ADC_SQR1_SQ2_Pos); // Write Rank sequence
+    // Sequencer SQR1: L = 2 (Length = 3 ranks). SQ1 = 4 (PA3/I_A),
+    // SQ2 = 15 (PB0/I_C), SQ3 = 16 (internal temperature sensor).
+    // The thermal sample now travels through the SAME regular group/DMA
+    // stream as the current channels: fetching it costs zero CPU cycles
+    // in the ISR (plain DMA-buffer read instead of an injected-conversion
+    // state machine).
+    ADC1->SQR1 = (2U << ADC_SQR1_L_Pos) | (4U << ADC_SQR1_SQ1_Pos) | (15U << ADC_SQR1_SQ2_Pos) |
+                 (16U << ADC_SQR1_SQ3_Pos); // Write Rank sequence
     
     // Sampling Time: SMP4 = 1 (6.5 cycles), SMP15 = 1 (6.5 cycles)
     ADC1->SMPR1 = (1U << ADC_SMPR1_SMP4_Pos); // Apply ultra-fast sampling time to Channel 4
     ADC1->SMPR2 = (1U << ADC_SMPR2_SMP15_Pos); // Apply ultra-fast sampling time to Channel 15
 
+    // Internal temperature sensor sampling time (rank-3 channel only, does
+    // not affect the current-sense channels): SMP16 = 6 -> 247.5 cycles
+    // ~= 5.8 us at fADC = 42.5 MHz. This MEETS the datasheet t_S_temp >= 5 us
+    // requirement and MUST NOT be shortened: the internal sensor has a high
+    // output impedance, and an undersampled S/H capacitor keeps residual
+    // charge from the preceding current-sense rank -- producing a large
+    // CONSTANT positive temperature offset plus readings that track phase
+    // currents (observed as a stuck ~46 degC drifting with motor rotation).
+    // The software EMA filter cannot remove such a DC bias, only noise.
+    // Cost: every regular sequence stretches by ~6 us inside the 50 us
+    // control period (accepted trade-off for valid thermal data).
+    ADC1->SMPR2 |= (6U << ADC_SMPR2_SMP16_Pos);
+
     // 6. ADC2 (Slave) Configuration
     // ALIGN = 1 (Left-aligned). NOTE: Slave does NOT generate DMA requests, so DMAEN is left as 0
     ADC2->CFGR = ADC_CFGR_ALIGN; // Write slave CFGR register
     
-    // Sequencer SQR1: L = 1 (Length = 2 ranks). SQ1 = 2 (PA1/I_B), SQ2 = 1 (PA0/VSENS)
-    ADC2->SQR1 = (1U << ADC_SQR1_L_Pos) | (2U << ADC_SQR1_SQ1_Pos) | (1U << ADC_SQR1_SQ2_Pos); // Write Rank sequence
+    // Sequencer SQR1: L = 2 (Length = 3 ranks). SQ1 = 2 (PA1/I_B),
+    // SQ2 = 1 (PA0/VSENS), SQ3 = 2 (dummy repeat of I_B).
+    // In regular simultaneous mode BOTH sequences must have equal length:
+    // this dummy third rank keeps the slave aligned with the master while
+    // the master samples the slow temperature channel. The dummy result in
+    // the upper half of DMA word 3 is simply ignored by ADC_get_values().
+    ADC2->SQR1 = (2U << ADC_SQR1_L_Pos) | (2U << ADC_SQR1_SQ1_Pos) | (1U << ADC_SQR1_SQ2_Pos) |
+                 (2U << ADC_SQR1_SQ3_Pos); // Write Rank sequence
     
     // Sampling Time: SMP1 = 1 (6.5 cycles), SMP2 = 1 (6.5 cycles)
     ADC2->SMPR1 = (1U << ADC_SMPR1_SMP1_Pos) | (1U << ADC_SMPR1_SMP2_Pos); // Apply ultra-fast sampling to Ch1 and Ch2
@@ -155,12 +186,12 @@ __attribute__((always_inline)) inline void ADC_get_values(uint16_t& current_a, /
                            uint16_t& current_b, // Phase B reference
                            uint16_t& current_c, // Phase C reference
                            uint16_t& voltage_supply, // Bus voltage reference
-                           uint16_t& voltage_vref, // VREF reference
                            uint16_t& voltage_temp) { // MCU temperature reference
                            
     // OPTIMIZATION: Fetch the volatile memory exactly once to prevent cache stalls and race conditions
     uint32_t reg0 = dma_buffer_adc12[0]; // Fetch Rank 1 dual data
     uint32_t reg1 = dma_buffer_adc12[1]; // Fetch Rank 2 dual data
+    uint32_t reg2 = dma_buffer_adc12[2]; // Fetch Rank 3 dual data (temp sensor | dummy)
     
     current_a      = (uint16_t)(reg0 & 0xFFFF);        // Extract lower 16 bits: ADC1 Rank 1 (I_A)
     current_b      = (uint16_t)((reg0 >> 16) & 0xFFFF);// Extract upper 16 bits: ADC2 Rank 1 (I_B)
@@ -168,8 +199,34 @@ __attribute__((always_inline)) inline void ADC_get_values(uint16_t& current_a, /
     current_c      = (uint16_t)(reg1 & 0xFFFF);        // Extract lower 16 bits: ADC1 Rank 2 (I_C)
     voltage_supply = (uint16_t)((reg1 >> 16) & 0xFFFF);// Extract upper 16 bits: ADC2 Rank 2 (VSENS)
     
-    voltage_vref = 0; // VREF currently unconfigured, set to 0 to prevent garbage values
-    voltage_temp = 0; // Temp currently unconfigured, set to 0 to prevent garbage values
+    voltage_temp = (uint16_t)(reg2 & 0xFFFF); // Internal temperature sensor: ADC1 rank 3, straight from the DMA buffer (zero CPU cost)
 } // End of ADC_get_values function
+
+// ============================================================================
+// INTERNAL TEMPERATURE SENSOR (regular rank 3, fetched by the shared DMA)
+// ============================================================================
+
+constexpr uint32_t ADC_VDDA_MV = 3300;  // Board analog reference voltage [mV] (TS_CALx are 3.0 V calibrated, macro compensates)
+
+/**
+ * @brief Convert a raw temperature-sensor word into degrees Celsius.
+ *
+ * Recalculation callback installed into Temperature by the board layer.
+ * Uses the STM32G4 factory calibration values TS_CAL1 (30 degC) /
+ * TS_CAL2 (110 degC) from system memory via the LL helper macro. All-integer
+ * math internally (no float division), so it is safe to run from tick() in
+ * interrupt context at the ~1 Hz sample rate.
+ *
+ * @param raw_adc Filtered raw value in left-aligned 16-bit format
+ *                (as produced by the Temperature filter pipeline)
+ * @return Temperature in degrees Celsius
+ */
+inline float ADC_Temperature_To_Celsius(uint32_t raw_adc) {
+    int32_t celsius_int =
+        __LL_ADC_CALC_TEMPERATURE(ADC_VDDA_MV,                     // Actual Vref+ [mV]
+                                  (uint32_t)(raw_adc >> 4),        // Left-aligned word -> 12-bit right-aligned code
+                                  LL_ADC_RESOLUTION_12B);          // Native resolution of the calibration data
+    return (float)celsius_int;
+} // End of ADC_Temperature_To_Celsius function
 
 #endif // ADC_DMA_SETUP_CLN17V3_H // Final close of the header include guard
