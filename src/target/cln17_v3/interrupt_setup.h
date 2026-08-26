@@ -56,7 +56,7 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
     if ((uint32_t)(current_values[2] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase C
         current_values[2] = UINT16_MAX;  // Mark Phase C reading as invalid if it falls outside the valid range
     
-    phy->current.set_currents(current_values);
+    phy->current.set_currents_irq(current_values);
     phy->supply.set_voltage_irq(voltage_supply);
     // Feed the thermal protection pipeline (raw 12-bit left-aligned). A zero
     // word means "no injected conversion completed yet" (the sensor reads

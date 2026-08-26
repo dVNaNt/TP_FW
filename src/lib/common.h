@@ -68,6 +68,18 @@ enum Channel : uint8_t {
     CH3 = 2   ///< Channel 3 (array index 2)
 };
 
+// ============================================================================
+// Shared PWM-driver protection vocabulary
+// ============================================================================
+
+/// Callback that programs a hardware comparator (DAC) threshold.
+/// @param threshold 16-bit threshold value for the analog comparator
+typedef void (*CompThresholdCallback)(uint16_t);
+
+/// Default fault recovery timer length in control-loop ticks.
+/// At the nominal 20 kHz control rate this equals 500 ms.
+static constexpr int32_t kDefaultRecoveryCycles = 10000;
+
 /**
  * @brief Branchless integer sign extraction.
  *

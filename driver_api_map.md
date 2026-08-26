@@ -37,31 +37,20 @@ classDiagram
         +Power power
         +tick() void
         +tick_icr() void
-        +set_voltage_ab_volts(Vec2D_f32) void
         +set_fault() FaultProxy
         +get_fault() uint8_t
         +is_oc_fault() bool
         +FAULT_* constexpr uint8_t
-        +get_current_ab_amps() Vec2D_f32
-        +get_supply_volts() float
-        +get_temperature_c() float
-        +get_raw_power_w() float
-        +get_power_w() float
-        +get_input_current_a() float
-        +get_power_usage() float
-        +get_power_coeff() float
         +get_enable() OutputWrapper&
         +get_error() InputWrapper&
     }
 
     class CurrentSense {
         +overcurrent : OvercurrentProxy
-        +current_ab_amps : Vec2D_f32
-        +set_currents(uint16_t[3]) void «ISR»
+        +set_currents_irq(uint16_t[3]) void «ISR»
         +calibrate() void
         +is_calibrated() bool
         +is_changed() bool
-        +norm() const int16_t*
         +on_calibration_start(cb) void
         +on_calibration_complete(cb) void
     }
@@ -80,8 +69,6 @@ classDiagram
         +is_changed() bool
         +get_voltage() float
         +get_max_voltage() float
-        +volts2norm(V) int16_t
-        +volts2duty(V) int16_t
         +set_callback().ov_lim_cb / uv_lim_cb
         +set_limit_volts().ov_lim_volts / uv_lim_volts
     }
@@ -96,7 +83,6 @@ classDiagram
         +overpower : OverpowerProxy
         +set_voltage_command(Vec2D_f32) void
         +set_filter_alpha(uint8_t) void
-        +set_limit().op_lim_watts(W).op_lim_amps(A)
         +get_raw_power_w() float
         +get_power_w() float
         +get_input_current_a() float
@@ -104,6 +90,7 @@ classDiagram
         +get_power_coeff() float
     }
     class OverpowerProxy {
+        +set_limit().op_lim_watts(W).op_lim_amps(A)
         +set_timeout_cycles(cycles) void
         +is_active() bool
     }
@@ -112,11 +99,16 @@ classDiagram
         -overheat : TempProtectionProxy «internal»
         +set_temperature_irq(uint32_t) void «ISR»
         +get_temperature_c() float
-        +set_temperature_callback(cb) void
+        +set_callback().do_conversion_cb(cb)
         +set_limit_celsius().ot_lim_celsius(C).ot_hyst_celsius(C)
     }
 
     class MotorControl {
+        <<phase-domain I/O hub>>
+        +attach(PwmWrapper&, Power&, SupplyVoltage&) void
+        +set_voltage_ab_volts(Vec2D_f32) void
+        +get_current_ab_amps() Vec2D_f32
+        -current_ab_amps : Vec2D_f32 «internal»
         +set_motor_type(MotorType) void
         +get_motor_type() MotorType
         +set_phase_pattern(PhasePattern) void
@@ -152,8 +144,9 @@ classDiagram
 | 3   | `FAULT_EXTERNAL`      | hardware fault pin (`error_`)| HiZ        | None (pin level)                  |
 | 4   | `FAULT_UNDERVOLTAGE`  | `supply` software check      | HiZ        | `VoltageProtectionProxy` timer    |
 | 5   | `FAULT_OVERPOWER`     | `power` dual-limit check     | HiZ        | `OverpowerProxy` timer            |
+| 6   | `FAULT_PHASE`         | `motor_ctrl_` voltage/current path error | HiZ | None (follows error state)  |
 
-Priority (high -> low): EXT(6) > OV(5) > UV(4) > OC(3) > OP(2) > OT(1).
+Priority (high -> low): EXT(7) > OV(6) > UV(5) > OC(4) > PHASE(3) > OP(2) > OT(1).
 Callbacks chain via `driver.set_fault().set_callback().oc_cb(...)...restore_cb(...)`.
 All `FAULT_*` bit constants are public and may be used to decode `get_fault()`.
 
@@ -161,7 +154,7 @@ All `FAULT_*` bit constants are public and may be used to decode `get_fault()`.
 
 ```cpp
 // --- ISR inputs ---
-phy->current.set_currents(raw_currents);        // ADC ISR
+phy->current.set_currents_irq(raw_currents);    // ADC ISR
 TUNE_HEART.driver_phy.supply.set_voltage_irq(v_raw);
 TUNE_HEART.driver_phy.temperature.set_temperature_irq(t_raw);
 
@@ -169,9 +162,10 @@ TUNE_HEART.driver_phy.temperature.set_temperature_irq(t_raw);
 driver.current.overcurrent.set_limit_amps().oc_ia(4.0f).oc_ib(4.0f).oc_ic(6.2f);
 driver.supply.set_limit_volts().uv_lim_volts(16.0f).ov_lim_volts(48.0f);
 driver.temperature.set_limit_celsius().ot_lim_celsius(85.0f).ot_hyst_celsius(10.0f);
-driver.power.set_limit().op_lim_watts(10.0f).op_lim_amps(2.0f);
+driver.power.overpower.set_limit().op_lim_watts(10.0f).op_lim_amps(2.0f);
 driver.pwm.set_period(PWM_TIMER_PERIOD);
 driver.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
+driver.temperature.set_callback().do_conversion_cb(ADC_Temperature_To_Celsius);
 driver.set_fault().set_callback()
     .oc_cb(PWM_Set_All_HiZ).ov_cb(PWM_Set_All_Low)
     .uv_cb(PWM_Set_All_HiZ).ot_cb(PWM_Set_All_HiZ)
@@ -180,7 +174,7 @@ driver.set_fault().set_callback()
 // --- control loop ---
 driver.tick();                                  // sensors + protections
 driver.tick_icr();                              // fault manager + PWM apply
-driver.set_voltage_ab_volts(v_alpha_beta);      // FOC output
+driver.motor_ctrl_.set_voltage_ab_volts(v_alpha_beta);  // FOC output
 ```
 
 ## Internal (friend-only) surface — NOT part of the external API
@@ -194,7 +188,7 @@ listed here so the split is explicit:
 - `Temperature::tick()`, `overheat.activate()/deactivate()` hysteresis latch.
 - `Power::tick(current_ab, supply_volts)` — raw/filtered power, OP criteria,
   usage/power_coeff computation; `set_voltage_command()` is fed automatically
-  by `DriverPWM::set_voltage_ab_volts()`.
+  by `MotorControl::set_voltage_ab_volts()`.
 - `MotorControl::tick_voltage()` / `tick_current()` — inverse Clarke + SVPWM
   centering and Clarke recombination with duty masking and phase remapping.
 - `PwmWrapper` internals: `set_phases()`, `apply_current_sample_point()`,

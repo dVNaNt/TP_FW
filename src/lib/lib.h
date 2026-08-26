@@ -298,7 +298,7 @@ public:
                         // Current offsets unknown yet: short all phases (INFINITY
                         // sentinel handled by the PWM backend) and bail out.
                         pwm_voltage_ab.a = pwm_voltage_ab.b = INFINITY;
-                        driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
+                        driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
                         is_running.store(false, std::memory_order_release);
                         return;
                     } else if (driver.motor.get_status() == MotorStatus::Success) {
@@ -315,7 +315,7 @@ public:
                     // Any other transient state: apply a small negative voltage
                     // (active brake / idle) and skip FOC this cycle.
                     pwm_voltage_ab.a = pwm_voltage_ab.b = NAN;
-                    driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
+                    driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
                     is_running.store(false, std::memory_order_release);
                     return;
                 }
@@ -324,7 +324,7 @@ public:
             // Final FOC step: convert (electrical angle, q-current target) into
             // an alpha-beta voltage vector and hand it to the physical layer.
             pwm_voltage_ab = driver.tick_control_foc((int16_t)angle_el_, targt);
-            driver_phy.set_voltage_ab_volts(pwm_voltage_ab);
+            driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
         }
         is_running.store(false, std::memory_order_release);
     }

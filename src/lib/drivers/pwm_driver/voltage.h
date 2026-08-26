@@ -26,7 +26,7 @@
  * - Optional hardware comparator DAC callbacks for each threshold
  *
  * @note trigger() and reset() on VoltageProtectionProxy are private —
- *       only SupplyVoltage (tick) and DriverPWM (FaultProxy) may invoke them.
+ *       only SupplyVoltage (tick) and DriverPWM (FaultTriggerProxy) may invoke them.
  *
  * ## Fluent Configuration API
  *
@@ -53,7 +53,6 @@
 #include <atomic>
 #include "../../common.h"
 #include "../../math/filters/ema.h"
-#include "types.h"
 
 struct DriverPWM;
 
@@ -67,6 +66,7 @@ struct DriverPWM;
  */
 struct SupplyVoltage {
     friend struct DriverPWM;
+    friend struct MotorControl;  ///< Phase stage consumes the V->duty conversions
     friend struct VoltageProtectionProxy;
 
 private:
@@ -149,6 +149,7 @@ private:
         return is_updated;
     }
 
+private:
     /**
      * @brief Convert volts to normalized Q15 value.
      * @param volts Voltage in volts
@@ -161,12 +162,6 @@ private:
         int32_t norm_calc = (mv << 10) / scale_;
         return clamp_i32(norm_calc, INT16_MAX);
     }
-
-    /**
-     * @brief Get the latest filtered voltage in volts.
-     * @return Voltage in volts
-     */
-    inline float get_voltage() const { return voltage_v_; }
 
     /**
      * @brief Convert target volts to duty cycle (Q15).
@@ -189,6 +184,12 @@ private:
     }
 
 public:
+    /**
+     * @brief Get the latest filtered voltage in volts.
+     * @return Voltage in volts
+     */
+    inline float get_voltage() const { return voltage_v_; }
+
     /**
      * @brief Get the maximum representable voltage for Q15 scaling.
      * @return Maximum voltage in volts
@@ -253,6 +254,7 @@ public:
     struct VoltageProtectionProxy {
         friend struct SupplyVoltage;
         friend struct DriverPWM;
+        friend struct FaultTriggerProxy;  ///< Fluent fault API (driver_pwm_detail.h)
 
     private:
         SupplyVoltage& self;                ///< Reference to parent SupplyVoltage
@@ -304,7 +306,7 @@ public:
          * recovery timer. Safe to call from interrupt context.
          *
          * @note Private. Invoked by SupplyVoltage::tick() (software check)
-         *       and DriverPWM::FaultProxy (external trigger).
+         *       and DriverPWM::set_fault() proxy (external trigger).
          */
         inline void trigger() {
             error_cycles_.store(error_timeout_cycles_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -314,7 +316,7 @@ public:
          * @brief Immediately reset the error (clear timer to 0).
          *
          * @note Private. Does NOT call any callbacks — only clears internal state.
-         *       Invoked by DriverPWM::FaultProxy when clearing a fault.
+         *       Invoked by DriverPWM::set_fault() proxy when clearing a fault.
          */
         inline void reset() { error_cycles_.store(0, std::memory_order_relaxed); }
 

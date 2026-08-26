@@ -585,3 +585,99 @@ FLASH: 61924 bytes (47.24% of 131072 bytes): +32 bytes
 RAM: 7876 bytes (24.04% of 32768 bytes): -24 bytes
 
 
+## 2026-08-26 - Phase-domain I/O moved to MotorControl; transit getters removed
+**Changes:**
+- Moved voltage command path into MotorControl::set_voltage_ab_volts(voltages, supply) returning duties
+- measured currents now published to MotorControl::current_ab_amps by CurrentSense
+- Removed 8 pass-through getters from DriverPWM (current/supply/temperature/power telemetry) - callers access submodules directly
+- set_voltage_ab_volts in DriverPWM reduced to 2-line orchestration
+- made SupplyVoltage conversion block public
+
+**Reasoning:**
+- Bare-minimum API per level
+- phase-domain quantities owned by the phase stage
+- no code bloat from transit accessors
+
+**Notes:**
+- No algorithm changes
+- Flash -40 bytes
+
+FLASH: 61884 bytes (47.21% of 131072 bytes): -40 bytes
+RAM: 7876 bytes (24.04% of 32768 bytes): +0 bytes
+
+
+## 2026-08-26 - API systematization per user feedback
+**Changes:**
+- Moved OP limit setters into OverpowerProxy (power.overpower.set_limit())
+- volts2norm/volts2duty back to private (MotorControl via friendship)
+- norm() private in CurrentSense
+- renamed set_currents to set_currents_irq
+- temperature conversion callback now set_callback().do_conversion_cb()
+- new FAULT_PHASE fault (bit 6) raised from MotorControl voltage/current path errors, priority chain renumbered
+
+**Reasoning:**
+- Bare-minimum logical API: setters live where the state lives, ISR inputs uniformly named, phase-stage errors surface in the unified driver fault system
+
+**Notes:**
+- No algorithm changes
+- Flash +44 bytes (fault wiring)
+
+FLASH: 61928 bytes (47.25% of 131072 bytes): +44 bytes
+RAM: 7876 bytes (24.04% of 32768 bytes): +0 bytes
+
+
+## 2026-08-26 - set_voltage_ab_volts / get_current_ab_amps moved into MotorControl
+**Changes:**
+- DriverPWM::set_voltage_ab_volts removed
+- MotorControl now owns the full voltage path via attach(pwm,power,supply) + set_voltage_ab_volts(voltages) feeding power estimator and PWM backend
+- current_ab_amps made private with get_current_ab_amps() accessor
+- callers updated (lib.h x3, tunepulse.h x2, current_control.h)
+
+**Reasoning:**
+- Phase-stage entry/exit points belong to the phase-domain hub
+- single-level API without transit methods
+
+**Notes:**
+- No algorithm changes
+- Flash +124 bytes (attach wiring), RAM +16 bytes (collaborator pointers)
+
+FLASH: 62052 bytes (47.34% of 131072 bytes): +124 bytes
+RAM: 7892 bytes (24.08% of 32768 bytes): +16 bytes
+
+
+## 2026-08-26 - Fix DriverPWM proxy scope compile error
+**Changes:**
+- Moved FaultCallbackProxy/FaultTriggerProxy out of DriverPWM to namespace scope
+- removed misplaced set_fault() definition inside FaultTriggerProxy
+- added out-of-class inline DriverPWM::set_fault()
+- updated stale docs (driver_pwm_detail.h refs, wrong fluent method names)
+
+**Reasoning:**
+- Nested proxy definitions conflicted with namespace-scope forward declarations and friend declarations in sub-module headers (-fpermissive name-meaning error)
+- DriverPWM::set_fault() had no definition which would cause a link error
+
+**Notes:**
+- No API changes: fluent syntax driver.set_fault().overcurrent(true)/set_callback().oc_cb(...) unchanged
+
+FLASH: 62056 bytes (47.34% of 131072 bytes): +4 bytes
+RAM: 7884 bytes (24.06% of 32768 bytes): -8 bytes
+
+
+## 2026-08-26 - Fix DriverPWM proxy scope compile error
+**Changes:**
+- Moved FaultCallbackProxy/FaultTriggerProxy out of DriverPWM to namespace scope
+- removed misplaced set_fault() definition inside FaultTriggerProxy
+- added out-of-class inline DriverPWM::set_fault()
+- updated stale docs
+
+**Reasoning:**
+- Nested proxy definitions conflicted with namespace-scope forward declarations and friend declarations in sub-module headers
+- DriverPWM::set_fault() had no definition which would cause a link error
+
+**Notes:**
+- No API changes: fluent syntax driver.set_fault().overcurrent(true)/set_callback().oc_cb(...) unchanged
+
+FLASH: 62056 bytes (47.34% of 131072 bytes): +0 bytes
+RAM: 7884 bytes (24.06% of 32768 bytes): +0 bytes
+
+

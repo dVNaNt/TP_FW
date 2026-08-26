@@ -245,8 +245,8 @@ public:
 
         // #REPLACE with just simple storing value + value threshold check
 
-        drv.motor_ctrl_.set_motor_type(MotorType_STEP);
-        drv.motor_ctrl_.set_phase_pattern(PhasePattern_ABC);
+        drv.motor_ctrl.set_motor_type(MotorType_STEP);
+        drv.motor_ctrl.set_phase_pattern(PhasePattern_ABC);
 
         angle_ref = CAL_ANGLE_45D;
         timeout_.set_timeout(WARMUP_TIMEOUT);
@@ -554,8 +554,8 @@ private:
                                       Motor& motor,
                                       DriverStatus& setup_status,
                                       int16_t& angle_ref) {
-        motor.set_motor_type(drv.motor_ctrl_.get_motor_type());
-        motor.set_phase_pattern(drv.motor_ctrl_.get_phase_pattern());
+        motor.set_motor_type(drv.motor_ctrl.get_motor_type());
+        motor.set_phase_pattern(drv.motor_ctrl.get_phase_pattern());
         setup_status.motor_type_not_verified = 0;
         setup_status.voltage_unsafe = supply_voltage_volts <= 0.0f;
 
@@ -713,13 +713,13 @@ private:
                         status_tracker = MotorStatus::SlowRotation;
 
                         if ((ia_amps * 0.25f) >= ib_amps) {
-                            drv.motor_ctrl_.set_phase_pattern(PhasePattern_CBA);
+                            drv.motor_ctrl.set_phase_pattern(PhasePattern_CBA);
 
                             // Set target angle to -16384 (corresponds to CBA connection)
                             angle_ref = -CAL_ANGLE_90D;
                             return;
                         } else if ((ib_amps * 0.25f) >= ia_amps) {
-                            drv.motor_ctrl_.set_phase_pattern(PhasePattern_ACB);
+                            drv.motor_ctrl.set_phase_pattern(PhasePattern_ACB);
 
                             // Set target angle to -32768 (corresponds to ACB connection)
                             angle_ref = CAL_ANGLE_180D;
@@ -741,7 +741,7 @@ private:
                         motor.set_total_resistance(average_resistance_ohms);
 
                         // Set motor type in the selector as BLDC
-                        drv.motor_ctrl_.set_motor_type(MotorType_BLDC);
+                        drv.motor_ctrl.set_motor_type(MotorType_BLDC);
 
                         trigger_resistance_correction(status_tracker, motor, ia_amps, ib_amps);
                         return;
@@ -772,7 +772,7 @@ private:
                 }
             }
 
-            drv.motor_ctrl_.set_motor_type(MotorType_Invalid);
+            drv.motor_ctrl.set_motor_type(MotorType_Invalid);
             set_error(status_tracker, motor, setup_status);
         }
     }

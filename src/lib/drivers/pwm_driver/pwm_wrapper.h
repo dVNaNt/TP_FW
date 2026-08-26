@@ -139,7 +139,8 @@ public:
 
 private:
     friend struct DriverPWM;
-    
+    friend struct MotorControl;  ///< Phase stage pushes computed duties here
+
     PwmPhasesCallback     set_phases_cb_;            ///< Hardware callback: write CCR registers
     SamplePointCallback sample_point_cb_; ///< Hardware callback: configure ADC sampling point
     uint32_t              period_;                   ///< Timer ARR value in ticks

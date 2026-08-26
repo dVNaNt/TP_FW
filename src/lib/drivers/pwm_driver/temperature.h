@@ -84,7 +84,7 @@ typedef float (*Temperature_Convert_Callback)(uint32_t raw_adc);
  *
  * Conversion to degC:
  * - default: linear full-scale scaling by max_temp_celsius;
- * - when a conversion callback is installed via set_temperature_callback(),
+ * - when a conversion callback is installed via set_callback().do_conversion_cb(),
  *   the callback maps the filtered raw value to degC (e.g. STM32 TS_CAL1/
  *   TS_CAL2 factory calibration). Limits are inverted into the raw domain
  *   numerically at configuration time.
@@ -110,15 +110,15 @@ private:
     int32_t ema_acc_ = 0;     ///< EMA accumulator: pending error incl. carried u4 remainder
     uint16_t temp_raw_ = 0;   ///< Latest filtered raw ADC word (u16, left-aligned)
     bool primed_ = false;     ///< false until the first sample seeds the filter
-    const float max_temp_c_;    ///< degC corresponding to ADC full scale (linear mode)
+    const float max_temp_c_;  ///< degC corresponding to ADC full scale (linear mode)
 
-    Temperature_Convert_Callback convert_cb_ = nullptr;  ///< Optional raw -> degC callback
+    Temperature_Convert_Callback do_conversion_cb_ = nullptr;  ///< Optional raw -> degC callback
 
     float ot_limit_c_ = INFINITY;  ///< Configured OT limit [degC] (INFINITY = disabled)
     float ot_hyst_c_ = 0.0f;       ///< Release hysteresis band [degC]
 
-    uint16_t ot_trip_raw_ = UINT16_MAX;    ///< Activation threshold, raw domain (UINT16_MAX = disabled)
-    uint16_t ot_release_raw_ = 0;          ///< Hysteresis release threshold, raw domain
+    uint16_t ot_trip_raw_ = UINT16_MAX;  ///< Activation threshold, raw domain (UINT16_MAX = disabled)
+    uint16_t ot_release_raw_ = 0;        ///< Hysteresis release threshold, raw domain
 
     /**
      * @brief Find the smallest raw code whose converted temperature >= target.
@@ -132,32 +132,35 @@ private:
      * @return Raw left-aligned 16-bit threshold
      */
     uint16_t celsius2raw(float target) const {
-        if (convert_cb_ != nullptr) {
+        if (do_conversion_cb_ != nullptr) {
             // Binary search over the 16-bit raw domain using the real curve
             uint32_t lo = 0, hi = 0xFFFF;
             while (lo < hi) {
-                uint32_t mid = (lo + hi) >> 1;                // Mid-point probe
-                if (convert_cb_(mid) < target) lo = mid + 1;  // Still cold -> go up
-                else hi = mid;                                // Hot enough -> keep mid
+                uint32_t mid = (lo + hi) >> 1;  // Mid-point probe
+                if (do_conversion_cb_(mid) < target)
+                    lo = mid + 1;  // Still cold -> go up
+                else
+                    hi = mid;  // Hot enough -> keep mid
             }
             return (uint16_t)lo;
         }
         // Linear full-scale fallback: raw = frac * 65535
-        if (max_temp_c_ <= 0.0f) return UINT16_MAX;
+        if (max_temp_c_ <= 0.0f)
+            return UINT16_MAX;
         int32_t raw = (int32_t)((target / max_temp_c_) * 65535.0f);
         return (uint16_t)((raw < 0) ? 0 : ((raw > 65535) ? 65535 : raw));
     }
 
     /// Recompute both raw thresholds after any limit/hysteresis change.
     void recompute_thresholds() {
-        if (ot_limit_c_ == INFINITY) {   // Protection disabled
-            ot_trip_raw_ = UINT16_MAX;   // Never trips
-            ot_release_raw_ = 0;         // Always releases
+        if (ot_limit_c_ == INFINITY) {  // Protection disabled
+            ot_trip_raw_ = UINT16_MAX;  // Never trips
+            ot_release_raw_ = 0;        // Always releases
             return;
         }
-        ot_trip_raw_ = celsius2raw(ot_limit_c_);          // Activation level
-        float release_c = ot_limit_c_ - ot_hyst_c_;       // Lower release level
-        uint16_t release_raw = celsius2raw(release_c);    // Inverted release level
+        ot_trip_raw_ = celsius2raw(ot_limit_c_);                                      // Activation level
+        float release_c = ot_limit_c_ - ot_hyst_c_;                                   // Lower release level
+        uint16_t release_raw = celsius2raw(release_c);                                // Inverted release level
         ot_release_raw_ = (release_raw > ot_trip_raw_) ? ot_trip_raw_ : release_raw;  // Sanity clamp
     }
 
@@ -199,8 +202,7 @@ public:
      * @brief Construct a Temperature instance.
      * @param max_temp_celsius Full-scale temperature in degC (linear mode).
      */
-    explicit Temperature(float max_temp_celsius = 150.0f)
-        : max_temp_c_(max_temp_celsius) {}
+    explicit Temperature(float max_temp_celsius = 150.0f) : max_temp_c_(max_temp_celsius) {}
 
     /**
      * @brief Main processing tick — called every cycle by DriverPWM::tick().
@@ -214,7 +216,8 @@ public:
     bool tick() {
         // Atomically read state AND set the read flag in one operation
         uint32_t state = temp_state_.fetch_or(FLAG_READ, std::memory_order_relaxed);
-        if (state & FLAG_READ) return false;  // No new sample since last tick
+        if (state & FLAG_READ)
+            return false;  // No new sample since last tick
 
         uint16_t raw_adc = (uint16_t)(state & MASK_DATA);  // Extract the fresh sample
 
@@ -234,9 +237,11 @@ public:
         // Hysteresis comparator in the raw domain (integer only):
         // trip at the limit, release only after dropping below limit-hysteresis.
         if (!overheat.is_active()) {
-            if (temp_raw_ >= ot_trip_raw_) overheat.activate();       // Crossed the trip level upward
+            if (temp_raw_ >= ot_trip_raw_)
+                overheat.activate();  // Crossed the trip level upward
         } else {
-            if (temp_raw_ <= ot_release_raw_) overheat.deactivate();  // Fell below the release level
+            if (temp_raw_ <= ot_release_raw_)
+                overheat.deactivate();  // Fell below the release level
         }
         return true;
     }
@@ -250,10 +255,10 @@ public:
      * @return Filtered temperature [degC]
      */
     inline float get_temperature_c() const {
-        if (convert_cb_ != nullptr) return convert_cb_(temp_raw_);  // Calibration-curve mode
+        if (do_conversion_cb_ != nullptr)
+            return do_conversion_cb_(temp_raw_);                        // Calibration-curve mode
         return ((float)temp_raw_) * (max_temp_c_ * (1.0f / 65535.0f));  // Linear full-scale mode
     }
-
 
     /**
      * @brief Atomically set raw ADC temperature and mark data as new.
@@ -263,21 +268,20 @@ public:
      *
      * @param raw_adc Raw 16-bit left-aligned ADC value
      */
-    inline void set_temperature_irq(uint32_t raw_adc) {
-        temp_state_.store(raw_adc & MASK_DATA, std::memory_order_relaxed);
-    }
+    inline void set_temperature_irq(uint32_t raw_adc) { temp_state_.store(raw_adc & MASK_DATA, std::memory_order_relaxed); }
 
     /**
-     * @brief Set the raw -> degC conversion callback (callback setter).
+     * @brief Install the raw ADC -> degC conversion callback.
      *
      * Passing nullptr restores the default linear full-scale scaling.
-     * Thresholds are re-inverted immediately so the call order relative to
-     * set_limit_celsius() does not matter.
+     * Thresholds are re-inverted immediately so the call order relative
+     * to set_limit_celsius() does not matter.
      *
      * @param cb Conversion function pointer (nullptr = linear scaling)
+     * @return Reference to this proxy for chaining
      */
-    inline void set_temperature_callback(Temperature_Convert_Callback cb) {
-        convert_cb_ = cb;
+    inline void set_do_conversion_cb(Temperature_Convert_Callback cb) {
+        do_conversion_cb_ = cb;
         recompute_thresholds();  // Re-derive raw limits against the new curve
     }
 

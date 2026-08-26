@@ -37,7 +37,7 @@
  * event and keep the fault active.
  *
  * @note trigger() and reset() are private — only CurrentSense (tick) and
- *       DriverPWM (FaultProxy) may invoke them, never user code.
+ *       DriverPWM (FaultTriggerProxy) may invoke them, never user code.
  * @warning The digital fallback is a safety net — it must NOT be disabled.
  *
  * @copyright Copyright 2026, creapunk
@@ -50,7 +50,6 @@
 #include "../../common.h"
 #include "../generic/setup.h"
 #include "motor_control.h"
-#include "types.h"
 
 // Forward declaration of DriverPWM to allow friend declaration
 struct DriverPWM;
@@ -92,13 +91,6 @@ private:
     Vec3D cal_n_ = {-1, -1, -1};                          ///< Per-channel calibration sample counter
     Vec3D scale_ = {0, 0, 0};                             ///< Precomputed per-channel ratio in Q15
     Vec3D out_norm_ = {INT16_MIN, INT16_MIN, INT16_MIN};  ///< Normalized current outputs in Q15
-
-    /**
-     * Latest alpha-beta phase currents converted to amperes.
-     * Updated by tick() after normalization; alpha ~ phase A, beta ~ phase B
-     * (phase C is reconstructed implicitly by the motor selector).
-     */
-    Vec2D_f32 current_ab_amps = {0, 0};
 
     // --- Input Buffer (SeqLock) ---
     alignas(4) uint16_t input_currents_[3] = {0, 0, 0};  ///< Input buffer holding the latest raw ADC readings
@@ -163,8 +155,9 @@ private:
             }
             out_norm_ = abc_norm;
             Vec2D currents_ab_norm = motor_ctrl_.tick_current(abc_norm);
-            current_ab_amps.a = norm2amps(currents_ab_norm.a);
-            current_ab_amps.b = norm2amps(currents_ab_norm.b);
+            // Publish converted currents in the phase-domain I/O hub (MotorControl)
+            motor_ctrl_.current_ab_amps.a = norm2amps(currents_ab_norm.a);
+            motor_ctrl_.current_ab_amps.b = norm2amps(currents_ab_norm.b);
         }
     }
 
@@ -258,6 +251,12 @@ private:
         return ((float)norm / 32768.0f) * max_amps;
     }
 
+    /**
+     * @brief Get pointer to the array of normalized current outputs (Q15).
+     * @return Pointer to 3-element int16_t array [CH1, CH2, CH3] in Q15 format
+     */
+    inline const int16_t* norm() const { return out_norm_.arr; }
+
 public:
     /**
      * @brief Set the number of samples used for zero-current calibration.
@@ -316,7 +315,7 @@ public:
     bool is_calibrated() const { return (cal_n_[0] > n_samples) && (cal_n_[1] > n_samples) && (cal_n_[2] > n_samples); }
 
     /**
-     * @brief Check if new current values were written via set_currents() since the last tick().
+     * @brief Check if new current values were written via set_currents_irq() since the last tick().
      * @return true if pending ADC data has not yet been processed
      */
     inline bool is_changed() const { return is_changed_.load(std::memory_order_relaxed); }
@@ -332,7 +331,7 @@ public:
      * @param currents Array of 3 raw ADC values [ch1, ch2, ch3]
      * @note Must NOT be called with a nullptr array.
      */
-    void set_currents(const uint16_t currents[3]) {
+    void set_currents_irq(const uint16_t currents[3]) {
         if (currents == nullptr)
             return;
 
@@ -354,12 +353,6 @@ public:
 
         is_changed_.store(true, std::memory_order_relaxed);
     }
-
-    /**
-     * @brief Get pointer to the array of normalized current outputs (Q15).
-     * @return Pointer to 3-element int16_t array [CH1, CH2, CH3] in Q15 format
-     */
-    inline const int16_t* norm() const { return out_norm_.arr; }
 
     // =======================================================================
     // OVERCURRENT PROXY SUB-CLASS
@@ -396,6 +389,7 @@ public:
         friend struct CurrentSense;
         friend struct CallbackProxy;
         friend struct DriverPWM;
+        friend struct FaultTriggerProxy;  ///< Fluent fault API (driver_pwm_detail.h)
 
     private:
         CurrentSense& self;  ///< Reference to parent CurrentSense (zero overhead)
@@ -472,7 +466,7 @@ public:
          * recovery timer. Safe to call from interrupt context.
          *
          * @note Private. Invoked by CurrentSense::tick() (digital fallback)
-         *       and DriverPWM::FaultProxy (external trigger).
+         *       and DriverPWM::set_fault() proxy (external trigger).
          */
         inline void trigger() {
             oc_error_cycles_.store(oc_error_timeout_cycles_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -482,7 +476,7 @@ public:
          * @brief Immediately clear the overcurrent error (reset timer to 0).
          *
          * @note Private. Does NOT call any callbacks — only clears internal state.
-         *       Invoked by DriverPWM::FaultProxy when clearing a fault.
+         *       Invoked by DriverPWM::set_fault() proxy when clearing a fault.
          */
         inline void reset() { oc_error_cycles_.store(0, std::memory_order_relaxed); }
 

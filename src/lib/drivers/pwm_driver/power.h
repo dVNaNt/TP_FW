@@ -10,7 +10,7 @@
  * - **Phase currents** — the measured alpha-beta currents (i_alpha ~ phase A,
  *   i_beta ~ phase B) delivered by CurrentSense every tick.
  * - **Commanded alpha-beta voltages** — the last voltage vector injected by
- *   the application through DriverPWM::set_voltage_ab_volts() (the setter).
+ *   the application through MotorControl::set_voltage_ab_volts() (the setter).
  *
  * ## Power Estimation
  *
@@ -43,7 +43,6 @@
 #include <atomic>
 #include <cmath>
 #include "../../common.h"
-#include "types.h"
 
 struct DriverPWM;
 
@@ -53,7 +52,7 @@ struct DriverPWM;
  *
  * Owns the power pipeline: commanded-voltage capture, instantaneous power
  * computation, EMA filtering, derived input-current estimation, the
- * overpower protection proxy (@c overpower), and the per-tick utilization
+ * overpower protection proxy (@c overpower), and the signed available-power
  * coefficient.
  */
 struct Power {
@@ -62,8 +61,6 @@ struct Power {
 private:
     // --- Configuration ---
     uint8_t filter_alpha_ = 64;          ///< EMA coefficient 0..255 (255 = no filtering)
-    float lim_power_w_ = 100.0f;         ///< Symmetric power limit magnitude [W] (trip at +/-)
-    float lim_current_a_ = 15.0f;        ///< Symmetric input-current limit magnitude [A] (trip at +/-)
 
     // --- State ---
     Vec2D_f32 cmd_v_ = {0.0f, 0.0f};     ///< Last commanded alpha-beta voltages [V] (setter-injected)
@@ -71,8 +68,7 @@ private:
     float filt_power_w_ = 0.0f;          ///< EMA-filtered power [W] (signed)
     float filt_current_a_ = 0.0f;        ///< Derived input current: filt_power / filt_voltage [A]
     float filt_voltage_v_ = 0.0f;        ///< Cached filtered supply voltage [V]
-    float usage_ = 0.0f;                 ///< Limit utilization coefficient [0..>1]
-    float power_coeff_ = 0.0f;           ///< Signed power share of P_lim [-1..+1] (+ motor / - regen)
+    float power_coeff_ = 0.0f;           ///< Signed share of the total available power [-1..+1] (+ motor / - regen)
 
 public:
     Power() = default;
@@ -95,10 +91,13 @@ public:
     struct OverpowerProxy {
         friend struct Power;
         friend struct DriverPWM;
+        friend struct FaultTriggerProxy;  ///< Fluent fault API (driver_pwm_detail.h)
 
     private:
         std::atomic<int32_t> op_error_cycles_{0};  ///< Active recovery timer (0 = no error)
         std::atomic<int32_t> op_error_timeout_cycles_{kDefaultRecoveryCycles};  ///< Timeout loaded on trigger() [ticks]
+        float lim_power_w_ = 100.0f;               ///< Symmetric power limit magnitude [W] (trip at +/-)
+        float lim_current_a_ = 15.0f;              ///< Symmetric input-current limit magnitude [A] (trip at +/-)
 
         /**
          * @brief Decrement the recovery timer atomically.
@@ -155,7 +154,54 @@ public:
         inline void set_timeout_cycles(int32_t cycles) {
             op_error_timeout_cycles_.store(cycles, std::memory_order_relaxed);
         }
-    } overpower;  ///< Public proxy instance for overpower configuration
+
+        /**
+         * @brief Chainable limit setter for the symmetric OP thresholds.
+         *
+         * Usage:
+         * @code
+         *   driver.power.overpower.set_limit().op_lim_watts(60.0f).op_lim_amps(8.0f);
+         * @endcode
+         *
+         * Limits are signed-symmetric: the applied magnitude is enforced both
+         * in the + (motoring) and - (regeneration) directions.
+         */
+        struct LimitProxy {
+            OverpowerProxy& proxy;  ///< Reference to the owning OverpowerProxy
+
+            /**
+             * @brief Construct a LimitProxy bound to an OverpowerProxy.
+             * @param p Reference to the owning OverpowerProxy
+             */
+            explicit LimitProxy(OverpowerProxy& p) : proxy(p) {}
+
+            /**
+             * @brief Set the symmetric max-input-power limit.
+             * @param limit_watts Power limit in watts (sign ignored; applied to +/-)
+             * @return Reference to this setter for chaining
+             */
+            inline LimitProxy& op_lim_watts(float limit_watts) {
+                proxy.lim_power_w_ = std::fabs(limit_watts);  // Store magnitude for symmetric enforcement
+                return *this;
+            }
+
+            /**
+             * @brief Set the symmetric max-input-current limit.
+             * @param limit_amps Current limit in amperes (sign ignored; applied to +/-)
+             * @return Reference to this setter for chaining
+             */
+            inline LimitProxy& op_lim_amps(float limit_amps) {
+                proxy.lim_current_a_ = std::fabs(limit_amps);  // Store magnitude for symmetric enforcement
+                return *this;
+            }
+        };
+
+        /**
+         * @brief Begin a limit configuration chain.
+         * @return LimitProxy bound to this OverpowerProxy
+         */
+        inline LimitProxy set_limit() { return LimitProxy(*this); }
+    } overpower;  ///< Public proxy instance: OP limits, recovery timer, status
 
     // =======================================================================
     // PROCESSING
@@ -164,7 +210,7 @@ public:
     /**
      * @brief Capture the commanded alpha-beta voltage vector (setter hook).
      *
-     * Called by DriverPWM::set_voltage_ab_volts() every time the
+     * Called by MotorControl::set_voltage_ab_volts() every time the
      * application commands a new voltage vector. Non-finite components
      * (NaN/±INF sentinels used for HiZ/LowAll safe states) are sanitized to
      * zero so they cannot poison the power estimate.
@@ -184,7 +230,7 @@ public:
      * @brief Main processing tick — called every cycle by DriverPWM::tick().
      *
      * Pipeline: raw power -> EMA filter -> derived input current ->
-     * utilization coefficient -> OP limit checks.
+     * available-power coefficient -> OP limit checks.
      *
      * ## Overpower (OP) Protection
      *
@@ -210,13 +256,17 @@ public:
      *
      * ## Available-Power Coefficient
      *
-     * Every tick the module also computes the signed power coefficient:
+     * Every tick the module also computes the signed power coefficient as
+     * the filtered power normalized by the TOTAL available input power:
      *
-     *     power_coeff = sat(p_filt / P_lim, -1, +1)
+     *     P_avail  = min(P_lim, I_lim * v_bus_filt)   [W]
+     *     coeff    = sat(p_filt / P_avail, -1, +1)
      *
-     * Positive = share of the power limit currently invested into the motor,
-     * negative = share being regenerated back. |power_coeff| == 1.0 means the
-     * limit has been reached.
+     * The availability bound mirrors the OP trip logic: at low bus voltage
+     * the current limit is what actually caps the stage, so the coefficient
+     * reaches ±1.0 exactly when a further increase would trip the fault.
+     * Positive = share of the available power currently invested into the
+     * motor, negative = share being regenerated back.
      *
      * @param current_ab Measured alpha-beta phase currents [A]
      *                   (alpha ~ phase A, beta ~ phase B)
@@ -240,23 +290,22 @@ public:
         const float abs_p = std::fabs(filt_power_w_);
         const float abs_i = std::fabs(filt_current_a_);
 
-        // Per-tick utilization: fraction of the binding limit [0..>1]
-        usage_ = abs_p * (1.0f / lim_power_w_);
-        const float usage_i = abs_i * (1.0f / lim_current_a_);
-        if (usage_i > usage_) {
-            usage_ = usage_i;
-        }
+        // Total available input power [W]: bounded by whichever constraint
+        // binds first — the power limit itself, or the current limit seen
+        // through the filtered bus voltage (I_lim * V_bus).
+        const float avail_via_i = overpower.lim_current_a_ * filt_voltage_v_;
+        const float avail_p_w = (avail_via_i < overpower.lim_power_w_) ? avail_via_i : overpower.lim_power_w_;
 
-        // Signed power coefficient: share of the max-input-power limit at the
-        // current moment (+ = motoring / power investment, - = regeneration),
-        // saturated to [-1..+1]. Magnitudes above 1.0 mean the OP fault zone.
-        const float coeff = filt_power_w_ * (1.0f / lim_power_w_);
+        // Signed share of the TOTAL available power (+ = motoring / power
+        // investment, - = regeneration), saturated to [-1..+1]. |coeff| == 1.0
+        // means the binding limit has been reached — the OP fault zone starts.
+        const float coeff = (avail_p_w > 1.0f) ? (filt_power_w_ / avail_p_w) : 0.0f;
         power_coeff_ = (coeff > 1.0f) ? 1.0f : ((coeff < -1.0f) ? -1.0f : coeff);
 
         // OP criteria: EITHER the power or the derived current exceeds its
         // symmetric limit -> restart the recovery timer (fault latches while
         // the timer runs, auto-clears when it expires within limits).
-        if (abs_p > lim_power_w_ || abs_i > lim_current_a_) {
+        if (abs_p > overpower.lim_power_w_ || abs_i > overpower.lim_current_a_) {
             overpower.trigger();
         }
     }
@@ -284,24 +333,22 @@ public:
     inline float get_input_current_a() const { return filt_current_a_; }
 
     /**
-     * @brief Per-tick limit utilization coefficient (percent of usage).
-     * @return max(|P|/P_lim, |I|/I_lim); < 1.0 = headroom, >= 1.0 = fault zone
-     */
-    inline float get_usage_norm() const { return usage_; }
-
-    /**
-     * @brief Signed power coefficient — share of the max input power at the
-     *        current moment.
+     * @brief Signed power coefficient — share of the TOTAL available input
+     *        power at the current moment.
      *
-     * Computed every tick as the filtered power normalized by the symmetric
-     * power limit and saturated to [-1..+1]:
+     * Computed every tick as the filtered power normalized by the total
+     * available input power and saturated to [-1..+1]:
      *
-     *     power_coeff = sat(P_filt / P_lim, -1, +1)
+     *     P_avail = min(P_lim, I_lim * v_bus_filt)   [W]
+     *     coeff   = sat(P_filt / P_avail, -1, +1)
+     *
+     * The availability bound mirrors the OP trip logic: at low bus voltage
+     * the current limit is the binding constraint, so the coefficient reaches
+     * ±1.0 exactly when the protection threshold is about to trip.
      *
      * Sign carries the energy-flow direction: positive values mean motoring
      * (power drawn from the supply), negative values mean regeneration
-     * (power returned to the link). |coeff| == 1.0 means the power limit has
-     * just been reached in the corresponding direction.
+     * (power returned to the link).
      *
      * @return Normalized signed power share [-1..+1]
      */
@@ -317,52 +364,6 @@ public:
      */
     inline void set_filter_alpha(uint8_t alpha) { filter_alpha_ = alpha; }
 
-    /**
-     * @brief Chainable limit setter for the symmetric OP thresholds.
-     *
-     * Usage:
-     * @code
-     *   driver.power.set_limit().op_lim_watts(60.0f).op_lim_amps(8.0f);
-     * @endcode
-     *
-     * Limits are signed-symmetric: the applied magnitude is enforced both in
-     * the + (motoring) and - (regeneration) directions.
-     */
-    struct LimitProxy {
-    private:
-        Power& parent;  ///< Reference to the owning Power
-
-    public:
-        /**
-         * @brief Construct a LimitProxy bound to a Power.
-         * @param p Reference to the owning Power
-         */
-        LimitProxy(Power& p) : parent(p) {}
-
-        /**
-         * @brief Set the symmetric max-input-power limit.
-         * @param limit_watts Power limit in watts (sign ignored; applied to +/-)
-         * @return Reference to this setter for chaining
-         */
-        inline LimitProxy& op_lim_watts(float limit_watts) {
-            parent.lim_power_w_ = std::fabs(limit_watts);  // Store magnitude for symmetric enforcement
-            return *this;
-        }
-
-        /**
-         * @brief Set the symmetric max-input-current limit.
-         * @param limit_amps Current limit in amperes (sign ignored; applied to +/-)
-         * @return Reference to this setter for chaining
-         */
-        inline LimitProxy& op_lim_amps(float limit_amps) {
-            parent.lim_current_a_ = std::fabs(limit_amps);  // Store magnitude for symmetric enforcement
-            return *this;
-        }
-    };
-
-    /**
-     * @brief Begin a limit configuration chain.
-     * @return LimitProxy bound to this Power
-     */
-    inline LimitProxy set_limit() { return LimitProxy(*this); }
+    // OP limits are configured through the overpower proxy:
+    //   driver.power.overpower.set_limit().op_lim_watts(W).op_lim_amps(A)
 };

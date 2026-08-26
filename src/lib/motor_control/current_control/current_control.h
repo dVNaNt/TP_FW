@@ -93,10 +93,10 @@ private:
             torque_nm = 0.042f;
         }
         if (pole_pairs <= 0.0f) {
-            pole_pairs = (drv.motor_ctrl_.get_motor_type() == MotorType_BLDC) ? 7.0f : 50.0f;
+            pole_pairs = (drv.motor_ctrl.get_motor_type() == MotorType_BLDC) ? 7.0f : 50.0f;
         }
 
-        foc_current_ = FocCurrentController(drv.motor_ctrl_.get_motor_type(), R_ohm, L_h, torque_nm, rated_current_a, pole_pairs);
+        foc_current_ = FocCurrentController(drv.motor_ctrl.get_motor_type(), R_ohm, L_h, torque_nm, rated_current_a, pole_pairs);
         setup_status.set_driver_status(OperationStatus::Ready);
     }
 
@@ -119,7 +119,6 @@ public:
             foc_current_.reset();                 // Zero d/q integrators, step memory and power filters
             voltage_dq_ = Vec2D_f32(0.0f, 0.0f);  // Invalidate stored voltage used by the power estimate
             is_saturated = false;                 // Clear saturation flag (no regulation happened)
-            power = 0.0f;                         // No valid power can be produced this cycle
             return Vec2D_f32(0.0f, 0.0f);         // Zero alpha-beta voltage command
         }
 
@@ -128,7 +127,7 @@ public:
         Vec2D angle_sincos = angle_polar.convert();
         Vec2D angle_sincos_inv(angle_sincos.cos, -angle_sincos.sin);
 
-        current_ab = drv.get_current_ab_amps();
+        current_ab = drv.motor_ctrl.get_current_ab_amps();
 
         Vec2D_f32 current_dq_raw = current_ab.rotate(angle_sincos_inv);
         current_dq = current_dq_raw;
@@ -150,10 +149,7 @@ public:
 
         Vec2D_f32 voltage_dq(0, 0);
 
-        float power_d = filtered_id * voltage_dq_.d;
-        float power_q = filtered_iq * voltage_dq_.q;
-
-        power = abs(power_d) + abs(power_q);
+        
 
         switch (setup_status.get_driver_status()) {
             case OperationStatus::Ready: {
@@ -166,7 +162,7 @@ public:
                     float theta_el_rad = (float)angle_ * ANGLE_COEF;
 
                     voltage_dq = foc_current_.tick(target_current, current_dq_raw.flux, current_dq_raw.torque,
-                                                   drv.get_supply_volts(), voltage_limit_fraction, omega_e_rad_s);
+                                                   drv.supply.get_voltage(), voltage_limit_fraction, omega_e_rad_s);
 
                     is_saturated = foc_current_.is_saturated;
 
@@ -176,7 +172,7 @@ public:
                 Vec2D_f32 current_ab_filt = current_dq_filt.rotate(angle_sincos);
                 MotorStatus prev_status = motor_calib_status;
 
-                motor_calib.tick_calibration(drv.get_supply_volts(), power, current_ab_filt.a, current_ab_filt.b,
+                motor_calib.tick_calibration(drv.supply.get_voltage(), drv.power.get_power_w(), current_ab_filt.a, current_ab_filt.b,
                                              current_dq_raw.flux, current_dq_raw.torque, motor_calib_status, motor, setup_status,
                                              angle_);
 

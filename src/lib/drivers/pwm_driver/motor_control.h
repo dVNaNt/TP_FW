@@ -15,6 +15,12 @@
  *   (Clarke transform), reconstructing a missing phase via Kirchhoff's
  *   Current Law and masking sensors sampled during high-duty intervals.
  *
+ * MotorControl is the PHASE-DOMAIN I/O HUB of the driver: it owns both
+ * phase-domain tensors — the commanded voltage vector (converted to duties by
+ * @c set_voltage_ab_volts) and the measured alpha-beta currents published by
+ * CurrentSense into @c current_ab_amps. All other modules read/write these
+ * quantities here instead of keeping their own copies.
+ *
  * Phase-pattern remapping (ABC / ACB / CBA wiring) is folded into both paths
  * using precomputed index permutations for zero runtime overhead.
  *
@@ -23,6 +29,9 @@
  */
 
 #include "../../common.h"
+#include "power.h"
+#include "voltage.h"
+#include "pwm_wrapper.h"
 
 struct DriverPWM;
 struct CurrentSense;
@@ -31,6 +40,15 @@ struct MotorControl {
 private:
     friend struct DriverPWM;
     friend struct CurrentSense;
+    // --- Collaborators (injected once via attach()) ---
+    PwmWrapper* pwm_ = nullptr;        ///< PWM output backend receiving computed duties
+    Power* power_ = nullptr;           ///< Power estimator fed with commanded vectors
+    SupplyVoltage* supply_ = nullptr;  ///< Bus-voltage scaler used by the voltage path
+
+    // --- Phase-domain state ---
+    /// Latest measured alpha-beta phase currents [A] (published by CurrentSense)
+    Vec2D_f32 current_ab_amps = {0.0f, 0.0f};
+
     // --- State variables for Current processing (formerly ABC2AB) ---
     FilterEMA lpf_;                           // LPF filter for phase balance
     static constexpr uint8_t LPF_ALPHA = 42;  // Filter coefficient (0-255)
@@ -251,6 +269,75 @@ private:
     inline Vec3D get_voltages() const { return abc_voltages_; }
 
 public:
+    // =======================================================================
+    // PHASE-DOMAIN I/O (commanded voltage / measured current)
+    // =======================================================================
+
+    /**
+     * @brief Wire the collaborators of the phase stage (called once).
+     *
+     * The phase stage sits between the sensing sub-systems and the PWM
+     * backend; instead of holding references at construction (member order
+     * constraints) the owner injects them right after construction.
+     *
+     * @param pwm    PWM output backend receiving the computed duties
+     * @param power  Power estimator fed with every commanded vector
+     * @param supply Bus-voltage scaler used by the voltage path
+     */
+    void attach(PwmWrapper& pwm, Power& power, SupplyVoltage& supply) {
+        pwm_ = &pwm;
+        power_ = &power;
+        supply_ = &supply;
+    }
+
+    /**
+     * @brief Command alpha-beta voltages [V]; converts and drives the PWM.
+     *
+     * Single entry point of the voltage path: feeds the commanded vector to
+     * the power estimator, scales it into per-phase duties through the
+     * supply-voltage scaler, runs the inverse-Clarke/SVPWM stage
+     * (@c tick_voltage) and pushes the result into the PWM backend.
+     *
+     * Non-finite components are safe-state sentinels that bypass conversion:
+     * - NaN  -> all phases INT16_MIN ("release outputs" request)
+     * - +INF -> all phases INT16_MAX (all-high-side / calibration request)
+     *
+     * @param voltages Commanded alpha-beta voltages [V]
+     */
+    void set_voltage_ab_volts(Vec2D_f32 voltages) {
+        // Feed the commanded vector to the power estimator (sanitized inside)
+        if (power_)
+            power_->set_voltage_command(voltages);
+
+        Vec3D duties;
+        // NaN sentinel: proper NaN detection (NaN != NaN is always true)
+        if (voltages.a != voltages.a || voltages.b != voltages.b) {
+            duties = Vec3D{INT16_MIN, INT16_MIN, INT16_MIN};
+        }
+        // Infinity sentinel: all-high-side command
+        else if (voltages.a == INFINITY || voltages.b == INFINITY) {
+            duties = Vec3D{INT16_MAX, INT16_MAX, INT16_MAX};
+        }
+        // Normal path: volts -> duty via measured bus voltage, then remap
+        else if (supply_) {
+            const int16_t duty_a = supply_->volts2duty(voltages.a);
+            const int16_t duty_b = supply_->volts2duty(voltages.b);
+            duties = tick_voltage(Vec2D(duty_a, duty_b));
+        }
+
+        if (pwm_)
+            pwm_->set_duty(duties);
+    }
+
+    /**
+     * @brief Latest measured alpha-beta phase currents [A].
+     *
+     * Written by CurrentSense::tick() after normalization and Clarke
+     * recombination; read by the power stage estimator and the application
+     * layer.
+     */
+    inline Vec2D_f32 get_current_ab_amps() const { return current_ab_amps; }
+
     /// Set motor type for both current and voltage converters
     /// @param motor_type Motor type (1=DC, 4=Stepper, 6=BLDC)
     inline void set_motor_type(MotorType motor_type) { motor_type_ = motor_type; }

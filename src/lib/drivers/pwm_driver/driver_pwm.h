@@ -17,7 +17,7 @@
  *
  * ## Fault Management Architecture
  *
- * The driver maintains a unified fault bitfield (@ref fault_flags_) with six fault sources:
+ * The driver maintains a unified fault bitfield (@ref fault_flags_) with seven fault sources:
  *
  * | Bit | Fault         | Safe State | Recovery Timer  |
  * |-----|---------------|------------|-----------------|
@@ -27,8 +27,9 @@
  * | 3   | External      | HiZ        | None (manual) |
  * | 4   | Undervoltage  | HiZ        | VoltageProtectionProxy |
  * | 5   | Overpower     | HiZ        | Power::OverpowerProxy |
+ * | 6   | Phase error   | HiZ        | None (follows MotorControl error state) |
  *
- * **Priority**: EXT (6) > OV (5) > UV (4) > OC (3) > OP (2) > OT (1). The highest-priority
+ * **Priority**: EXT (7) > OV (6) > UV (5) > OC (4) > PHASE (3) > OP (2) > OT (1). The highest-priority
  * active fault determines which callback fires. When all faults clear, the restore
  * callback fires.
  *
@@ -52,9 +53,9 @@
  * Fault callback configuration:
  * @code
  *   driver.set_fault().set_callback()
- *       .oc(overcurrent_handler)
- *       .ov(overvoltage_handler)
- *       .restore(restore_handler);
+ *       .oc_cb(overcurrent_handler)
+ *       .ov_cb(overvoltage_handler)
+ *       .rst_cb(restore_handler);
  * @endcode
  *
  * Runtime duty cycle:
@@ -80,9 +81,12 @@
 #include "current_sense.h"
 #include "motor_control.h"
 #include "power.h"
-#include "pwm.h"
+#include "pwm_wrapper.h"
 #include "temperature.h"
 #include "voltage.h"
+
+struct FaultCallbackProxy;
+struct FaultTriggerProxy;
 
 /**
  * @struct DriverPWM
@@ -99,15 +103,22 @@ struct DriverPWM {
     friend struct Temperature;
 
 public:
-    // --- Fault bitfield constants (public: external code decodes get_fault()) ---
-    static constexpr uint8_t FAULT_OVERVOLTAGE = (1 << 0);   ///< Bit 0: overvoltage → forces LowAll (brake)
-    static constexpr uint8_t FAULT_OVERCURRENT = (1 << 1);   ///< Bit 1: overcurrent → forces HiZ
-    static constexpr uint8_t FAULT_OVERHEAT = (1 << 2);      ///< Bit 2: overheat → forces HiZ
-    static constexpr uint8_t FAULT_EXTERNAL = (1 << 3);      ///< Bit 3: external pin → forces HiZ (highest priority)
-    static constexpr uint8_t FAULT_UNDERVOLTAGE = (1 << 4);  ///< Bit 4: undervoltage → forces HiZ
-    static constexpr uint8_t FAULT_OVERPOWER = (1 << 5);     ///< Bit 5: overpower/overinput-current → forces HiZ
+    // --- Fault bitfield (public: external code decodes get_fault()); safe states & priorities: see table above ---
+    enum Fault : uint8_t {
+        FAULT_OVERVOLTAGE = 1 << 0,   ///< LowAll (brake)
+        FAULT_OVERCURRENT = 1 << 1,   ///< HiZ
+        FAULT_OVERHEAT = 1 << 2,      ///< HiZ
+        FAULT_EXTERNAL = 1 << 3,      ///< HiZ, highest priority
+        FAULT_UNDERVOLTAGE = 1 << 4,  ///< HiZ
+        FAULT_OVERPOWER = 1 << 5,     ///< HiZ
+        FAULT_PHASE = 1 << 6,         ///< HiZ (MotorControl voltage/current path)
+    };
 
 private:
+    // Fault-management proxies are defined at namespace scope below this struct
+    friend struct FaultCallbackProxy;
+    friend struct FaultTriggerProxy;
+
     std::atomic<uint8_t> fault_flags_ = 0;  ///< Bitfield holding current active faults
 
     int16_t pwm_apply_[3] = {0, 0, 0};  ///< Local array for applying PWM to hardware
@@ -118,6 +129,7 @@ private:
     void (*cb_ot_)() = nullptr;       ///< Overheat fault callback
     void (*cb_ext_)() = nullptr;      ///< External fault callback
     void (*cb_op_)() = nullptr;       ///< Overpower fault callback
+    void (*cb_phase_)() = nullptr;    ///< Phase-stage error callback
     void (*cb_restore_)() = nullptr;  ///< Restore callback (fires when all faults clear)
 
     std::atomic<uint8_t> active_priority_ = 0;  ///< Tracks the highest active priority for callback logic
@@ -126,25 +138,28 @@ private:
      * @brief Get the priority of the highest active fault.
      *
      * Priority encoding (higher number = higher priority):
-     * - 6: External hardware fault
-     * - 5: Overvoltage
-     * - 4: Undervoltage
-     * - 3: Overcurrent
+     * - 7: External hardware fault
+     * - 6: Overvoltage
+     * - 5: Undervoltage
+     * - 4: Overcurrent
+     * - 3: Phase-stage error (voltage/current path)
      * - 2: Overpower (power/input-current limit)
      * - 1: Overheat
      * - 0: No fault active
      *
      * @param flags Current fault flags bitfield
-     * @return Priority level (0..6)
+     * @return Priority level (0..7)
      */
     inline uint8_t get_top_priority(uint8_t flags) const {
         if (flags & FAULT_EXTERNAL)
-            return 6;
+            return 7;
         if (flags & FAULT_OVERVOLTAGE)
-            return 5;
+            return 6;
         if (flags & FAULT_UNDERVOLTAGE)
-            return 4;
+            return 5;
         if (flags & FAULT_OVERCURRENT)
+            return 4;
+        if (flags & FAULT_PHASE)
             return 3;
         if (flags & FAULT_OVERPOWER)
             return 2;
@@ -159,25 +174,29 @@ private:
      * Each callback is checked for nullptr before invocation — callbacks are
      * optional and may be left unset.
      *
-     * @param priority Priority level (0=restore, 1=OT, 2=OP, 3=OC, 4=UV, 5=OV, 6=EXT)
+     * @param priority Priority level (0=restore, 1=OT, 2=OP, 3=PHASE, 4=OC, 5=UV, 6=OV, 7=EXT)
      */
     inline void trigger_cb(uint8_t priority) {
         switch (priority) {
-            case 6:
+            case 7:
                 if (cb_ext_)
                     cb_ext_();
                 break;
-            case 5:
+            case 6:
                 if (cb_ov_)
                     cb_ov_();
                 break;
-            case 4:
+            case 5:
                 if (cb_uv_)
                     cb_uv_();
                 break;
-            case 3:
+            case 4:
                 if (cb_oc_)
                     cb_oc_();
+                break;
+            case 3:
+                if (cb_phase_)
+                    cb_phase_();
                 break;
             case 2:
                 if (cb_op_)
@@ -233,242 +252,15 @@ private:
         }
     }
 
-    /**
-     * @class CallbackProxy
-     * @brief Zero-overhead proxy for setting fault callbacks via fluent syntax.
-     *
-     * Usage:
-     * @code
-     *   driver.set_fault().set_callback()
-     *       .oc(overcurrent_handler)
-     *       .ov(overvoltage_handler)
-     *       .ext(external_fault_handler)
-     *       .restore(normal_op_restored_handler);
-     * @endcode
-     *
-     * @note All setter methods safely accept nullptr (equivalent to unsetting the callback).
-     */
-    class CallbackProxy {
-        DriverPWM& drv_;
-
-    public:
-        /**
-         * @brief Construct a CallbackProxy bound to a driver instance.
-         * @param drv Reference to the owning DriverPWM
-         */
-        CallbackProxy(DriverPWM& drv) : drv_(drv) {}
-
-        /**
-         * @brief Set overcurrent fault callback.
-         * @param cb Function pointer (nullptr to unset)
-         * @return Reference to this proxy for chaining
-         */
-        inline CallbackProxy& oc_cb(void (*cb)()) {
-            drv_.cb_oc_ = cb;
-            return *this;
-        }
-        /**
-         * @brief Set overvoltage fault callback.
-         * @param cb Function pointer (nullptr to unset)
-         * @return Reference to this proxy for chaining
-         */
-        inline CallbackProxy& ov_cb(void (*cb)()) {
-            drv_.cb_ov_ = cb;
-            return *this;
-        }
-        /**
-         * @brief Set undervoltage fault callback.
-         * @param cb Function pointer (nullptr to unset)
-         * @return Reference to this proxy for chaining
-         */
-        inline CallbackProxy& uv_cb(void (*cb)()) {
-            drv_.cb_uv_ = cb;
-            return *this;
-        }
-        /**
-         * @brief Set overheat fault callback.
-         * @param cb Function pointer (nullptr to unset)
-         * @return Reference to this proxy for chaining
-         */
-        inline CallbackProxy& ot_cb(void (*cb)()) {
-            drv_.cb_ot_ = cb;
-            return *this;
-        }
-        /**
-         * @brief Set external fault callback.
-         * @param cb Function pointer (nullptr to unset)
-         * @return Reference to this proxy for chaining
-         */
-        inline CallbackProxy& ext_cb(void (*cb)()) {
-            drv_.cb_ext_ = cb;
-            return *this;
-        }
-        /**
-         * @brief Set overpower fault callback.
-         * @param cb Function pointer (nullptr to unset)
-         * @return Reference to this proxy for chaining
-         */
-        inline CallbackProxy& op_cb(void (*cb)()) {
-            drv_.cb_op_ = cb;
-            return *this;
-        }
-        /**
-         * @brief Set restore callback (fired when all faults clear).
-         * @param cb Function pointer (nullptr to unset)
-         * @return Reference to this proxy for chaining
-         */
-        inline CallbackProxy& restore_cb(void (*cb)()) {
-            drv_.cb_restore_ = cb;
-            return *this;
-        }
-    };
-
-    /**
-     * @class FaultProxy
-     * @brief Zero-overhead proxy enabling fluent fault-triggering syntax.
-     *
-     * Any trigger(true) restarts the respective sub-system recovery timer.
-     * Usage:
-     * @code
-     *   driver.set_fault().overcurrent(true);   // trigger + restart timer
-     *   driver.set_fault().overcurrent(false);  // clear fault
-     * @endcode
-     */
-    class FaultProxy {
-        DriverPWM& drv_;
-
-    public:
-        /**
-         * @brief Construct a FaultProxy bound to a driver instance.
-         * @param drv Reference to the owning DriverPWM
-         */
-        FaultProxy(DriverPWM& drv) : drv_(drv) {}
-
-        /**
-         * @brief Get a CallbackProxy for configuring fault callbacks.
-         * @return CallbackProxy bound to this driver
-         */
-        inline CallbackProxy set_callback() { return CallbackProxy(drv_); }
-
-        /**
-         * @brief Trigger or clear overvoltage fault (forces LowAll / brake).
-         *
-         * When triggered, restarts the overvoltage recovery timer in SupplyVoltage.
-         *
-         * @param state true to trigger (restarts timer), false to clear
-         */
-        inline void overvoltage(bool state) {
-            if (state) {
-                uint8_t old = drv_.fault_flags_.fetch_or(FAULT_OVERVOLTAGE, std::memory_order_relaxed);
-                drv_.supply.overvoltage.trigger();
-                drv_.check_and_trigger_priority(old | FAULT_OVERVOLTAGE);
-            } else {
-                drv_.fault_flags_.fetch_and(~FAULT_OVERVOLTAGE, std::memory_order_relaxed);
-                drv_.supply.overvoltage.reset();
-            }
-        }
-
-        /**
-         * @brief Trigger or clear undervoltage fault (forces HiZ).
-         *
-         * When triggered, restarts the undervoltage recovery timer in SupplyVoltage.
-         *
-         * @param state true to trigger (restarts timer), false to clear
-         */
-        inline void undervoltage(bool state) {
-            if (state) {
-                uint8_t old = drv_.fault_flags_.fetch_or(FAULT_UNDERVOLTAGE, std::memory_order_relaxed);
-                drv_.supply.undervoltage.trigger();
-                drv_.check_and_trigger_priority(old | FAULT_UNDERVOLTAGE);
-            } else {
-                drv_.fault_flags_.fetch_and(~FAULT_UNDERVOLTAGE, std::memory_order_relaxed);
-                drv_.supply.undervoltage.reset();
-            }
-        }
-
-        /**
-         * @brief Trigger or clear overcurrent fault (forces HiZ).
-         *
-         * When triggered, restarts the overcurrent recovery timer in CurrentSense.
-         *
-         * @param state true to trigger (restarts timer), false to clear
-         */
-        inline void overcurrent(bool state) {
-            if (state) {
-                uint8_t old = drv_.fault_flags_.fetch_or(FAULT_OVERCURRENT, std::memory_order_relaxed);
-                drv_.current.overcurrent.trigger();
-                drv_.check_and_trigger_priority(old | FAULT_OVERCURRENT);
-            } else {
-                drv_.fault_flags_.fetch_and(~FAULT_OVERCURRENT, std::memory_order_relaxed);
-                drv_.current.overcurrent.reset();
-            }
-        }
-
-        /**
-         * @brief Trigger or clear overpower fault (forces HiZ).
-         *
-         * When triggered, restarts the overpower recovery timer in Power.
-         *
-         * @param state true to trigger (restarts timer), false to clear
-         */
-        inline void overpower(bool state) {
-            if (state) {
-                uint8_t old = drv_.fault_flags_.fetch_or(FAULT_OVERPOWER, std::memory_order_relaxed);
-                drv_.power.overpower.trigger();
-                drv_.check_and_trigger_priority(old | FAULT_OVERPOWER);
-            } else {
-                drv_.fault_flags_.fetch_and(~FAULT_OVERPOWER, std::memory_order_relaxed);
-                drv_.power.overpower.reset();
-            }
-        }
-
-        /**
-         * @brief Trigger or clear overheat fault (forces HiZ).
-         *
-         * Overheat faults have no automatic recovery timer — they must be cleared
-         * explicitly by the application.
-         *
-         * @param state true to trigger, false to clear
-         */
-        inline void overheat(bool state) {
-            if (state) {
-                uint8_t old = drv_.fault_flags_.fetch_or(FAULT_OVERHEAT, std::memory_order_relaxed);
-                drv_.check_and_trigger_priority(old | FAULT_OVERHEAT);
-            } else {
-                drv_.fault_flags_.fetch_and(~FAULT_OVERHEAT, std::memory_order_relaxed);
-            }
-        }
-
-        /**
-         * @brief Trigger or clear external hardware fault (forces HiZ, highest priority).
-         *
-         * External faults have no automatic recovery timer — they are linked to the
-         * hardware fault pin state.
-         *
-         * @param state true to trigger, false to clear
-         */
-        inline void external(bool state) {
-            if (state) {
-                uint8_t old = drv_.fault_flags_.fetch_or(FAULT_EXTERNAL, std::memory_order_relaxed);
-                drv_.check_and_trigger_priority(old | FAULT_EXTERNAL);
-            } else {
-                drv_.fault_flags_.fetch_and(~FAULT_EXTERNAL, std::memory_order_relaxed);
-            }
-        }
-    };
-
-private:
-    Vec3D duty_abc_ = {INT16_MIN, INT16_MIN, INT16_MIN};
-
 public:
-    MotorControl motor_ctrl_;
-    PwmWrapper pwm;                   ///< PWM output wrapper with chainable setup and SeqLock-protected duty cycle
-    OutputWrapper enable_;            ///< Digital output to enable/disable the gate driver
-    InputWrapper error_;              ///< Digital input reading the hardware fault pin
-    CurrentSense current;             ///< Public instance for current ADC input and configuration
-    SupplyVoltage supply;             ///< Public instance for voltage ADC input and configuration
-    Temperature temperature;          ///< Public instance for temperature ADC input, WT/OT protection
-    Power power;                      ///< Public instance for power measurement and OP (overpower) protection
+    MotorControl motor_ctrl;
+    PwmWrapper pwm;           ///< PWM output wrapper with chainable setup and SeqLock-protected duty cycle
+    OutputWrapper enable_;    ///< Digital output to enable/disable the gate driver
+    InputWrapper error_;      ///< Digital input reading the hardware fault pin
+    CurrentSense current;     ///< Public instance for current ADC input and configuration
+    SupplyVoltage supply;     ///< Public instance for voltage ADC input and configuration
+    Temperature temperature;  ///< Public instance for temperature ADC input, WT/OT protection
+    Power power;              ///< Public instance for power measurement and OP (overpower) protection
 
     /**
      * @brief Construct a new DriverPWM object.
@@ -484,10 +276,16 @@ public:
      * @param t_max_c Temperature in degC corresponding to the temperature
      *                channel's ADC full scale (Q15 normalization reference)
      */
-    DriverPWM(float ch1_fs = 0, float ch2_fs = 0, float ch3_fs = 0, uint8_t v_alpha = 64,
-                 float v_max = 24.0f, float t_max_c = 150.0f)
-        : motor_ctrl_(), current(ch1_fs, ch2_fs, ch3_fs, motor_ctrl_),
-          supply(v_alpha, v_max), temperature(t_max_c) {}
+    DriverPWM(float ch1_fs = 0,
+              float ch2_fs = 0,
+              float ch3_fs = 0,
+              uint8_t v_alpha = 64,
+              float v_max = 24.0f,
+              float t_max_c = 150.0f)
+        : motor_ctrl(), current(ch1_fs, ch2_fs, ch3_fs, motor_ctrl), supply(v_alpha, v_max), temperature(t_max_c) {
+        // Wire the phase stage to its output backend and power estimator
+        motor_ctrl.attach(pwm, power, supply);
+    }
 
     /**
      * @brief Get reference to the enable output.
@@ -502,25 +300,27 @@ public:
     inline InputWrapper& get_error() { return error_; }
 
     /**
-     * @brief Get a FaultProxy for fluent fault triggering, clearing, and callback setup.
+     * @brief Get a FaultTriggerProxy for fluent fault triggering, clearing,
+     *        and callback setup.
      *
-     * This is the main entry point for interacting with the fault management system.
+     * This is the main entry point for interacting with the fault management
+     * system.
      *
-     * @return FaultProxy bound to this driver
+     * @return FaultTriggerProxy bound to this driver
      *
      * @par Example
      * @code
      *   // Set callbacks
      *   driver.set_fault().set_callback()
-     *       .oc(my_oc_handler)
-     *       .restore(my_restore_handler);
+     *       .oc_cb(my_oc_handler)
+     *       .rst_cb(my_restore_handler);
      *
      *   // Trigger/clear faults
      *   driver.set_fault().overcurrent(true);
      *   driver.set_fault().overcurrent(false);
      * @endcode
      */
-    inline FaultProxy set_fault() { return FaultProxy(*this); }
+    FaultTriggerProxy set_fault();
 
     /**
      * @brief Read the current fault flags bitfield.
@@ -528,7 +328,6 @@ public:
      * @see FAULT_OVERVOLTAGE, FAULT_OVERCURRENT, FAULT_OVERHEAT, FAULT_EXTERNAL, FAULT_UNDERVOLTAGE, FAULT_OVERPOWER
      */
     inline uint8_t get_fault() const { return fault_flags_.load(std::memory_order_relaxed); }
-
 
     /**
      * @brief Sensor processing tick — processes current and voltage ADC data.
@@ -545,68 +344,7 @@ public:
         temperature.tick();
         // Power stage: measured AB currents x commanded AB voltages, filtered
         // bus voltage from SupplyVoltage drives the input-current derivation
-        power.tick(current.current_ab_amps, supply.get_voltage());
-    }
-
-    inline Vec2D_f32 get_current_ab_amps() const { return current.current_ab_amps; }
-
-    inline float get_supply_volts() const { return supply.get_voltage(); }
-
-    /**
-     * @brief Get the latest RAW (unfiltered) power-stage power.
-     * @return Instantaneous electrical power [W], signed (+ motor / - regen)
-     */
-    inline float get_raw_power_w() const { return power.get_raw_power_w(); }
-
-    /**
-     * @brief Get the latest filtered power-stage power.
-     * @return EMA-filtered electrical power [W], signed (+ motor / - regen)
-     */
-    inline float get_power_w() const { return power.get_power_w(); }
-
-    /**
-     * @brief Get the derived input current (filtered power / filtered voltage).
-     * @return Input current estimate [A], signed
-     */
-    inline float get_input_current_a() const { return power.get_input_current_a(); }
-
-    /**
-     * @brief Get the per-tick limit utilization coefficient.
-     * @return max(|P|/P_lim, |I|/I_lim); < 1.0 = headroom, >= 1.0 = fault zone
-     */
-    inline float get_power_usage() const { return power.get_usage_norm(); }
-
-    /**
-     * @brief Get the signed power coefficient (share of the power limit).
-     * @return Normalized signed power share [-1..+1] (+ motor / - regen)
-     */
-    inline float get_power_coeff() const { return power.get_power_coeff(); }
-
-    /**
-     * @brief Get the latest filtered temperature in degrees Celsius.
-     * @return Filtered temperature [degC] (see Temperature)
-     */
-    inline float get_temperature_c() const { return temperature.get_temperature_c(); }
-
-    inline void set_voltage_ab_volts(Vec2D_f32 voltages) {
-        // Capture the commanded vector for power-stage power estimation
-        // (non-finite safe-state sentinels are sanitized to zero inside)
-        power.set_voltage_command(voltages);
-        // Check for NaN values using proper NaN detection (NaN != NaN is always true)
-        if (voltages.a != voltages.a || voltages.b != voltages.b) {
-            duty_abc_ = Vec3D{INT16_MIN, INT16_MIN, INT16_MIN};
-        }
-        // Check for infinity values using proper infinity detection
-        else if (voltages.a == INFINITY || voltages.b == INFINITY) {
-            duty_abc_ = Vec3D{INT16_MAX, INT16_MAX, INT16_MAX};
-        }
-        // Normal voltage conversion
-        else {
-            int16_t duty_a = supply.volts2duty(voltages.a);
-            int16_t duty_b = supply.volts2duty(voltages.b);
-            duty_abc_ = motor_ctrl_.tick_voltage(Vec2D(duty_a, duty_b));
-        }
-        pwm.set_duty(duty_abc_);
+        power.tick(motor_ctrl.get_current_ab_amps(), supply.get_voltage());
     }
 
     /**
@@ -631,6 +369,9 @@ public:
         // which trips on either symmetric limit (power or derived input
         // current) and auto-clears when its timer expires within limits.
         update_fault_bit(FAULT_OVERPOWER, power.overpower.tick_timer());
+        // Phase stage: follows the MotorControl voltage/current path error
+        // state of the last conversion tick (no recovery timer latch)
+        update_fault_bit(FAULT_PHASE, motor_ctrl.is_err());
         // Temperature has no recovery latch: the flag follows the (heavily
         // filtered) measurement, trips at the OT limit and is released by
         // hysteresis once it drops below limit - hysteresis.
@@ -670,3 +411,273 @@ public:
     }
 };
 
+// ============================================================================
+// FaultCallbackProxy — fluent fault-callback configuration
+// ============================================================================
+/**
+ * @class FaultCallbackProxy
+ * @brief Zero-overhead proxy for setting fault callbacks via fluent syntax.
+ *
+ * Defined at namespace scope so that forward declarations in this header and
+ * friend declarations in sub-module headers (power.h, voltage.h,
+ * current_sense.h) resolve to the same type as DriverPWM::set_fault().
+ *
+ * Usage:
+ * @code
+ *   driver.set_fault().set_callback()
+ *       .oc_cb(overcurrent_handler)
+ *       .ov_cb(overvoltage_handler)
+ *       .ext_cb(external_fault_handler)
+ *       .rst_cb(normal_op_restored_handler);
+ * @endcode
+ *
+ * @note All setter methods safely accept nullptr (equivalent to unsetting the callback).
+ */
+struct FaultCallbackProxy {
+    DriverPWM& drv_;  ///< Reference to the owning driver instance
+
+    /**
+     * @brief Construct a FaultCallbackProxy bound to a driver instance.
+     * @param drv Reference to the owning DriverPWM
+     */
+    explicit FaultCallbackProxy(DriverPWM& drv) : drv_(drv) {}
+
+    /**
+     * @brief Set overcurrent fault callback.
+     * @param cb Function pointer (nullptr to unset)
+     * @return Reference to this proxy for chaining
+     */
+    inline FaultCallbackProxy& oc_cb(void (*cb)()) {
+        drv_.cb_oc_ = cb;
+        return *this;
+    }
+    /**
+     * @brief Set overvoltage fault callback.
+     * @param cb Function pointer (nullptr to unset)
+     * @return Reference to this proxy for chaining
+     */
+    inline FaultCallbackProxy& ov_cb(void (*cb)()) {
+        drv_.cb_ov_ = cb;
+        return *this;
+    }
+    /**
+     * @brief Set undervoltage fault callback.
+     * @param cb Function pointer (nullptr to unset)
+     * @return Reference to this proxy for chaining
+     */
+    inline FaultCallbackProxy& uv_cb(void (*cb)()) {
+        drv_.cb_uv_ = cb;
+        return *this;
+    }
+    /**
+     * @brief Set overheat fault callback.
+     * @param cb Function pointer (nullptr to unset)
+     * @return Reference to this proxy for chaining
+     */
+    inline FaultCallbackProxy& ot_cb(void (*cb)()) {
+        drv_.cb_ot_ = cb;
+        return *this;
+    }
+    /**
+     * @brief Set external fault callback.
+     * @param cb Function pointer (nullptr to unset)
+     * @return Reference to this proxy for chaining
+     */
+    inline FaultCallbackProxy& ext_cb(void (*cb)()) {
+        drv_.cb_ext_ = cb;
+        return *this;
+    }
+    /**
+     * @brief Set overpower fault callback.
+     * @param cb Function pointer (nullptr to unset)
+     * @return Reference to this proxy for chaining
+     */
+    inline FaultCallbackProxy& op_cb(void (*cb)()) {
+        drv_.cb_op_ = cb;
+        return *this;
+    }
+    /**
+     * @brief Set phase-stage error callback (MotorControl voltage/current path).
+     * @param cb Function pointer (nullptr to unset)
+     * @return Reference to this proxy for chaining
+     */
+    inline FaultCallbackProxy& phase_cb(void (*cb)()) {
+        drv_.cb_phase_ = cb;
+        return *this;
+    }
+    /**
+     * @brief Set restore callback (fired when all faults clear).
+     * @param cb Function pointer (nullptr to unset)
+     * @return Reference to this proxy for chaining
+     */
+    inline FaultCallbackProxy& rst_cb(void (*cb)()) {
+        drv_.cb_restore_ = cb;
+        return *this;
+    }
+};
+
+// ============================================================================
+// FaultTriggerProxy — fluent fault triggering/clearing
+// ============================================================================
+
+/**
+ * @class FaultTriggerProxy
+ * @brief Zero-overhead proxy enabling fluent fault-triggering syntax.
+ *
+ * Defined at namespace scope so that forward declarations in this header and
+ * friend declarations in sub-module headers (power.h, voltage.h,
+ * current_sense.h) resolve to the same type as DriverPWM::set_fault().
+ *
+ * Any trigger(true) restarts the respective sub-system recovery timer.
+ * Usage:
+ * @code
+ *   driver.set_fault().overcurrent(true);   // trigger + restart timer
+ *   driver.set_fault().overcurrent(false);  // clear fault
+ * @endcode
+ */
+struct FaultTriggerProxy {
+    DriverPWM& drv_;  ///< Reference to the owning driver instance
+
+    /**
+     * @brief Construct a FaultTriggerProxy bound to a driver instance.
+     * @param drv Reference to the owning DriverPWM
+     */
+    explicit FaultTriggerProxy(DriverPWM& drv) : drv_(drv) {}
+
+    /**
+     * @brief Get a FaultCallbackProxy for configuring fault callbacks.
+     * @return FaultCallbackProxy bound to this driver
+     */
+    inline FaultCallbackProxy set_callback() { return FaultCallbackProxy(drv_); }
+
+    /**
+     * @brief Trigger or clear overvoltage fault (forces LowAll / brake).
+     *
+     * When triggered, restarts the overvoltage recovery timer in SupplyVoltage.
+     *
+     * @param state true to trigger (restarts timer), false to clear
+     */
+    inline void overvoltage(bool state) {
+        if (state) {
+            uint8_t old = drv_.fault_flags_.fetch_or(DriverPWM::FAULT_OVERVOLTAGE, std::memory_order_relaxed);
+            drv_.supply.overvoltage.trigger();
+            drv_.check_and_trigger_priority(old | DriverPWM::FAULT_OVERVOLTAGE);
+        } else {
+            drv_.fault_flags_.fetch_and(~DriverPWM::FAULT_OVERVOLTAGE, std::memory_order_relaxed);
+            drv_.supply.overvoltage.reset();
+        }
+    }
+
+    /**
+     * @brief Trigger or clear undervoltage fault (forces HiZ).
+     *
+     * When triggered, restarts the undervoltage recovery timer in SupplyVoltage.
+     *
+     * @param state true to trigger (restarts timer), false to clear
+     */
+    inline void undervoltage(bool state) {
+        if (state) {
+            uint8_t old = drv_.fault_flags_.fetch_or(DriverPWM::FAULT_UNDERVOLTAGE, std::memory_order_relaxed);
+            drv_.supply.undervoltage.trigger();
+            drv_.check_and_trigger_priority(old | DriverPWM::FAULT_UNDERVOLTAGE);
+        } else {
+            drv_.fault_flags_.fetch_and(~DriverPWM::FAULT_UNDERVOLTAGE, std::memory_order_relaxed);
+            drv_.supply.undervoltage.reset();
+        }
+    }
+
+    /**
+     * @brief Trigger or clear overcurrent fault (forces HiZ).
+     *
+     * When triggered, restarts the overcurrent recovery timer in CurrentSense.
+     *
+     * @param state true to trigger (restarts timer), false to clear
+     */
+    inline void overcurrent(bool state) {
+        if (state) {
+            uint8_t old = drv_.fault_flags_.fetch_or(DriverPWM::FAULT_OVERCURRENT, std::memory_order_relaxed);
+            drv_.current.overcurrent.trigger();
+            drv_.check_and_trigger_priority(old | DriverPWM::FAULT_OVERCURRENT);
+        } else {
+            drv_.fault_flags_.fetch_and(~DriverPWM::FAULT_OVERCURRENT, std::memory_order_relaxed);
+            drv_.current.overcurrent.reset();
+        }
+    }
+
+    /**
+     * @brief Trigger or clear overpower fault (forces HiZ).
+     *
+     * When triggered, restarts the overpower recovery timer in Power.
+     *
+     * @param state true to trigger (restarts timer), false to clear
+     */
+    inline void overpower(bool state) {
+        if (state) {
+            uint8_t old = drv_.fault_flags_.fetch_or(DriverPWM::FAULT_OVERPOWER, std::memory_order_relaxed);
+            drv_.power.overpower.trigger();
+            drv_.check_and_trigger_priority(old | DriverPWM::FAULT_OVERPOWER);
+        } else {
+            drv_.fault_flags_.fetch_and(~DriverPWM::FAULT_OVERPOWER, std::memory_order_relaxed);
+            drv_.power.overpower.reset();
+        }
+    }
+
+    /**
+     * @brief Trigger or clear the phase-stage error fault (forces HiZ).
+     *
+     * Mirrors the MotorControl voltage/current path error state. Normally
+     * driven automatically by tick_icr(); exposed for manual override.
+     *
+     * @param state true to trigger, false to clear
+     */
+    inline void phase(bool state) {
+        if (state) {
+            uint8_t old = drv_.fault_flags_.fetch_or(DriverPWM::FAULT_PHASE, std::memory_order_relaxed);
+            drv_.check_and_trigger_priority(old | DriverPWM::FAULT_PHASE);
+        } else {
+            drv_.fault_flags_.fetch_and(~DriverPWM::FAULT_PHASE, std::memory_order_relaxed);
+        }
+    }
+
+    /**
+     * @brief Trigger or clear overheat fault (forces HiZ).
+     *
+     * Overheat faults have no automatic recovery timer — they must be cleared
+     * explicitly by the application.
+     *
+     * @param state true to trigger, false to clear
+     */
+    inline void overheat(bool state) {
+        if (state) {
+            uint8_t old = drv_.fault_flags_.fetch_or(DriverPWM::FAULT_OVERHEAT, std::memory_order_relaxed);
+            drv_.check_and_trigger_priority(old | DriverPWM::FAULT_OVERHEAT);
+        } else {
+            drv_.fault_flags_.fetch_and(~DriverPWM::FAULT_OVERHEAT, std::memory_order_relaxed);
+        }
+    }
+
+    /**
+     * @brief Trigger or clear external hardware fault (forces HiZ, highest priority).
+     *
+     * External faults have no automatic recovery timer — they are linked to the
+     * hardware fault pin state.
+     *
+     * @param state true to trigger, false to clear
+     */
+    inline void external(bool state) {
+        if (state) {
+            uint8_t old = drv_.fault_flags_.fetch_or(DriverPWM::FAULT_EXTERNAL, std::memory_order_relaxed);
+            drv_.check_and_trigger_priority(old | DriverPWM::FAULT_EXTERNAL);
+        } else {
+            drv_.fault_flags_.fetch_and(~DriverPWM::FAULT_EXTERNAL, std::memory_order_relaxed);
+        }
+    }
+};
+
+/**
+ * @brief Get a FaultTriggerProxy bound to this driver instance.
+ * @return FaultTriggerProxy for fluent fault triggering/clearing/callback setup
+ */
+inline FaultTriggerProxy DriverPWM::set_fault() {
+    return FaultTriggerProxy(*this);
+}

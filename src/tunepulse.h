@@ -105,13 +105,13 @@ void LED_Blue_Control(bool state) {
  * @brief Callback invoked when an ADC current-offset calibration cycle starts.
  *
  * Drives the output voltage vector to (+INFINITY, +INFINITY), which the PWM
- * backend (DriverPWM::set_voltage_ab_volts) maps to INT16_MAX duty on all
+ * backend (MotorControl::set_voltage_ab_volts) maps to INT16_MAX duty on all
  * three phases, i.e. ALL HIGH-SIDE switches ON. All motor terminals are then
  * tied to the DC bus: zero differential voltage, no torque, and the current
  * amplifiers read their pure offset without back-EMF contribution.
  */
 void start_curnt_cal() {
-    TUNE_HEART.driver_phy.set_voltage_ab_volts(Vec2D_f32(INFINITY, INFINITY));
+    TUNE_HEART.driver_phy.motor_ctrl.set_voltage_ab_volts(Vec2D_f32(INFINITY, INFINITY));
 }
 
 /**
@@ -123,7 +123,7 @@ void start_curnt_cal() {
  * releasing the drive into a defined static state.
  */
 void end_curnt_cal() {
-    TUNE_HEART.driver_phy.set_voltage_ab_volts(Vec2D_f32(NAN, NAN));
+    TUNE_HEART.driver_phy.motor_ctrl.set_voltage_ab_volts(Vec2D_f32(NAN, NAN));
 }
 
 /**
@@ -273,8 +273,7 @@ inline void tunepulse_init() {
         .oc_lim_ib_cb(DAC_Set_COMP1_OC_Threshold)
         .oc_lim_ic_cb(DAC_Set_COMP4_OC_Threshold);
     // Hardware overcurrent thresholds (amps): phases A/B at 4.0 A, phase C at
-    // 6.2 A. NOTE: the comment below previously claimed 4.6 A / 6.9 A which did
-    // not match the actual configured values.
+    // 6.2 A. 
     TUNE_HEART.driver_phy.current.overcurrent.set_limit_amps().oc_ia(4.0).oc_ib(4.0).oc_ic(6.2);
     TUNE_HEART.driver_phy.supply.overvoltage.set_lim_callback(DAC_Set_COMP3_OV_Threshold);
     TUNE_HEART.driver_phy.supply.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(48.0);
@@ -287,13 +286,13 @@ inline void tunepulse_init() {
     // thresholds are precomputed into the raw ADC domain once, so tick() does
     // pure integer comparisons only.
     TUNE_HEART.driver_phy.temperature.set_limit_celsius().ot_lim_celsius(85.0f).ot_hyst_celsius(10.0f);
-    TUNE_HEART.driver_phy.power.set_limit().op_lim_watts(10.0f).op_lim_amps(2.0f);
+    TUNE_HEART.driver_phy.power.overpower.set_limit().op_lim_watts(60.0f).op_lim_amps(2.50f);
     // Raw -> degC recalculation callback (STM32G4 factory calibration, adc_setup.h):
     // Temperature converts the filtered internal-sensor reading into real
     // degrees Celsius and compares the OT limits against that value. Installing
     // the callback re-inverts the configured thresholds through the calibration
     // curve, so the call order relative to set_limit_celsius() does not matter.
-    TUNE_HEART.driver_phy.temperature.set_temperature_callback(ADC_Temperature_To_Celsius);
+    TUNE_HEART.driver_phy.temperature.set_do_conversion_cb(ADC_Temperature_To_Celsius);
 
     TUNE_HEART.driver_phy.current.on_calibration_start(start_curnt_cal);
     TUNE_HEART.driver_phy.current.on_calibration_complete(end_curnt_cal);
@@ -365,6 +364,8 @@ inline void tunepulse_init() {
         }
     }
     SerialUSB.println("Going motion");
+
+    // TUNE_HEART.driver_phy.
 }
 
 #endif  // TUNEPULSE_H
