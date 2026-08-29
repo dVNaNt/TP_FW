@@ -46,7 +46,7 @@ src\target\cln17_v3/target.h:15: warning: "TARGET_CLN17V3" redefined
 Linking .pio\build\cln17_v3_release\firmware.elf
 Checking size .pio\build\cln17_v3_release\firmware.elf
 Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
-RAM:   [==        ]  24.1% (used 7892 bytes from 32768 bytes)
-Flash: [=====     ]  54.1% (used 62052 bytes from 114688 bytes)
+RAM:   [==        ]  24.3% (used 7964 bytes from 32768 bytes)
+Flash: [=====     ]  53.9% (used 61860 bytes from 114688 bytes)
 Building .pio\build\cln17_v3_release\firmware.bin
-========================= [SUCCESS] Took 7.10 seconds =========================
+========================= [SUCCESS] Took 15.02 seconds =========================

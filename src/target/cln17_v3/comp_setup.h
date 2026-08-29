@@ -269,7 +269,7 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_21)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_21);  // Clear pending flag
 
-        TUNE_HEART.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
+        TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
         SerialUSB.println("B");
     }
 
@@ -277,7 +277,7 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_22)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_22);  // Clear pending flag
 
-        TUNE_HEART.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
+        TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
         SerialUSB.println("A");
     }
 
@@ -287,9 +287,9 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
 
         // Check if rising edge (fault) or falling edge (clear)
         if (LL_COMP_ReadOutputLevel(COMP3) == LL_COMP_OUTPUT_LEVEL_HIGH) {
-            TUNE_HEART.driver_phy.set_fault().overvoltage(true);  // Set fatal overvoltage error
+            TP.driver_phy.set_fault().overvoltage(true);  // Set fatal overvoltage error
         } else {
-            TUNE_HEART.driver_phy.set_fault().overvoltage(false);  // Clear overvoltage error
+            TP.driver_phy.set_fault().overvoltage(false);  // Clear overvoltage error
         }
         SerialUSB.println("V");
     }
@@ -304,7 +304,7 @@ extern "C" void COMP4_IRQHandler(void) {
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_30)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_30);  // Clear pending flag
 
-        TUNE_HEART.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
+        TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
         SerialUSB.println("C");
     }
 }
@@ -325,7 +325,7 @@ extern "C" void EXTI15_10_IRQHandler(void) {
         // Falling edge (pin LOW) -> true (set the flag)
         bool is_fault = (LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_10) == 0U); 
         SerialUSB.println("E");
-        TUNE_HEART.driver_phy.set_fault().external(is_fault);
+        TP.driver_phy.set_fault().external(is_fault);
     }
 }
 

@@ -156,7 +156,7 @@ __attribute__((always_inline, optimize("O3"))) inline void TIM1_Set_PWM_Values(
     int32_t d1 = pwmValues[1];     // Load requested duty cycle for Phase B
     int32_t d2 = pwmValues[2];     // Load requested duty cycle for Phase C
 
-    if (TUNE_HEART.driver_phy.get_fault()) {  // Check active fault state (single global object, no pointer indirection)
+    if (TP.driver_phy.get_fault()) {  // Check active fault state (single global object, no pointer indirection)
         return;
     }  // End of protection condition check
 

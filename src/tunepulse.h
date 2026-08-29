@@ -6,7 +6,7 @@
  * @brief Board-level integration layer for the TunePulse CLN17-v3 controller.
  *
  * This header wires together all firmware subsystems into a single global
- * application object (@c TUNE_HEART of type TunePulseHeart):
+ * application object (@c TP of type TunePulseHeart):
  *
  * - Instantiates the core @c TunePulseHeart object with board-specific
  *   hardware parameters (PWM frequency/resolution, supply voltage full-scale,
@@ -48,7 +48,7 @@
  * - IA/IB/IC_MAX_CURRENT_FS : ADC full-scale values corresponding to the
  *                       maximum measurable phase currents for phases A/B/C.
  */
-TunePulseHeart TUNE_HEART(PWM_TIMER_FREQ_HZ,
+TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
                           PWM_TIMER_PERIOD,
                           SYS_PARAMS::MAX_SUPPLY_FS,
                           SYS_PARAMS::IA_MAX_CURRENT_FS,
@@ -111,7 +111,7 @@ void LED_Blue_Control(bool state) {
  * amplifiers read their pure offset without back-EMF contribution.
  */
 void start_curnt_cal() {
-    TUNE_HEART.driver_phy.motor_ctrl.set_voltage_ab_volts(Vec2D_f32(INFINITY, INFINITY));
+    TP.driver_phy.motor_ctrl.set_voltage_ab_volts(Vec2D_f32(INFINITY, INFINITY));
 }
 
 /**
@@ -123,7 +123,7 @@ void start_curnt_cal() {
  * releasing the drive into a defined static state.
  */
 void end_curnt_cal() {
-    TUNE_HEART.driver_phy.motor_ctrl.set_voltage_ab_volts(Vec2D_f32(NAN, NAN));
+    TP.driver_phy.motor_ctrl.set_voltage_ab_volts(Vec2D_f32(NAN, NAN));
 }
 
 /**
@@ -170,8 +170,8 @@ inline void tunepulse_init() {
     // bind the raw internal-flash operations of the CALIBRATION partition used
     // by the dump/persistence layer. The partition size comes from the NVM
     // layout defines (nvm_flash.h) so it stays flexible and single-sourced.
-    TUNE_HEART.calibration_dump.set_max_size(FlashG4_LL::calib_section_size());
-    TUNE_HEART.calibration_dump.set_callback()
+    TP.calibration_dump.set_max_size(FlashG4_LL::calib_section_size());
+    TP.calibration_dump.set_callback()
         .erase_cb(&FlashG4_LL::calibration_erase)
         .read_cb(&FlashG4_LL::calibration_read)
         .write_cb(&FlashG4_LL::calibration_write);
@@ -180,8 +180,8 @@ inline void tunepulse_init() {
     // a second independent FlashEEPROM instance bound to the USER-DATA
     // partition callbacks. All bounds/safety logic is handled inside the NVM
     // flash driver per-section, exactly like for the calibration partition.
-    TUNE_HEART.system_dump.set_max_size(FlashG4_LL::user_section_size());
-    TUNE_HEART.system_dump.set_callback()
+    TP.system_dump.set_max_size(FlashG4_LL::user_section_size());
+    TP.system_dump.set_callback()
         .erase_cb(&FlashG4_LL::user_erase)
         .read_cb(&FlashG4_LL::user_read)
         .write_cb(&FlashG4_LL::user_write);
@@ -191,8 +191,8 @@ inline void tunepulse_init() {
     // non-blocking (8 words / 32 bytes per system tick from TunePulseHeart::
     // tick()) and restores the NEWEST valid record with the matching Cal-ID,
     // printing the restored parameter set over serial when done.
-    TUNE_HEART.motor_params.attach_flash(&TUNE_HEART.system_dump);
-    TUNE_HEART.motor_params.begin_load();
+    TP.motor_params.attach_flash(&TP.system_dump);
+    TP.motor_params.begin_load();
 
     delay(100);
     IO_Init();  // Initialize GPIO pins
@@ -200,9 +200,9 @@ inline void tunepulse_init() {
     delay(100);
 
     // Register LED control callbacks in TunePulseHeart
-    TUNE_HEART.set_led_callback(0, LED_Red_Control);    // Register red LED callback (index 0)
-    TUNE_HEART.set_led_callback(1, LED_Green_Control);  // Register green LED callback (index 1)
-    TUNE_HEART.set_led_callback(2, LED_Blue_Control);   // Register blue LED callback (index 2)
+    TP.set_led_callback(0, LED_Red_Control);    // Register red LED callback (index 0)
+    TP.set_led_callback(1, LED_Green_Control);  // Register green LED callback (index 1)
+    TP.set_led_callback(2, LED_Blue_Control);   // Register blue LED callback (index 2)
 
     // Turn off all LEDs initially
     LED_Red_Control(false);    // Red LED OFF
@@ -235,48 +235,31 @@ inline void tunepulse_init() {
     CAN_BUS.enable_auto_retry(false);              // No auto-retry for testing
     CAN_BUS.enable_delay_compensation(true);
 
+    delay(100);
+
     // Enable transceiver
     CAN_BUS.enable();
-    SerialUSB.println("8.1. CAN_Driver_Init...");
-    SerialUSB.flush();
-    delay(100);
     CAN_Driver_Init();  // Initialize CAN-FD driver for CAN 2.0A at 1 Mbps
-    SerialUSB.println("   [OK] CAN initialized");
-    SerialUSB.flush();
+
     delay(100);
 
-    SerialUSB.println("9. Enable DRV8323H...");
-    SerialUSB.flush();
-    delay(100);
     LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_11);  // DRV_EN = 1
-    SerialUSB.println("   [OK] Driver enabled");
-    SerialUSB.flush();
+
     delay(100);
 
-    SerialUSB.println("5. COMP_Protection_Init...");
-    SerialUSB.flush();
-    delay(100);
     COMP_Protection_Init();  // Initialize overcurrent protection (DAC1/DAC3 + COMP1/COMP2/COMP3/COMP4)
-    SerialUSB.println("   [OK] Comparator initialized");
-    SerialUSB.flush();
+
     delay(100);
 
-    SerialUSB.println("10. Configure protection limits...");
-    SerialUSB.flush();
-    delay(100);
-
-    // Register DAC callbacks for hardware protection (must be done before setting limits)
-    SerialUSB.println("   Registering DAC callbacks...");
-    SerialUSB.flush();
-    TUNE_HEART.driver_phy.current.overcurrent.set_callback()
+    TP.driver_phy.current.overcurrent.set_callback()
         .oc_lim_ia_cb(DAC_Set_COMP2_OC_Threshold)
         .oc_lim_ib_cb(DAC_Set_COMP1_OC_Threshold)
         .oc_lim_ic_cb(DAC_Set_COMP4_OC_Threshold);
     // Hardware overcurrent thresholds (amps): phases A/B at 4.0 A, phase C at
-    // 6.2 A. 
-    TUNE_HEART.driver_phy.current.overcurrent.set_limit_amps().oc_ia(4.0).oc_ib(4.0).oc_ic(6.2);
-    TUNE_HEART.driver_phy.supply.overvoltage.set_lim_callback(DAC_Set_COMP3_OV_Threshold);
-    TUNE_HEART.driver_phy.supply.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(48.0);
+    // 6.2 A.
+    TP.driver_phy.current.overcurrent.set_limit_amps().oc_ia(4.0).oc_ib(4.0).oc_ic(6.2);
+    TP.driver_phy.supply.overvoltage.set_lim_callback(DAC_Set_COMP3_OV_Threshold);
+    TP.driver_phy.supply.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(48.0);
 
     // Thermal protection (Temperature, see temperature.h):
     // - OT (overtemperature) trip at 85 degC — forces FAULT_OVERHEAT (Hi-Z safe state)
@@ -285,43 +268,20 @@ inline void tunepulse_init() {
     // The integer EMA filter time constant is 4096 ticks (~205 ms at 20 kHz);
     // thresholds are precomputed into the raw ADC domain once, so tick() does
     // pure integer comparisons only.
-    TUNE_HEART.driver_phy.temperature.set_limit_celsius().ot_lim_celsius(85.0f).ot_hyst_celsius(10.0f);
-    TUNE_HEART.driver_phy.power.overpower.set_limit().op_lim_watts(60.0f).op_lim_amps(2.50f);
+    TP.driver_phy.temperature.set_limit_celsius().ot_lim_celsius(85.0f).ot_hyst_celsius(10.0f);
+    TP.driver_phy.power.overpower.set_limit().op_lim_watts(60.0f).op_lim_amps(2.50f);
     // Raw -> degC recalculation callback (STM32G4 factory calibration, adc_setup.h):
     // Temperature converts the filtered internal-sensor reading into real
     // degrees Celsius and compares the OT limits against that value. Installing
     // the callback re-inverts the configured thresholds through the calibration
     // curve, so the call order relative to set_limit_celsius() does not matter.
-    TUNE_HEART.driver_phy.temperature.set_do_conversion_cb(ADC_Temperature_To_Celsius);
+    TP.driver_phy.temperature.set_do_conversion_cb(ADC_Temperature_To_Celsius);
 
-    TUNE_HEART.driver_phy.current.on_calibration_start(start_curnt_cal);
-    TUNE_HEART.driver_phy.current.on_calibration_complete(end_curnt_cal);
+    TP.driver_phy.current.on_calibration_start(start_curnt_cal);
+    TP.driver_phy.current.on_calibration_complete(end_curnt_cal);
 
-    SerialUSB.println("   [OK] DAC callbacks registered");
-    SerialUSB.flush();
-
-    delay(100);
-
-    // Overvoltage protection limit was configured above via set_limit_volts()
-    // (UV 16.0 V / OV 48.0 V); the historical comment mentioning 53 V did not
-    // match the actually programmed value.
-    SerialUSB.println("   Setting overvoltage limit...");
-    SerialUSB.flush();
-
-    SerialUSB.println("   [OK] Overvoltage limit set");
-    SerialUSB.flush();
-
-    delay(100);
-
-    // NOTE: this log line historically reported "OC: 5A/7.5A, OV: 53V" which
-    // does not match the real configuration (OC: 4.0/4.0/6.2 A, UV: 16 V,
-    // OV: 48 V). Kept verbatim to preserve serial protocol compatibility.
-    SerialUSB.println("   [OK] Protection limits configured (OC: 5A/7.5A, OV: 53V)");
-    SerialUSB.flush();
-    delay(100);
-
-    TUNE_HEART.driver_phy.pwm.set_period(PWM_TIMER_PERIOD);
-    TUNE_HEART.driver_phy.set_fault()
+    TP.driver_phy.pwm.set_period(PWM_TIMER_PERIOD);
+    TP.driver_phy.set_fault()
         .set_callback()
         .oc_cb(PWM_Set_All_HiZ)
         .ov_cb(PWM_Set_All_Low)
@@ -329,20 +289,22 @@ inline void tunepulse_init() {
         .uv_cb(PWM_Set_All_HiZ)
         .ot_cb(PWM_Set_All_HiZ)   // Software overtemperature: same Hi-Z safe state as hardware faults
         .op_cb(PWM_Set_All_HiZ);  // Software overpower: Hi-Z safe state on power/current limit violation
-    TUNE_HEART.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
+    TP.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
+
+    delay(100);
 
     // Current-sense offset calibration:
     // start_curnt_cal() ties all phases to VBUS (all high-side ON) and
     // end_curnt_cal() ties them to GND (all low-side ON); in both states the
     // differential voltage is zero, so the ADC captures amplifier offsets only.
-    TUNE_HEART.driver_phy.current.calibrate();
+    TP.driver_phy.current.calibrate();
     SerialUSB.println("Start current calibration");
 
     // Blocking wait for completion. Completion is expected to be signalled
     // from the ADC/interrupt context; the periodic tick() call is disabled
     // here, so if no interrupt advances the calibration state machine this
     // loop will spin forever (see CODE_ISSUES.md).
-    while (TUNE_HEART.driver_phy.current.is_calibrated() == false) {
+    while (TP.driver_phy.current.is_calibrated() == false) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
     }
 
@@ -354,18 +316,15 @@ inline void tunepulse_init() {
     // loop until the status becomes Success or CalibError. As above, the
     // tick() call is commented out, so progress depends entirely on
     // interrupt-driven updates (see CODE_ISSUES.md).
-    TUNE_HEART.driver.setup_status.set_driver_status(OperationStatus::DriverCalibration);
-    TUNE_HEART.driver.start_motor_calibration();
-    while (TUNE_HEART.driver.get_motor_status() != MotorStatus::Success) {
+    TP.current_driver.setup_status.set_driver_status(OperationStatus::DriverCalibration);
+    TP.current_driver.start_motor_calibration();
+    while (TP.current_driver.get_motor_status() != MotorStatus::Success) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
-        if (TUNE_HEART.driver.get_motor_status() == MotorStatus::CalibError) {
+        if (TP.current_driver.get_motor_status() == MotorStatus::CalibError) {
             SerialUSB.println("Motor calibration Error");
             break;
         }
     }
-    SerialUSB.println("Going motion");
-
-    // TUNE_HEART.driver_phy.
 }
 
 #endif  // TUNEPULSE_H

@@ -1,20 +1,5 @@
 # Suggestions — Missing Functionality
 
-Features the codebase does not yet have. Ordered by impact on product readiness.
-
----
-
-## S1. Real temperature source (blocks the new thermal protection)
-
-`adc_setup.h` currently leaves `voltage_temp = 0` and `voltage_vref = 0`: the temperature channel
-is not sequenced, so the new `TemperaturePHY` receives a constant zero. Needed:
-
-1. Add the MCU internal temperature sensor (and VREFINT) to the ADC2 regular sequence
-   (rank 3), extend the DMA buffer to 3 words and update `ADC_get_values()`.
-2. Convert raw -> degC using factory calibration (`TS_CAL1/TS_CAL2` in system memory) or an NTC
-   beta-model for an external power-stage sensor.
-3. Optionally support an external NTC/PT100 on a spare channel for MOSFET temperature.
-
 ## S2. I2t winding thermal model
 
 `can_api.md` already specifies it: nominal power / peak power / I2t budget with winding resistance
@@ -83,17 +68,7 @@ OV protection currently shorts phases (low-side braking). Add support for a brak
 resistor output and/or bus-voltage-dependent regen current limiting so OV events don't force
 full stop on high-inertia loads.
 
-## S13. Runtime observability
 
-DWT cycle counter is enabled but unused. Expose: ISR cycle budget (min/max/avg), loop overrun
-counter, fault event log (timestamps + which fault), temperature/voltage history rings for
-telemetry. Cheap to add, invaluable in the field.
-
-## S14. Temperature protection enhancements
-
-Once S1 lands: configurable hysteresis (currently immediate release by design), optional
-derating curve between wt and ot (torque/current scale) instead of binary trip, and multi-sensor
-max/merge.
 
 ## S15. Multi-axis readiness
 

@@ -3,7 +3,7 @@
  * @brief NVIC configuration and ISR glue for CLN17 v3.
  *
  * NVIC_Init() assigns priorities; the ISR handlers bridge hardware events
- * (ADC end-of-conversion, comparators, timers) into the global TUNE_HEART
+ * (ADC end-of-conversion, comparators, timers) into the global TP
  * object.
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
@@ -23,11 +23,11 @@
 #include "spi_setup.h"        // Include SPI communication setup for the encoder
 #include "timer_pwm_setup.h"  // Include PWM timer hardware definitions and functions
 
-// OPTIMIZATION (P2.5): cache &TUNE_HEART.driver_phy once instead of walking
+// OPTIMIZATION (P2.5): cache &TP.driver_phy once instead of walking
 // the global object member chain on every sample. The address is fixed at
 // link time; the first ISR call binds it, afterwards only a register load remains.
 inline DriverPWM* heart_driver_phy() {
-    static DriverPWM* phy = &TUNE_HEART.driver_phy;
+    static DriverPWM* phy = &TP.driver_phy;
     return phy;
 }
 
@@ -67,8 +67,8 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
 }  // End of ADC_READY_Callback function
 
 inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA completion
-    TUNE_HEART.encoder.set_raw_position(Encoder_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
-    TUNE_HEART.tick();
+    TP.encoder.set_raw_position(Encoder_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
+    TP.tick();
 
 }  // End of POSITION_Callback function
 
@@ -91,7 +91,7 @@ inline void FOC_TimTrig_Callback() {  // Define custom inline callback for the t
 
     Encoder_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading
 
-    TUNE_HEART.driver_phy.tick_icr();  // Request new duty cycles from FOC core and write them to hardware registers
+    TP.driver_phy.tick_icr();  // Request new duty cycles from FOC core and write them to hardware registers
 }  // End of FOC_TimTrig_Callback function
 
 #endif  // NVIC_CLN17V3_H // Final close of the header include guard

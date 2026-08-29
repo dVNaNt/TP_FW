@@ -15,3 +15,4 @@ private/
 .idea/vcs.xml
 
 .kiro/
+compile_commands.json

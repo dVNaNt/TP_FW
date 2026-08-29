@@ -56,152 +56,19 @@ struct DriverPWM;
  * coefficient.
  */
 struct Power {
-    friend struct DriverPWM;
-
 private:
+    friend struct DriverPWM;
+    friend struct MotorControl;
     // --- Configuration ---
-    uint8_t filter_alpha_ = 64;          ///< EMA coefficient 0..255 (255 = no filtering)
+    float filter_alpha_ = 64.0f / 255.0f;  ///< EMA coefficient 0..1 (1 = no filtering)
 
     // --- State ---
-    Vec2D_f32 cmd_v_ = {0.0f, 0.0f};     ///< Last commanded alpha-beta voltages [V] (setter-injected)
-    float raw_power_w_ = 0.0f;           ///< Instantaneous electrical power [W] (signed, unfiltered)
-    float filt_power_w_ = 0.0f;          ///< EMA-filtered power [W] (signed)
-    float filt_current_a_ = 0.0f;        ///< Derived input current: filt_power / filt_voltage [A]
-    float filt_voltage_v_ = 0.0f;        ///< Cached filtered supply voltage [V]
-    float power_coeff_ = 0.0f;           ///< Signed share of the total available power [-1..+1] (+ motor / - regen)
-
-public:
-    Power() = default;
-
-    // =======================================================================
-    // OVERPOWER PROTECTION PROXY SUB-CLASS
-    // =======================================================================
-
-    /**
-     * @struct OverpowerProxy
-     * @brief Atomic recovery-timer latch for the overpower fault.
-     *
-     * Mirrors the OC/OV/UV recovery-timer pattern: trigger() reloads the
-     * timer, tick_timer() decrements it once per control cycle, and the
-     * fault auto-clears when it reaches zero.
-     *
-     * @note trigger() and reset() are private — only Power::tick() and
-     *       DriverPWM may invoke them, never user code.
-     */
-    struct OverpowerProxy {
-        friend struct Power;
-        friend struct DriverPWM;
-        friend struct FaultTriggerProxy;  ///< Fluent fault API (driver_pwm_detail.h)
-
-    private:
-        std::atomic<int32_t> op_error_cycles_{0};  ///< Active recovery timer (0 = no error)
-        std::atomic<int32_t> op_error_timeout_cycles_{kDefaultRecoveryCycles};  ///< Timeout loaded on trigger() [ticks]
-        float lim_power_w_ = 100.0f;               ///< Symmetric power limit magnitude [W] (trip at +/-)
-        float lim_current_a_ = 15.0f;              ///< Symmetric input-current limit magnitude [A] (trip at +/-)
-
-        /**
-         * @brief Decrement the recovery timer atomically.
-         *
-         * Uses compare_exchange to avoid losing a concurrent trigger() call.
-         *
-         * @return true if the timer was > 0 before the decrement (fault still active)
-         */
-        bool tick_timer() {
-            int32_t op_err = op_error_cycles_.load(std::memory_order_relaxed);
-            if (op_err > 0) {
-                op_error_cycles_.compare_exchange_strong(op_err, op_err - 1, std::memory_order_relaxed);
-                return true;
-            }
-            return false;
-        }
-
-        // --- Private: only Power and DriverPWM may invoke ---
-
-        /**
-         * @brief Trigger overpower protection — restart the recovery timer.
-         *
-         * Atomically loads the configured timeout into the active timer.
-         * Safe to call from interrupt context.
-         */
-        inline void trigger() {
-            op_error_cycles_.store(op_error_timeout_cycles_.load(std::memory_order_relaxed),
-                                   std::memory_order_relaxed);
-        }
-
-        /**
-         * @brief Immediately reset the error (clear timer to 0).
-         *
-         * Does NOT call any callbacks — only clears internal state.
-         */
-        inline void reset() { op_error_cycles_.store(0, std::memory_order_relaxed); }
-
-    public:
-        /**
-         * @brief Check if the overpower fault is currently active.
-         * @return true if the recovery timer is still counting down
-         */
-        inline bool is_active() const { return op_error_cycles_.load(std::memory_order_relaxed) > 0; }
-
-        /**
-         * @brief Set the recovery timeout in tick cycles.
-         *
-         * When trigger() is called, the recovery timer is loaded with this
-         * value and decrements on each tick_timer() call. When it reaches 0,
-         * the fault auto-clears (provided the signal is within limits again).
-         *
-         * @param cycles Number of ticks before the fault auto-clears
-         */
-        inline void set_timeout_cycles(int32_t cycles) {
-            op_error_timeout_cycles_.store(cycles, std::memory_order_relaxed);
-        }
-
-        /**
-         * @brief Chainable limit setter for the symmetric OP thresholds.
-         *
-         * Usage:
-         * @code
-         *   driver.power.overpower.set_limit().op_lim_watts(60.0f).op_lim_amps(8.0f);
-         * @endcode
-         *
-         * Limits are signed-symmetric: the applied magnitude is enforced both
-         * in the + (motoring) and - (regeneration) directions.
-         */
-        struct LimitProxy {
-            OverpowerProxy& proxy;  ///< Reference to the owning OverpowerProxy
-
-            /**
-             * @brief Construct a LimitProxy bound to an OverpowerProxy.
-             * @param p Reference to the owning OverpowerProxy
-             */
-            explicit LimitProxy(OverpowerProxy& p) : proxy(p) {}
-
-            /**
-             * @brief Set the symmetric max-input-power limit.
-             * @param limit_watts Power limit in watts (sign ignored; applied to +/-)
-             * @return Reference to this setter for chaining
-             */
-            inline LimitProxy& op_lim_watts(float limit_watts) {
-                proxy.lim_power_w_ = std::fabs(limit_watts);  // Store magnitude for symmetric enforcement
-                return *this;
-            }
-
-            /**
-             * @brief Set the symmetric max-input-current limit.
-             * @param limit_amps Current limit in amperes (sign ignored; applied to +/-)
-             * @return Reference to this setter for chaining
-             */
-            inline LimitProxy& op_lim_amps(float limit_amps) {
-                proxy.lim_current_a_ = std::fabs(limit_amps);  // Store magnitude for symmetric enforcement
-                return *this;
-            }
-        };
-
-        /**
-         * @brief Begin a limit configuration chain.
-         * @return LimitProxy bound to this OverpowerProxy
-         */
-        inline LimitProxy set_limit() { return LimitProxy(*this); }
-    } overpower;  ///< Public proxy instance: OP limits, recovery timer, status
+    Vec2D_f32 cmd_v_ = {0.0f, 0.0f};  ///< Last commanded alpha-beta voltages [V] (setter-injected)
+    float raw_power_w_ = 0.0f;        ///< Instantaneous electrical power [W] (signed, unfiltered)
+    float filt_power_w_ = 0.0f;       ///< EMA-filtered power [W] (signed)
+    float filt_current_a_ = 0.0f;     ///< Derived input current: filt_power / filt_voltage [A]
+    float filt_voltage_v_ = 0.0f;     ///< Cached filtered supply voltage [V]
+    float power_coeff_ = 0.0f;        ///< Signed share of the total available power [-1..+1] (+ motor / - regen)
 
     // =======================================================================
     // PROCESSING
@@ -280,7 +147,7 @@ public:
         raw_power_w_ = cmd_v_.a * current_ab.a + cmd_v_.b * current_ab.b;
 
         // First-order EMA low-pass: y += alpha*(x - y), alpha in [0..1]
-        filt_power_w_ += ((float)filter_alpha_ * (1.0f / 255.0f)) * (raw_power_w_ - filt_power_w_);
+        filt_power_w_ += filter_alpha_ * (raw_power_w_ - filt_power_w_);
 
         // Derived input current from FILTERED power and FILTERED voltage.
         // Guard against division by a near-zero/degenerate bus voltage.
@@ -310,6 +177,137 @@ public:
         }
     }
 
+public:
+    Power() = default;
+
+    // =======================================================================
+    // OVERPOWER PROTECTION PROXY SUB-CLASS
+    // =======================================================================
+
+    /**
+     * @struct OverpowerProxy
+     * @brief Atomic recovery-timer latch for the overpower fault.
+     *
+     * Mirrors the OC/OV/UV recovery-timer pattern: trigger() reloads the
+     * timer, tick_timer() decrements it once per control cycle, and the
+     * fault auto-clears when it reaches zero.
+     *
+     * @note trigger() and reset() are private — only Power::tick() and
+     *       DriverPWM may invoke them, never user code.
+     */
+    struct OverpowerProxy {
+        friend struct Power;
+        friend struct DriverPWM;
+        friend struct FaultTriggerProxy;  ///< Fluent fault API (driver_pwm_detail.h)
+
+    private:
+        std::atomic<int32_t> op_error_cycles_{0};                               ///< Active recovery timer (0 = no error)
+        std::atomic<int32_t> op_error_timeout_cycles_{kDefaultRecoveryCycles};  ///< Timeout loaded on trigger() [ticks]
+        float lim_power_w_ = 100.0f;   ///< Symmetric power limit magnitude [W] (trip at +/-)
+        float lim_current_a_ = 15.0f;  ///< Symmetric input-current limit magnitude [A] (trip at +/-)
+
+        /**
+         * @brief Decrement the recovery timer atomically.
+         *
+         * Uses compare_exchange to avoid losing a concurrent trigger() call.
+         *
+         * @return true if the timer was > 0 before the decrement (fault still active)
+         */
+        bool tick_timer() {
+            int32_t op_err = op_error_cycles_.load(std::memory_order_relaxed);
+            if (op_err > 0) {
+                op_error_cycles_.compare_exchange_strong(op_err, op_err - 1, std::memory_order_relaxed);
+                return true;
+            }
+            return false;
+        }
+
+        // --- Private: only Power and DriverPWM may invoke ---
+
+        /**
+         * @brief Trigger overpower protection — restart the recovery timer.
+         *
+         * Atomically loads the configured timeout into the active timer.
+         * Safe to call from interrupt context.
+         */
+        inline void trigger() {
+            op_error_cycles_.store(op_error_timeout_cycles_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+
+        /**
+         * @brief Immediately reset the error (clear timer to 0).
+         *
+         * Does NOT call any callbacks — only clears internal state.
+         */
+        inline void reset() { op_error_cycles_.store(0, std::memory_order_relaxed); }
+
+    public:
+        /**
+         * @brief Check if the overpower fault is currently active.
+         * @return true if the recovery timer is still counting down
+         */
+        inline bool is_active() const { return op_error_cycles_.load(std::memory_order_relaxed) > 0; }
+
+        /**
+         * @brief Set the recovery timeout in tick cycles.
+         *
+         * When trigger() is called, the recovery timer is loaded with this
+         * value and decrements on each tick_timer() call. When it reaches 0,
+         * the fault auto-clears (provided the signal is within limits again).
+         *
+         * @param cycles Number of ticks before the fault auto-clears
+         */
+        inline void set_timeout_cycles(int32_t cycles) { op_error_timeout_cycles_.store(cycles, std::memory_order_relaxed); }
+
+        /**
+         * @brief Chainable limit setter for the symmetric OP thresholds.
+         *
+         * Usage:
+         * @code
+         *   driver.power.overpower.set_limit().op_lim_watts(60.0f).op_lim_amps(8.0f);
+         * @endcode
+         *
+         * Limits are signed-symmetric: the applied magnitude is enforced both
+         * in the + (motoring) and - (regeneration) directions.
+         */
+        struct LimitProxy {
+        private:
+            OverpowerProxy& proxy;  ///< Reference to the owning OverpowerProxy
+        public:
+            /**
+             * @brief Construct a LimitProxy bound to an OverpowerProxy.
+             * @param p Reference to the owning OverpowerProxy
+             */
+            explicit LimitProxy(OverpowerProxy& p) : proxy(p) {}
+
+            /**
+             * @brief Set the symmetric max-input-power limit.
+             * @param limit_watts Power limit in watts (sign ignored; applied to +/-)
+             * @return Reference to this setter for chaining
+             */
+            inline LimitProxy& op_lim_watts(float limit_watts) {
+                proxy.lim_power_w_ = std::fabs(limit_watts);  // Store magnitude for symmetric enforcement
+                return *this;
+            }
+
+            /**
+             * @brief Set the symmetric max-input-current limit.
+             * @param limit_amps Current limit in amperes (sign ignored; applied to +/-)
+             * @return Reference to this setter for chaining
+             */
+            inline LimitProxy& op_lim_amps(float limit_amps) {
+                proxy.lim_current_a_ = std::fabs(limit_amps);  // Store magnitude for symmetric enforcement
+                return *this;
+            }
+        };
+
+        /**
+         * @brief Begin a limit configuration chain.
+         * @return LimitProxy bound to this OverpowerProxy
+         */
+        inline LimitProxy set_limit() { return LimitProxy(*this); }
+    } overpower;  ///< Public proxy instance: OP limits, recovery timer, status
+
     // =======================================================================
     // GETTERS (raw and filtered outputs run in parallel)
     // =======================================================================
@@ -330,7 +328,7 @@ public:
      * @brief Derived input current from filtered power and filtered voltage.
      * @return Input current estimate [A], signed
      */
-    inline float get_input_current_a() const { return filt_current_a_; }
+    inline float get_supply_current_usage_a() const { return filt_current_a_; }
 
     /**
      * @brief Signed power coefficient — share of the TOTAL available input
@@ -360,9 +358,9 @@ public:
 
     /**
      * @brief Set the EMA filter coefficient.
-     * @param alpha Filter coefficient 0..255 (255 = no filtering, 0 = frozen)
+     * @param alpha Filter coefficient 0..1 (1 = no filtering, 0 = frozen)
      */
-    inline void set_filter_alpha(uint8_t alpha) { filter_alpha_ = alpha; }
+    inline void set_filter_alpha(float alpha) { filter_alpha_ = alpha; }
 
     // OP limits are configured through the overpower proxy:
     //   driver.power.overpower.set_limit().op_lim_watts(W).op_lim_amps(A)

@@ -109,9 +109,9 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var3]
-name = TUNE_HEART.angle_calibrator.calibration_stage
-tracked_name = TUNE_HEART.angle_calibrator.calibration_stage
-address = 536877500
+name = TP.angle_calibrator.calibration_stage
+tracked_name = TP.angle_calibrator.calibration_stage
+address = 536877592
 type = 1
 color = 313589279
 should_update_from_elf = true
@@ -126,28 +126,28 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var4]
-name = TUNE_HEART.current_target_a
-tracked_name = TUNE_HEART.current_target_a
-address = 536877648
-type = 7
-color = 3012792362
+name = TP.current_driver.angular_speed
+tracked_name = TP.current_driver.angular_speed
+address = 536877532
+type = 4
+color = 623715398
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 1.000000
-secondary_value_to_write = 0.250000
+value_to_write = 0.000000
+secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var5]
-name = TUNE_HEART.driver.angle_
-tracked_name = TUNE_HEART.driver.angle_
-address = 536877400
-type = 4
-color = 2141708102
+name = TP.current_driver.current_dq.d
+tracked_name = TP.current_driver.current_dq.d
+address = 536877492
+type = 7
+color = 2583731476
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -160,11 +160,11 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var6]
-name = TUNE_HEART.driver.current_ab.cos
-tracked_name = TUNE_HEART.driver.current_ab.cos
-address = 536877420
+name = TP.current_driver.current_dq.q
+tracked_name = TP.current_driver.current_dq.q
+address = 536877496
 type = 7
-color = 3996911876
+color = 1476395224
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -177,50 +177,50 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var7]
-name = TUNE_HEART.driver.current_ab.sin
-tracked_name = TUNE_HEART.driver.current_ab.sin
-address = 536877424
+name = TP.current_driver.fc_pll
+tracked_name = TP.current_driver.fc_pll
+address = 536877536
 type = 7
-color = 3019702206
+color = 185458968
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.000000
-secondary_value_to_write = 0.000000
+value_to_write = 10.000000
+secondary_value_to_write = 100.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var8]
-name = TUNE_HEART.driver.current_dq.cos
-tracked_name = TUNE_HEART.driver.current_dq.cos
-address = 536877412
+name = TP.current_driver.foc_current_.L
+tracked_name = TP.current_driver.foc_current_.L
+address = 536877116
 type = 7
-color = 491470293
+color = 1217903260
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.000000
-secondary_value_to_write = 0.000000
+value_to_write = 0.005000
+secondary_value_to_write = 0.005000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var9]
-name = TUNE_HEART.driver.current_dq.sin
-tracked_name = TUNE_HEART.driver.current_dq.sin
-address = 536877416
+name = TP.current_driver.foc_current_.R
+tracked_name = TP.current_driver.foc_current_.R
+address = 536877112
 type = 7
-color = 4190077760
+color = 495444407
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.000000
+value_to_write = 2.500000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -228,45 +228,11 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var10]
-name = TUNE_HEART.driver.foc_current_.R
-tracked_name = TUNE_HEART.driver.foc_current_.R
-address = 536877112
+name = TP.current_driver.foc_current_.bemf_omega_deadband
+tracked_name = TP.current_driver.foc_current_.bemf_omega_deadband
+address = 536877264
 type = 7
-color = 129014720
-should_update_from_elf = true
-shift = 0
-mask = 4294967295
-high_level_type = 0
-value_to_write = 0.000000
-secondary_value_to_write = 0.000000
-do_not_interpret_as_enum = false
-write_limits_enabled = false
-write_limit_min = -1.000000
-write_limit_max = 1.000000
-
-[var11]
-name = TUNE_HEART.driver.foc_current_.brake_filter_alpha
-tracked_name = TUNE_HEART.driver.foc_current_.brake_filter_alpha
-address = 536877208
-type = 7
-color = 3402093085
-should_update_from_elf = true
-shift = 0
-mask = 4294967295
-high_level_type = 0
-value_to_write = 0.000000
-secondary_value_to_write = 0.000000
-do_not_interpret_as_enum = false
-write_limits_enabled = false
-write_limit_min = -1.000000
-write_limit_max = 1.000000
-
-[var12]
-name = TUNE_HEART.driver.foc_current_.bw_max_hz
-tracked_name = TUNE_HEART.driver.foc_current_.bw_max_hz
-address = 536877132
-type = 7
-color = 3161063239
+color = 1152564622
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -278,29 +244,29 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var13]
-name = TUNE_HEART.driver.foc_current_.bw_min_hz
-tracked_name = TUNE_HEART.driver.foc_current_.bw_min_hz
-address = 536877128
+[var11]
+name = TP.current_driver.foc_current_.bemf_omega_soft_range
+tracked_name = TP.current_driver.foc_current_.bemf_omega_soft_range
+address = 536877268
 type = 7
-color = 1990415049
+color = 1557941593
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 5.000000
+value_to_write = 20.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var14]
-name = TUNE_HEART.driver.foc_current_.cmd_q_a
-tracked_name = TUNE_HEART.driver.foc_current_.cmd_q_a
-address = 536877200
+[var12]
+name = TP.current_driver.foc_current_.brake_filter_alpha
+tracked_name = TP.current_driver.foc_current_.brake_filter_alpha
+address = 536877208
 type = 7
-color = 1309000482
+color = 2192297527
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -312,12 +278,46 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var15]
-name = TUNE_HEART.driver.foc_current_.integrator_d
-tracked_name = TUNE_HEART.driver.foc_current_.integrator_d
-address = 536877152
+[var13]
+name = TP.current_driver.foc_current_.brake_id_max_a
+tracked_name = TP.current_driver.foc_current_.brake_id_max_a
+address = 536877192
 type = 7
-color = 1885559039
+color = 1696831129
+should_update_from_elf = true
+shift = 0
+mask = 4294967295
+high_level_type = 0
+value_to_write = 0.000000
+secondary_value_to_write = 0.000000
+do_not_interpret_as_enum = false
+write_limits_enabled = false
+write_limit_min = -1.000000
+write_limit_max = 1.000000
+
+[var14]
+name = TP.current_driver.foc_current_.brake_pwr_threshold
+tracked_name = TP.current_driver.foc_current_.brake_pwr_threshold
+address = 536877188
+type = 7
+color = 2352213016
+should_update_from_elf = true
+shift = 0
+mask = 4294967295
+high_level_type = 0
+value_to_write = 1.000000
+secondary_value_to_write = 0.000000
+do_not_interpret_as_enum = false
+write_limits_enabled = false
+write_limit_min = -1.000000
+write_limit_max = 1.000000
+
+[var15]
+name = TP.current_driver.foc_current_.brake_speed_scale
+tracked_name = TP.current_driver.foc_current_.brake_speed_scale
+address = 536877220
+type = 7
+color = 2202823317
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -330,11 +330,11 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var16]
-name = TUNE_HEART.driver.foc_current_.integrator_q
-tracked_name = TUNE_HEART.driver.foc_current_.integrator_q
-address = 536877156
+name = TP.current_driver.foc_current_.brake_voltage_range
+tracked_name = TP.current_driver.foc_current_.brake_voltage_range
+address = 536877216
 type = 7
-color = 423405269
+color = 1209638977
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -347,16 +347,16 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var17]
-name = TUNE_HEART.driver.foc_current_.ki
-tracked_name = TUNE_HEART.driver.foc_current_.ki
-address = 536877144
+name = TP.current_driver.foc_current_.brake_voltage_threshold
+tracked_name = TP.current_driver.foc_current_.brake_voltage_threshold
+address = 536877212
 type = 7
-color = 710634549
+color = 3266112105
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 2000.000000
+value_to_write = 0.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -364,16 +364,16 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var18]
-name = TUNE_HEART.driver.foc_current_.kp
-tracked_name = TUNE_HEART.driver.foc_current_.kp
-address = 536877140
+name = TP.current_driver.foc_current_.bw_max_hz
+tracked_name = TP.current_driver.foc_current_.bw_max_hz
+address = 536877132
 type = 7
-color = 2839841265
+color = 57167948
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 25.000000
+value_to_write = 200.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -381,16 +381,16 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var19]
-name = TUNE_HEART.driver.foc_current_.max_current_slew_rate_a_s
-tracked_name = TUNE_HEART.driver.foc_current_.max_current_slew_rate_a_s
-address = 536877232
+name = TP.current_driver.foc_current_.bw_min_hz
+tracked_name = TP.current_driver.foc_current_.bw_min_hz
+address = 536877128
 type = 7
-color = 3603106607
+color = 1672791673
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 1000.000000
+value_to_write = 150.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -398,28 +398,28 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var20]
-name = TUNE_HEART.driver.foc_current_.peak_loss_pwr
-tracked_name = TUNE_HEART.driver.foc_current_.peak_loss_pwr
-address = 536877196
+name = TP.current_driver.foc_current_.bw_slope_hz_per_rads
+tracked_name = TP.current_driver.foc_current_.bw_slope_hz_per_rads
+address = 536877136
 type = 7
-color = 2035801204
+color = 1070982367
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 10.000000
-secondary_value_to_write = 0.000000
+value_to_write = 0.500000
+secondary_value_to_write = 1.590000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var21]
-name = TUNE_HEART.driver.foc_current_.pwr_el
-tracked_name = TUNE_HEART.driver.foc_current_.pwr_el
-address = 536877176
+name = TP.current_driver.foc_current_.current_bw
+tracked_name = TP.current_driver.foc_current_.current_bw
+address = 536877236
 type = 7
-color = 4177592128
+color = 3328827750
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -432,11 +432,11 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var22]
-name = TUNE_HEART.driver.foc_current_.pwr_loss
-tracked_name = TUNE_HEART.driver.foc_current_.pwr_loss
-address = 536877180
+name = TP.current_driver.foc_current_.flux_linkage_wb
+tracked_name = TP.current_driver.foc_current_.flux_linkage_wb
+address = 536877256
 type = 7
-color = 1032073113
+color = 57721421
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -449,11 +449,11 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var23]
-name = TUNE_HEART.driver.foc_current_.pwr_mech
-tracked_name = TUNE_HEART.driver.foc_current_.pwr_mech
-address = 536877184
+name = TP.current_driver.foc_current_.integrator_d
+tracked_name = TP.current_driver.foc_current_.integrator_d
+address = 536877152
 type = 7
-color = 1274840588
+color = 1993182694
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -466,11 +466,11 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var24]
-name = TUNE_HEART.driver.foc_current_.target_id_
-tracked_name = TUNE_HEART.driver.foc_current_.target_id_
-address = 536877224
+name = TP.current_driver.foc_current_.integrator_q
+tracked_name = TP.current_driver.foc_current_.integrator_q
+address = 536877156
 type = 7
-color = 1610350336
+color = 2669112263
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -483,16 +483,16 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var25]
-name = TUNE_HEART.driver.foc_current_.target_iq_
-tracked_name = TUNE_HEART.driver.foc_current_.target_iq_
-address = 536877228
+name = TP.current_driver.foc_current_.k_bemf
+tracked_name = TP.current_driver.foc_current_.k_bemf
+address = 536877260
 type = 7
-color = 771752191
+color = 1836297156
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.000000
+value_to_write = 0.800000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -500,33 +500,33 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var26]
-name = TUNE_HEART.driver.lpf_id_.output_
-tracked_name = TUNE_HEART.driver.lpf_id_.output_
-address = 536877068
+name = TP.current_driver.foc_current_.k_cc
+tracked_name = TP.current_driver.foc_current_.k_cc
+address = 536877240
 type = 7
-color = 4127192320
+color = 923980975
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
 value_to_write = 0.000000
-secondary_value_to_write = 0.000000
+secondary_value_to_write = 1.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var27]
-name = TUNE_HEART.driver.lpf_iq_.output_
-tracked_name = TUNE_HEART.driver.lpf_iq_.output_
-address = 536877080
+name = TP.current_driver.foc_current_.k_l
+tracked_name = TP.current_driver.foc_current_.k_l
+address = 536877248
 type = 7
-color = 1932329215
+color = 3200544335
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.000000
+value_to_write = 1.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -534,16 +534,16 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var28]
-name = TUNE_HEART.driver.motor_calib.measure_current_a_sum_
-tracked_name = TUNE_HEART.driver.motor_calib.measure_current_a_sum_
-address = 536876676
+name = TP.current_driver.foc_current_.k_r
+tracked_name = TP.current_driver.foc_current_.k_r
+address = 536877244
 type = 7
-color = 798039757
+color = 3034951868
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.000000
+value_to_write = 1.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -551,32 +551,32 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var29]
-name = TUNE_HEART.driver.motor_calib.voltage_
-tracked_name = TUNE_HEART.driver.motor_calib.voltage_
-address = 536876584
-type = 4
-color = 2391215418
+name = TP.current_driver.foc_current_.l_ff
+tracked_name = TP.current_driver.foc_current_.l_ff
+address = 536877252
+type = 7
+color = 332644087
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 4000.000000
-secondary_value_to_write = 0.000000
+value_to_write = 0.000000
+secondary_value_to_write = 1.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var30]
-name = TUNE_HEART.driver.motor_calib_status
-tracked_name = TUNE_HEART.driver.motor_calib_status
-address = 536877053
-type = 2
-color = 3515068321
+name = TP.current_driver.foc_current_.max_current_slew_rate_a_s
+tracked_name = TP.current_driver.foc_current_.max_current_slew_rate_a_s
+address = 536877232
+type = 7
+color = 2138787216
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
-high_level_type = 3
+high_level_type = 0
 value_to_write = 0.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
@@ -585,11 +585,11 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var31]
-name = TUNE_HEART.driver.power
-tracked_name = TUNE_HEART.driver.power
-address = 536877408
+name = TP.current_driver.foc_current_.ubemf
+tracked_name = TP.current_driver.foc_current_.ubemf
+address = 536877272
 type = 7
-color = 2871952208
+color = 2265655651
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -602,15 +602,15 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var32]
-name = TUNE_HEART.driver.setup_status
-tracked_name = TUNE_HEART.driver.setup_status
-address = 536877052
-type = 0
-color = 3360713545
+name = TP.current_driver.pll_.omega_
+tracked_name = TP.current_driver.pll_.omega_
+address = 536877304
+type = 7
+color = 1524077721
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
-high_level_type = 3
+high_level_type = 0
 value_to_write = 0.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
@@ -619,16 +619,16 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var33]
-name = TUNE_HEART.driver.voltage_ab_.sin
-tracked_name = TUNE_HEART.driver.voltage_ab_.sin
-address = 536877432
+name = TP.current_target_a
+tracked_name = TP.current_target_a
+address = 536877736
 type = 7
-color = 1277999086
+color = 3012792362
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.000000
+value_to_write = 1.500000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -636,43 +636,9 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var34]
-name = TUNE_HEART.driver.voltage_dq_.cos
-tracked_name = TUNE_HEART.driver.voltage_dq_.cos
-address = 536877436
-type = 7
-color = 914554639
-should_update_from_elf = true
-shift = 0
-mask = 4294967295
-high_level_type = 0
-value_to_write = 0.000000
-secondary_value_to_write = 0.000000
-do_not_interpret_as_enum = false
-write_limits_enabled = false
-write_limit_min = -1.000000
-write_limit_max = 1.000000
-
-[var35]
-name = TUNE_HEART.driver.voltage_dq_.sin
-tracked_name = TUNE_HEART.driver.voltage_dq_.sin
-address = 536877440
-type = 7
-color = 2193182007
-should_update_from_elf = true
-shift = 0
-mask = 4294967295
-high_level_type = 0
-value_to_write = 0.000000
-secondary_value_to_write = 0.000000
-do_not_interpret_as_enum = false
-write_limits_enabled = false
-write_limit_min = -1.000000
-write_limit_max = 1.000000
-
-[var36]
-name = TUNE_HEART.driver_phy.power.power_coeff_
-tracked_name = TUNE_HEART.driver_phy.power.power_coeff_
-address = 536878068
+name = TP.driver_phy.power.power_coeff_
+tracked_name = TP.driver_phy.power.power_coeff_
+address = 536878156
 type = 7
 color = 1423678147
 should_update_from_elf = true
@@ -686,27 +652,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var37]
-name = TUNE_HEART.driver_phy.power.usage_
-tracked_name = TUNE_HEART.driver_phy.power.usage_
-address = 536878068
-type = 7
-color = 3047517477
-should_update_from_elf = true
-shift = 0
-mask = 4294967295
-high_level_type = 0
-value_to_write = 0.000000
-secondary_value_to_write = 0.000000
-do_not_interpret_as_enum = false
-write_limits_enabled = false
-write_limit_min = -1.000000
-write_limit_max = 1.000000
-
-[var38]
-name = TUNE_HEART.driver_phy.pwm_apply_[0]
-tracked_name = TUNE_HEART.driver_phy.pwm_apply_[0]
-address = 536877670
+[var35]
+name = TP.driver_phy.pwm_apply_[0]
+tracked_name = TP.driver_phy.pwm_apply_[0]
+address = 536877758
 type = 4
 color = 2108855425
 should_update_from_elf = true
@@ -720,10 +669,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var39]
-name = TUNE_HEART.driver_phy.pwm_apply_[1]
-tracked_name = TUNE_HEART.driver_phy.pwm_apply_[1]
-address = 536877672
+[var36]
+name = TP.driver_phy.pwm_apply_[1]
+tracked_name = TP.driver_phy.pwm_apply_[1]
+address = 536877760
 type = 4
 color = 2127234693
 should_update_from_elf = true
@@ -737,10 +686,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var40]
-name = TUNE_HEART.driver_phy.pwm_apply_[2]
-tracked_name = TUNE_HEART.driver_phy.pwm_apply_[2]
-address = 536877674
+[var37]
+name = TP.driver_phy.pwm_apply_[2]
+tracked_name = TP.driver_phy.pwm_apply_[2]
+address = 536877762
 type = 4
 color = 754205966
 should_update_from_elf = true
@@ -754,27 +703,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var41]
-name = TUNE_HEART.driver_phy.supply_voltage.voltage_v_
-tracked_name = TUNE_HEART.driver_phy.supply_voltage.voltage_v_
-address = 536877952
-type = 7
-color = 3746578878
-should_update_from_elf = true
-shift = 0
-mask = 4294967295
-high_level_type = 0
-value_to_write = 0.000000
-secondary_value_to_write = 0.000000
-do_not_interpret_as_enum = false
-write_limits_enabled = false
-write_limit_min = -1.000000
-write_limit_max = 1.000000
-
-[var42]
-name = TUNE_HEART.el_sign
-tracked_name = TUNE_HEART.el_sign
-address = 536878112
+[var38]
+name = TP.el_sign
+tracked_name = TP.el_sign
+address = 536878200
 type = 6
 color = 4196148733
 should_update_from_elf = true
@@ -788,10 +720,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var43]
-name = TUNE_HEART.encoder.position_.parts.angle
-tracked_name = TUNE_HEART.encoder.position_.parts.angle
-address = 536878096
+[var39]
+name = TP.encoder.position_.parts.angle
+tracked_name = TP.encoder.position_.parts.angle
+address = 536878184
 type = 5
 color = 1363756254
 should_update_from_elf = true
@@ -805,10 +737,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var44]
-name = TUNE_HEART.encoder_pos
-tracked_name = TUNE_HEART.encoder_pos
-address = 536878120
+[var40]
+name = TP.encoder_pos
+tracked_name = TP.encoder_pos
+address = 536878208
 type = 6
 color = 1166385737
 should_update_from_elf = true
@@ -822,10 +754,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var45]
-name = TUNE_HEART.err_sign
-tracked_name = TUNE_HEART.err_sign
-address = 536878116
+[var41]
+name = TP.err_sign
+tracked_name = TP.err_sign
+address = 536878204
 type = 6
 color = 3806597
 should_update_from_elf = true
@@ -839,12 +771,12 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var46]
-name = TUNE_HEART.is_pos_ctrl_used
-tracked_name = TUNE_HEART.is_pos_ctrl_used
-address = 536877800
+[var42]
+name = TP.is_pos_used
+tracked_name = TP.is_pos_used
+address = 536878216
 type = 1
-color = 1136197289
+color = 3126347378
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
@@ -856,9 +788,9 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var47]
-name = TUNE_HEART.motor_params.motor_type_
-tracked_name = TUNE_HEART.motor_params.motor_type_
+[var43]
+name = TP.motor_params.motor_type_
+tracked_name = TP.motor_params.motor_type_
 address = 536876364
 type = 2
 color = 2050525292
@@ -873,9 +805,9 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var48]
-name = TUNE_HEART.motor_params.phase_pattern_
-tracked_name = TUNE_HEART.motor_params.phase_pattern_
+[var44]
+name = TP.motor_params.phase_pattern_
+tracked_name = TP.motor_params.phase_pattern_
 address = 536876366
 type = 4
 color = 1813216506
@@ -890,9 +822,9 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var49]
-name = TUNE_HEART.motor_params.total_resistance_mohm_
-tracked_name = TUNE_HEART.motor_params.total_resistance_mohm_
+[var45]
+name = TP.motor_params.total_resistance_mohm_
+tracked_name = TP.motor_params.total_resistance_mohm_
 address = 536876392
 type = 7
 color = 957263685
@@ -907,10 +839,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var50]
-name = TUNE_HEART.motor_status
-tracked_name = TUNE_HEART.motor_status
-address = 536877636
+[var46]
+name = TP.motor_status
+tracked_name = TP.motor_status
+address = 536877724
 type = 2
 color = 1797035060
 should_update_from_elf = true
@@ -924,10 +856,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var51]
-name = TUNE_HEART.position_controller.b0_ff_rev_s2_per_ma
-tracked_name = TUNE_HEART.position_controller.b0_ff_rev_s2_per_ma
-address = 536877592
+[var47]
+name = TP.position_controller.b0_ff_rev_s2_per_ma
+tracked_name = TP.position_controller.b0_ff_rev_s2_per_ma
+address = 536877684
 type = 7
 color = 1345608762
 should_update_from_elf = true
@@ -941,10 +873,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var52]
-name = TUNE_HEART.position_controller.damping_gain
-tracked_name = TUNE_HEART.position_controller.damping_gain
-address = 536877600
+[var48]
+name = TP.position_controller.damping_gain
+tracked_name = TP.position_controller.damping_gain
+address = 536877692
 type = 7
 color = 2257939720
 should_update_from_elf = true
@@ -958,10 +890,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var53]
-name = TUNE_HEART.position_controller.degrade_rate
-tracked_name = TUNE_HEART.position_controller.degrade_rate
-address = 536877608
+[var49]
+name = TP.position_controller.degrade_rate
+tracked_name = TP.position_controller.degrade_rate
+address = 536877696
 type = 6
 color = 4208060150
 should_update_from_elf = true
@@ -975,34 +907,102 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var54]
-name = TUNE_HEART.position_controller.epsilon_rev
-tracked_name = TUNE_HEART.position_controller.epsilon_rev
-address = 536877568
+[var50]
+name = TP.position_controller.epsilon_rev
+tracked_name = TP.position_controller.epsilon_rev
+address = 536877660
 type = 7
 color = 1623163894
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 0.010000
-secondary_value_to_write = 0.005000
+value_to_write = 10.000000
+secondary_value_to_write = 0.075000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var55]
-name = TUNE_HEART.position_controller.obs_fc_max_hz
-tracked_name = TUNE_HEART.position_controller.obs_fc_max_hz
-address = 536877580
+[var51]
+name = TP.position_controller.obs_fc_max_hz
+tracked_name = TP.position_controller.obs_fc_max_hz
+address = 536877672
 type = 7
 color = 2888801837
 should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 10.000000
+value_to_write = 500.000000
+secondary_value_to_write = 150.000000
+do_not_interpret_as_enum = false
+write_limits_enabled = false
+write_limit_min = -1.000000
+write_limit_max = 1.000000
+
+[var52]
+name = TP.position_controller.obs_fc_min_hz
+tracked_name = TP.position_controller.obs_fc_min_hz
+address = 536877668
+type = 7
+color = 2519597927
+should_update_from_elf = true
+shift = 0
+mask = 4294967295
+high_level_type = 0
+value_to_write = 100.000000
+secondary_value_to_write = 0.500000
+do_not_interpret_as_enum = false
+write_limits_enabled = false
+write_limit_min = -1.000000
+write_limit_max = 1.000000
+
+[var53]
+name = TP.position_controller.obs_fc_per_rev_s
+tracked_name = TP.position_controller.obs_fc_per_rev_s
+address = 536877676
+type = 7
+color = 3635633001
+should_update_from_elf = true
+shift = 0
+mask = 4294967295
+high_level_type = 0
+value_to_write = 5.000000
+secondary_value_to_write = 0.000000
+do_not_interpret_as_enum = false
+write_limits_enabled = false
+write_limit_min = -1.000000
+write_limit_max = 1.000000
+
+[var54]
+name = TP.position_controller.obs_fc_slew_hz_s
+tracked_name = TP.position_controller.obs_fc_slew_hz_s
+address = 536877680
+type = 7
+color = 3775636768
+should_update_from_elf = true
+shift = 0
+mask = 4294967295
+high_level_type = 0
+value_to_write = 200.000000
+secondary_value_to_write = 0.000000
+do_not_interpret_as_enum = false
+write_limits_enabled = false
+write_limit_min = -1.000000
+write_limit_max = 1.000000
+
+[var55]
+name = TP.position_controller.obs_pos_rev
+tracked_name = TP.position_controller.obs_pos_rev
+address = 536877700
+type = 7
+color = 2796229558
+should_update_from_elf = true
+shift = 0
+mask = 4294967295
+high_level_type = 0
+value_to_write = 0.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -1010,43 +1010,9 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [var56]
-name = TUNE_HEART.position_controller.obs_fc_min_hz
-tracked_name = TUNE_HEART.position_controller.obs_fc_min_hz
-address = 536877576
-type = 7
-color = 2519597927
-should_update_from_elf = true
-shift = 0
-mask = 4294967295
-high_level_type = 0
-value_to_write = 1.000000
-secondary_value_to_write = 0.000000
-do_not_interpret_as_enum = false
-write_limits_enabled = false
-write_limit_min = -1.000000
-write_limit_max = 1.000000
-
-[var57]
-name = TUNE_HEART.position_controller.obs_fc_per_rev_s
-tracked_name = TUNE_HEART.position_controller.obs_fc_per_rev_s
-address = 536877584
-type = 7
-color = 3635633001
-should_update_from_elf = true
-shift = 0
-mask = 4294967295
-high_level_type = 0
-value_to_write = 50.000000
-secondary_value_to_write = 0.000000
-do_not_interpret_as_enum = false
-write_limits_enabled = false
-write_limit_min = -1.000000
-write_limit_max = 1.000000
-
-[var58]
-name = TUNE_HEART.position_controller.obs_vel_rev_s
-tracked_name = TUNE_HEART.position_controller.obs_vel_rev_s
-address = 536877616
+name = TP.position_controller.obs_vel_rev_s
+tracked_name = TP.position_controller.obs_vel_rev_s
+address = 536877704
 type = 7
 color = 1005209304
 should_update_from_elf = true
@@ -1060,10 +1026,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var59]
-name = TUNE_HEART.position_controller.v_soft_rev_s
-tracked_name = TUNE_HEART.position_controller.v_soft_rev_s
-address = 536877604
+[var57]
+name = TP.position_controller.v_soft_rev_s
+tracked_name = TP.position_controller.v_soft_rev_s
+address = 536877696
 type = 7
 color = 3806460137
 should_update_from_elf = true
@@ -1077,10 +1043,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var60]
-name = TUNE_HEART.pwm_voltage_ab.a
-tracked_name = TUNE_HEART.pwm_voltage_ab.a
-address = 536877640
+[var58]
+name = TP.pwm_voltage_ab.a
+tracked_name = TP.pwm_voltage_ab.a
+address = 536877728
 type = 7
 color = 826401984
 should_update_from_elf = true
@@ -1094,10 +1060,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var61]
-name = TUNE_HEART.pwm_voltage_ab.b
-tracked_name = TUNE_HEART.pwm_voltage_ab.b
-address = 536877644
+[var59]
+name = TP.pwm_voltage_ab.b
+tracked_name = TP.pwm_voltage_ab.b
+address = 536877732
 type = 7
 color = 4160899040
 should_update_from_elf = true
@@ -1111,10 +1077,10 @@ write_limits_enabled = false
 write_limit_min = -1.000000
 write_limit_max = 1.000000
 
-[var62]
-name = TUNE_HEART.temperature
-tracked_name = TUNE_HEART.temperature
-address = 536878124
+[var60]
+name = TP.temperature
+tracked_name = TP.temperature
+address = 536878212
 type = 7
 color = 3520279046
 should_update_from_elf = true
@@ -1129,26 +1095,6 @@ write_limit_min = -1.000000
 write_limit_max = 1.000000
 
 [group0]
-name = CAL
-acquisition_type = 0
-override_sample_rate = false
-sample_frequency_hz = 100
-override_viewport_width = false
-viewport_width_ms = 500.000000
-
-[group0-plot0]
-name = new plot0
-type = 0
-visibility = true
-secondary_write_enabled = false
-
-[group0-plot1]
-name = new table0
-type = 2
-visibility = true
-secondary_write_enabled = false
-
-[group1]
 name = PID
 acquisition_type = 0
 override_sample_rate = false
@@ -1156,308 +1102,308 @@ sample_frequency_hz = 100
 override_viewport_width = false
 viewport_width_ms = 500.000000
 
-[group1-plot0]
+[group0-plot0]
 name = AB_T
 type = 0
 visibility = false
 secondary_write_enabled = true
 
-[group1-plot0-series0]
-name = TUNE_HEART.driver.voltage_ab_.sin
-visibility = false
-format = DEC
-
-[group1-plot1]
+[group0-plot1]
 name = DQ
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group1-plot1-series0]
-name = TUNE_HEART.driver.current_dq.cos
+[group0-plot1-series0]
+name = TP.current_driver.foc_current_.current_bw
 visibility = false
 format = DEC
 
-[group1-plot1-series1]
-name = TUNE_HEART.driver.current_dq.sin
-visibility = false
-format = DEC
-
-[group1-plot1-series2]
-name = TUNE_HEART.driver.lpf_id_.output_
+[group0-plot1-series1]
+name = TP.current_driver.foc_current_.ubemf
 visibility = true
 format = DEC
 
-[group1-plot1-series3]
-name = TUNE_HEART.driver.lpf_iq_.output_
-visibility = true
-format = DEC
-
-[group1-plot1-series4]
-name = TUNE_HEART.driver.voltage_ab_.sin
-visibility = false
-format = DEC
-
-[group1-plot1-series5]
-name = TUNE_HEART.driver.voltage_dq_.cos
-visibility = false
-format = DEC
-
-[group1-plot1-series6]
-name = TUNE_HEART.driver.voltage_dq_.sin
-visibility = false
-format = DEC
-
-[group1-plot2]
+[group0-plot2]
 name = Error
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group1-plot2-series0]
-name = TUNE_HEART.driver.foc_current_.cmd_q_a
+[group0-plot2-series0]
+name = TP.current_driver.angular_speed
+visibility = false
+format = DEC
+
+[group0-plot2-series1]
+name = TP.current_driver.current_dq.d
+visibility = false
+format = DEC
+
+[group0-plot2-series2]
+name = TP.current_driver.current_dq.q
+visibility = false
+format = DEC
+
+[group0-plot2-series3]
+name = TP.current_driver.foc_current_.integrator_d
 visibility = true
 format = DEC
 
-[group1-plot2-series1]
-name = TUNE_HEART.driver.foc_current_.target_id_
+[group0-plot2-series4]
+name = TP.current_driver.foc_current_.integrator_q
 visibility = true
 format = DEC
 
-[group1-plot2-series2]
-name = TUNE_HEART.driver.foc_current_.target_iq_
-visibility = true
-format = DEC
-
-[group1-plot3]
+[group0-plot3]
 name = PID vars
 type = 2
 visibility = true
 secondary_write_enabled = true
 
-[group1-plot3-series0]
+[group0-plot3-series0]
 name = ADC_DELAY_TICKS
 visibility = false
 format = DEC
 
-[group1-plot3-series1]
+[group0-plot3-series1]
 name = PWM_DEADTIME_RUNTIME
 visibility = false
 format = DEC
 
-[group1-plot3-series2]
-name = TUNE_HEART.current_target_a
-visibility = true
-format = DEC
-
-[group1-plot3-series3]
-name = TUNE_HEART.driver.foc_current_.brake_filter_alpha
-visibility = true
-format = DEC
-
-[group1-plot3-series4]
-name = TUNE_HEART.driver.foc_current_.bw_max_hz
+[group0-plot3-series2]
+name = TP.current_driver.foc_current_.brake_filter_alpha
 visibility = false
 format = DEC
 
-[group1-plot3-series5]
-name = TUNE_HEART.driver.foc_current_.bw_min_hz
+[group0-plot3-series3]
+name = TP.current_driver.foc_current_.brake_id_max_a
 visibility = false
 format = DEC
 
-[group1-plot3-series6]
-name = TUNE_HEART.driver.foc_current_.ki
+[group0-plot3-series4]
+name = TP.current_driver.foc_current_.brake_pwr_threshold
 visibility = false
 format = DEC
 
-[group1-plot3-series7]
-name = TUNE_HEART.driver.foc_current_.kp
+[group0-plot3-series5]
+name = TP.current_driver.foc_current_.brake_speed_scale
 visibility = false
 format = DEC
 
-[group1-plot3-series8]
-name = TUNE_HEART.driver.foc_current_.max_current_slew_rate_a_s
-visibility = true
-format = DEC
-
-[group1-plot3-series9]
-name = TUNE_HEART.driver.foc_current_.peak_loss_pwr
-visibility = true
-format = DEC
-
-[group1-plot3-series10]
-name = TUNE_HEART.el_sign
-visibility = true
-format = DEC
-
-[group1-plot3-series11]
-name = TUNE_HEART.err_sign
-visibility = true
-format = DEC
-
-[group1-plot3-series12]
-name = TUNE_HEART.position_controller.b0_ff_rev_s2_per_ma
-visibility = true
-format = DEC
-
-[group1-plot3-series13]
-name = TUNE_HEART.position_controller.damping_gain
-visibility = true
-format = DEC
-
-[group1-plot3-series14]
-name = TUNE_HEART.position_controller.degrade_rate
-visibility = true
-format = DEC
-
-[group1-plot3-series15]
-name = TUNE_HEART.position_controller.epsilon_rev
-visibility = true
-format = DEC
-
-[group1-plot3-series16]
-name = TUNE_HEART.position_controller.obs_fc_max_hz
-visibility = true
-format = DEC
-
-[group1-plot3-series17]
-name = TUNE_HEART.position_controller.obs_fc_min_hz
-visibility = true
-format = DEC
-
-[group1-plot3-series18]
-name = TUNE_HEART.position_controller.obs_fc_per_rev_s
-visibility = true
-format = DEC
-
-[group1-plot3-series19]
-name = TUNE_HEART.position_controller.obs_vel_rev_s
+[group0-plot3-series6]
+name = TP.current_driver.foc_current_.brake_voltage_range
 visibility = false
 format = DEC
 
-[group1-plot3-series20]
-name = TUNE_HEART.position_controller.v_soft_rev_s
+[group0-plot3-series7]
+name = TP.current_driver.foc_current_.brake_voltage_threshold
+visibility = false
+format = DEC
+
+[group0-plot3-series8]
+name = TP.current_driver.foc_current_.k_r
+visibility = false
+format = DEC
+
+[group0-plot3-series9]
+name = TP.current_target_a
 visibility = true
 format = DEC
 
-[group1-plot4]
+[group0-plot3-series10]
+name = TP.el_sign
+visibility = false
+format = DEC
+
+[group0-plot3-series11]
+name = TP.err_sign
+visibility = false
+format = DEC
+
+[group0-plot3-series12]
+name = TP.is_pos_used
+visibility = true
+format = DEC
+
+[group0-plot3-series13]
+name = TP.position_controller.b0_ff_rev_s2_per_ma
+visibility = false
+format = DEC
+
+[group0-plot3-series14]
+name = TP.position_controller.damping_gain
+visibility = false
+format = DEC
+
+[group0-plot3-series15]
+name = TP.position_controller.epsilon_rev
+visibility = true
+format = DEC
+
+[group0-plot3-series16]
+name = TP.position_controller.obs_fc_max_hz
+visibility = false
+format = DEC
+
+[group0-plot3-series17]
+name = TP.position_controller.obs_fc_min_hz
+visibility = false
+format = DEC
+
+[group0-plot3-series18]
+name = TP.position_controller.obs_fc_per_rev_s
+visibility = false
+format = DEC
+
+[group0-plot3-series19]
+name = TP.position_controller.obs_vel_rev_s
+visibility = false
+format = DEC
+
+[group0-plot3-series20]
+name = TP.position_controller.v_soft_rev_s
+visibility = false
+format = DEC
+
+[group0-plot4]
 name = PID_Current
 type = 2
 visibility = true
 secondary_write_enabled = true
 
-[group1-plot4-series0]
-name = TUNE_HEART.driver.foc_current_.bw_max_hz
+[group0-plot4-series0]
+name = TP.current_driver.fc_pll
 visibility = true
 format = DEC
 
-[group1-plot4-series1]
-name = TUNE_HEART.driver.foc_current_.bw_min_hz
+[group0-plot4-series1]
+name = TP.current_driver.foc_current_.L
 visibility = true
 format = DEC
 
-[group1-plot4-series2]
-name = TUNE_HEART.driver.foc_current_.integrator_d
+[group0-plot4-series2]
+name = TP.current_driver.foc_current_.R
 visibility = true
 format = DEC
 
-[group1-plot4-series3]
-name = TUNE_HEART.driver.foc_current_.integrator_q
+[group0-plot4-series3]
+name = TP.current_driver.foc_current_.bemf_omega_deadband
 visibility = true
 format = DEC
 
-[group1-plot4-series4]
-name = TUNE_HEART.driver.foc_current_.ki
+[group0-plot4-series4]
+name = TP.current_driver.foc_current_.bemf_omega_soft_range
 visibility = true
 format = DEC
 
-[group1-plot4-series5]
-name = TUNE_HEART.driver.foc_current_.kp
+[group0-plot4-series5]
+name = TP.current_driver.foc_current_.bw_max_hz
 visibility = true
 format = DEC
 
-[group1-plot4-series6]
-name = TUNE_HEART.is_pos_ctrl_used
+[group0-plot4-series6]
+name = TP.current_driver.foc_current_.bw_min_hz
 visibility = true
 format = DEC
 
-[group1-plot4-series7]
-name = TUNE_HEART.position_controller.degrade_rate
+[group0-plot4-series7]
+name = TP.current_driver.foc_current_.bw_slope_hz_per_rads
 visibility = true
 format = DEC
 
-[group1-plot5]
+[group0-plot4-series8]
+name = TP.current_driver.foc_current_.current_bw
+visibility = true
+format = DEC
+
+[group0-plot4-series9]
+name = TP.current_driver.foc_current_.flux_linkage_wb
+visibility = true
+format = DEC
+
+[group0-plot4-series10]
+name = TP.current_driver.foc_current_.k_bemf
+visibility = true
+format = DEC
+
+[group0-plot4-series11]
+name = TP.current_driver.foc_current_.k_cc
+visibility = true
+format = DEC
+
+[group0-plot4-series12]
+name = TP.current_driver.foc_current_.k_l
+visibility = true
+format = DEC
+
+[group0-plot4-series13]
+name = TP.current_driver.foc_current_.k_r
+visibility = true
+format = DEC
+
+[group0-plot4-series14]
+name = TP.current_driver.foc_current_.l_ff
+visibility = true
+format = DEC
+
+[group0-plot4-series15]
+name = TP.current_driver.foc_current_.max_current_slew_rate_a_s
+visibility = true
+format = DEC
+
+[group0-plot4-series16]
+name = TP.position_controller.degrade_rate
+visibility = true
+format = DEC
+
+[group0-plot5]
 name = PID_POS
 type = 2
 visibility = false
 secondary_write_enabled = true
 
-[group1-plot6]
+[group0-plot6]
 name = SCURVE
 type = 2
 visibility = false
 secondary_write_enabled = true
 
-[group1-plot6-series0]
-name = TUNE_HEART.is_pos_ctrl_used
-visibility = false
-format = DEC
-
-[group1-plot7]
+[group0-plot7]
 name = SpeedVelAcc
 type = 0
 visibility = false
 secondary_write_enabled = true
 
-[group1-plot8]
+[group0-plot8]
 name = V_DQ
 type = 0
 visibility = false
 secondary_write_enabled = true
 
-[group1-plot8-series0]
-name = TUNE_HEART.driver.voltage_dq_.cos
-visibility = true
-format = DEC
-
-[group1-plot8-series1]
-name = TUNE_HEART.driver.voltage_dq_.sin
-visibility = true
-format = DEC
-
-[group1-plot9]
+[group0-plot9]
 name = new plot0
 type = 0
 visibility = false
 secondary_write_enabled = true
 
-[group1-plot10]
+[group0-plot10]
 name = speed
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group1-plot10-series0]
-name = TUNE_HEART.driver.foc_current_.pwr_el
-visibility = false
-format = DEC
-
-[group1-plot10-series1]
-name = TUNE_HEART.driver.foc_current_.pwr_loss
+[group0-plot10-series0]
+name = TP.current_driver.pll_.omega_
 visibility = true
 format = DEC
 
-[group1-plot10-series2]
-name = TUNE_HEART.driver.foc_current_.pwr_mech
-visibility = true
-format = DEC
-
-[group1-plot10-series3]
-name = TUNE_HEART.position_controller.obs_vel_rev_s
+[group0-plot10-series1]
+name = TP.position_controller.obs_vel_rev_s
 visibility = false
 format = DEC
 
-[group2]
+[group1]
 name = Test
 acquisition_type = 0
 override_sample_rate = false
@@ -1465,39 +1411,29 @@ sample_frequency_hz = 100
 override_viewport_width = false
 viewport_width_ms = 500.000000
 
-[group2-plot0]
+[group1-plot0]
 name = MotionTIme
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group2-plot0-series0]
-name = TUNE_HEART.driver.power
+[group1-plot0-series0]
+name = TP.driver_phy.power.power_coeff_
 visibility = true
 format = DEC
 
-[group2-plot0-series1]
-name = TUNE_HEART.driver_phy.power.power_coeff_
+[group1-plot0-series1]
+name = TP.temperature
 visibility = true
 format = DEC
 
-[group2-plot0-series2]
-name = TUNE_HEART.driver_phy.power.usage_
-visibility = true
-format = DEC
-
-[group2-plot0-series3]
-name = TUNE_HEART.temperature
-visibility = true
-format = DEC
-
-[group2-plot1]
+[group1-plot1]
 name = Var
 type = 2
 visibility = true
 secondary_write_enabled = true
 
-[group3]
+[group2]
 name = Var2
 acquisition_type = 0
 override_sample_rate = false
@@ -1505,102 +1441,107 @@ sample_frequency_hz = 100
 override_viewport_width = false
 viewport_width_ms = 500.000000
 
-[group3-plot0]
+[group2-plot0]
 name = Encoder
 type = 0
 visibility = true
 secondary_write_enabled = false
 
-[group3-plot0-series0]
-name = TUNE_HEART.encoder.position_.parts.angle
+[group2-plot0-series0]
+name = TP.encoder.position_.parts.angle
 visibility = true
 format = DEC
 
-[group3-plot0-series1]
-name = TUNE_HEART.encoder_pos
+[group2-plot0-series1]
+name = TP.encoder_pos
 visibility = true
 format = DEC
 
-[group3-plot1]
+[group2-plot1]
 name = Power
 type = 0
 visibility = true
 secondary_write_enabled = false
 
-[group3-plot1-series0]
-name = TUNE_HEART.driver.power
-visibility = true
-format = DEC
-
-[group3-plot2]
+[group2-plot2]
 name = Speed_copy_0
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group3-plot2-series0]
-name = TUNE_HEART.driver.current_ab.cos
+[group2-plot2-series0]
+name = TP.position_controller.obs_vel_rev_s
 visibility = true
 format = DEC
 
-[group3-plot2-series1]
-name = TUNE_HEART.driver.current_ab.sin
-visibility = true
-format = DEC
-
-[group3-plot2-series2]
-name = TUNE_HEART.driver.current_dq.cos
-visibility = true
-format = DEC
-
-[group3-plot2-series3]
-name = TUNE_HEART.driver.current_dq.sin
-visibility = true
-format = DEC
-
-[group3-plot3]
+[group2-plot3]
 name = V
 type = 0
 visibility = true
 secondary_write_enabled = false
 
-[group3-plot3-series0]
-name = TUNE_HEART.driver_phy.supply_voltage.voltage_v_
-visibility = false
+[group2-plot3-series0]
+name = TP.position_controller.obs_pos_rev
+visibility = true
 format = DEC
 
-[group3-plot4]
+[group2-plot4]
 name = new table0
 type = 2
 visibility = true
 secondary_write_enabled = false
 
-[group3-plot4-series0]
-name = TUNE_HEART.current_target_a
+[group2-plot4-series0]
+name = TP.current_target_a
 visibility = true
 format = DEC
 
-[group3-plot4-series1]
-name = TUNE_HEART.driver.motor_calib_status
+[group2-plot4-series1]
+name = TP.motor_status
+visibility = false
+format = DEC
+
+[group2-plot4-series2]
+name = TP.position_controller.damping_gain
 visibility = true
 format = DEC
 
-[group3-plot4-series2]
-name = TUNE_HEART.motor_status
+[group2-plot4-series3]
+name = TP.position_controller.epsilon_rev
 visibility = true
 format = DEC
 
-[group3-plot4-series3]
-name = TUNE_HEART.pwm_voltage_ab.a
+[group2-plot4-series4]
+name = TP.position_controller.obs_fc_max_hz
 visibility = true
 format = DEC
 
-[group3-plot4-series4]
-name = TUNE_HEART.pwm_voltage_ab.b
+[group2-plot4-series5]
+name = TP.position_controller.obs_fc_min_hz
 visibility = true
 format = DEC
 
-[group4]
+[group2-plot4-series6]
+name = TP.position_controller.obs_fc_per_rev_s
+visibility = true
+format = DEC
+
+[group2-plot4-series7]
+name = TP.position_controller.obs_fc_slew_hz_s
+visibility = true
+format = DEC
+
+[group2-plot4-series8]
+name = TP.pwm_voltage_ab.a
+visibility = false
+format = DEC
+
+[group2-plot4-series9]
+name = TP.pwm_voltage_ab.b
+visibility = false
+format = DEC
+
+[group3]
 name = new group0
 acquisition_type = 0
 override_sample_rate = false
@@ -1608,188 +1549,133 @@ sample_frequency_hz = 100
 override_viewport_width = false
 viewport_width_ms = 500.000000
 
-[group4-plot0]
+[group3-plot0]
 name = Current_AB
 type = 3
 visibility = false
 secondary_write_enabled = true
 x_axis_variable = _____time_____
 
-[group4-plot0-series0]
-name = TUNE_HEART.angle_calibrator.calibration_stage
+[group3-plot0-series0]
+name = TP.angle_calibrator.calibration_stage
 visibility = false
 format = DEC
 
-[group4-plot0-series1]
-name = TUNE_HEART.driver.angle_
-visibility = false
-format = DEC
-
-[group4-plot0-series2]
-name = TUNE_HEART.driver.current_dq.cos
-visibility = false
-format = DEC
-
-[group4-plot0-series3]
-name = TUNE_HEART.driver.current_dq.sin
-visibility = false
-format = DEC
-
-[group4-plot0-series4]
-name = TUNE_HEART.driver.voltage_ab_.sin
-visibility = false
-format = DEC
-
-[group4-plot1]
+[group3-plot1]
 name = POS
 type = 0
 visibility = false
 secondary_write_enabled = true
 
-[group4-plot1-series0]
+[group3-plot1-series0]
 name = SystemCoreClock
 visibility = false
 format = DEC
 
-[group4-plot1-series1]
-name = TUNE_HEART.driver.angle_
+[group3-plot1-series1]
+name = TP.motor_params.motor_type_
 visibility = false
 format = DEC
 
-[group4-plot1-series2]
-name = TUNE_HEART.driver.power
-visibility = false
-format = DEC
-
-[group4-plot1-series3]
-name = TUNE_HEART.driver.voltage_ab_.sin
-visibility = false
-format = DEC
-
-[group4-plot1-series4]
-name = TUNE_HEART.motor_params.motor_type_
-visibility = false
-format = DEC
-
-[group4-plot2]
+[group3-plot2]
 name = PWM
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group4-plot2-series0]
-name = TUNE_HEART.driver.voltage_ab_.sin
-visibility = false
-format = DEC
-
-[group4-plot2-series1]
-name = TUNE_HEART.encoder_pos
+[group3-plot2-series0]
+name = TP.encoder_pos
 visibility = true
 format = DEC
 
-[group4-plot2-series2]
-name = TUNE_HEART.motor_status
+[group3-plot2-series1]
+name = TP.motor_status
 visibility = true
 format = DEC
 
-[group4-plot3]
+[group3-plot3]
 name = Pos
 type = 0
 visibility = false
 secondary_write_enabled = true
 
-[group4-plot4]
+[group3-plot4]
 name = Speed
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group4-plot5]
+[group3-plot5]
 name = V_AB
 type = 3
 visibility = false
 secondary_write_enabled = true
-x_axis_variable = TUNE_HEART.driver.voltage_ab_.sin
+x_axis_variable = _____time_____
 
-[group4-plot6]
+[group3-plot6]
 name = Var
 type = 2
 visibility = false
 secondary_write_enabled = true
 
-[group4-plot6-series0]
-name = TUNE_HEART.angle_calibrator.calibration_stage
+[group3-plot6-series0]
+name = TP.angle_calibrator.calibration_stage
 visibility = true
 format = DEC
 
-[group4-plot6-series1]
-name = TUNE_HEART.current_target_a
+[group3-plot6-series1]
+name = TP.current_target_a
 visibility = true
 format = DEC
 
-[group4-plot6-series2]
-name = TUNE_HEART.driver.motor_calib.voltage_
+[group3-plot6-series2]
+name = TP.motor_params.motor_type_
 visibility = true
 format = DEC
 
-[group4-plot6-series3]
-name = TUNE_HEART.driver.setup_status
+[group3-plot6-series3]
+name = TP.motor_params.phase_pattern_
 visibility = true
 format = DEC
 
-[group4-plot6-series4]
-name = TUNE_HEART.motor_params.motor_type_
+[group3-plot6-series4]
+name = TP.motor_params.total_resistance_mohm_
 visibility = true
 format = DEC
 
-[group4-plot6-series5]
-name = TUNE_HEART.motor_params.phase_pattern_
+[group3-plot6-series5]
+name = TP.motor_status
 visibility = true
 format = DEC
 
-[group4-plot6-series6]
-name = TUNE_HEART.motor_params.total_resistance_mohm_
-visibility = true
-format = DEC
-
-[group4-plot6-series7]
-name = TUNE_HEART.motor_status
-visibility = true
-format = DEC
-
-[group4-plot7]
+[group3-plot7]
 name = Vel
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group4-plot7-series0]
-name = TUNE_HEART.driver_phy.pwm_apply_[0]
+[group3-plot7-series0]
+name = TP.driver_phy.pwm_apply_[0]
 visibility = true
 format = DEC
 
-[group4-plot7-series1]
-name = TUNE_HEART.driver_phy.pwm_apply_[1]
+[group3-plot7-series1]
+name = TP.driver_phy.pwm_apply_[1]
 visibility = true
 format = DEC
 
-[group4-plot7-series2]
-name = TUNE_HEART.driver_phy.pwm_apply_[2]
+[group3-plot7-series2]
+name = TP.driver_phy.pwm_apply_[2]
 visibility = true
 format = DEC
 
-[group4-plot8]
+[group3-plot8]
 name = new plot0
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group4-plot8-series0]
-name = TUNE_HEART.driver.motor_calib.measure_current_a_sum_
-visibility = false
-format = DEC
-
-[group5]
+[group4]
 name = new sampling group0
 acquisition_type = 0
 override_sample_rate = false
@@ -1797,40 +1683,30 @@ sample_frequency_hz = 100
 override_viewport_width = false
 viewport_width_ms = 500.000000
 
-[group5-plot0]
+[group4-plot0]
 name = Test
 type = 0
 visibility = false
 secondary_write_enabled = true
 
-[group5-plot1]
+[group4-plot1]
 name = Vals
 type = 2
 visibility = true
 secondary_write_enabled = true
 
-[group5-plot1-series0]
-name = TUNE_HEART.current_target_a
+[group4-plot1-series0]
+name = TP.current_target_a
 visibility = true
 format = DEC
 
-[group5-plot1-series1]
-name = TUNE_HEART.is_pos_ctrl_used
-visibility = true
-format = DEC
-
-[group5-plot2]
+[group4-plot2]
 name = new plot0
 type = 0
 visibility = true
 secondary_write_enabled = true
 
-[group5-plot2-series0]
-name = TUNE_HEART.driver.angle_
-visibility = true
-format = DEC
-
-[group5-plot3]
+[group4-plot3]
 name = new plot1
 type = 0
 visibility = true

@@ -34,7 +34,6 @@ typedef void (*PwmPhasesCallback)(const int16_t phases[3]);
 /// optimal point in the PWM cycle (center of the active vector).
 typedef void (*SamplePointCallback)(void);
 
-
 /**
  * @class PwmWrapper
  * @brief PWM output stage with chainable configuration and thread-safe duty-cycle updates.
@@ -79,14 +78,21 @@ public:
      * and return *this — the compiler collapses the chain into direct assignments.
      */
     struct CallbackProxy {
+    private:
         PwmWrapper& pwm_;
+
+    public:
+        inline CallbackProxy(PwmWrapper& pwm) : pwm_(pwm) {}
 
         /**
          * @brief Set the 3-phase hardware update callback.
          * @param cb Function pointer (nullptr = unset)
          * @return Reference to this chain for further calls
          */
-        inline CallbackProxy& apply_phases_cb(PwmPhasesCallback cb) { pwm_.set_phases_cb_ = cb; return *this; }
+        inline CallbackProxy& apply_phases_cb(PwmPhasesCallback cb) {
+            pwm_.set_phases_cb_ = cb;
+            return *this;
+        }
 
         /**
          * @brief Set the current-sense sampling point callback.
@@ -98,7 +104,10 @@ public:
          * @param cb Function pointer (nullptr = unset)
          * @return Reference to this chain for further calls
          */
-        inline CallbackProxy& sample_point_cb(SamplePointCallback cb) { pwm_.sample_point_cb_ = cb; return *this; }
+        inline CallbackProxy& sample_point_cb(SamplePointCallback cb) {
+            pwm_.sample_point_cb_ = cb;
+            return *this;
+        }
     };
 
     /**
@@ -115,9 +124,6 @@ public:
      */
     inline CallbackProxy set_callback() { return {*this}; }
 
-
-
-
     // =======================================================================
     // HARDWARE OUTPUT (called by DriverPWM::tick_icr)
     // =======================================================================
@@ -127,28 +133,30 @@ public:
      * @param phases Array of 3 timer-compare ticks
      */
     inline void set_phases(const int16_t phases[3]) const {
-        if (set_phases_cb_) set_phases_cb_(phases);
+        if (set_phases_cb_)
+            set_phases_cb_(phases);
     }
 
     /**
      * @brief Invoke the current-sampling-point callback to configure ADC timing.
      */
     inline void apply_current_sample_point() const {
-        if (sample_point_cb_) sample_point_cb_();
+        if (sample_point_cb_)
+            sample_point_cb_();
     }
 
 private:
     friend struct DriverPWM;
     friend struct MotorControl;  ///< Phase stage pushes computed duties here
 
-    PwmPhasesCallback     set_phases_cb_;            ///< Hardware callback: write CCR registers
-    SamplePointCallback sample_point_cb_; ///< Hardware callback: configure ADC sampling point
-    uint32_t              period_;                   ///< Timer ARR value in ticks
+    PwmPhasesCallback set_phases_cb_;      ///< Hardware callback: write CCR registers
+    SamplePointCallback sample_point_cb_;  ///< Hardware callback: configure ADC sampling point
+    uint32_t period_;                      ///< Timer ARR value in ticks
 
-    std::atomic<uint32_t> seq_{0};        ///< SeqLock counter for lock-free tick updates
-    int16_t                ticks_[3] = {0, 0, 0};  ///< Target PWM ticks protected by SeqLock
+    std::atomic<uint32_t> seq_{0};  ///< SeqLock counter for lock-free tick updates
+    int16_t ticks_[3] = {0, 0, 0};  ///< Target PWM ticks protected by SeqLock
 
-        /**
+    /**
      * @brief Atomically read the latest duty-cycle ticks via SeqLock.
      * @param out Array of 3 int16_t filled with timer-compare ticks
      * @return true if a consistent snapshot was read
@@ -163,13 +171,14 @@ private:
                 out[2] = ticks_[2];
                 std::atomic_thread_fence(std::memory_order_acquire);
                 uint32_t seq2 = seq_.load(std::memory_order_relaxed);
-                if (seq1 == seq2) return true;
+                if (seq1 == seq2)
+                    return true;
             }
         }
         return false;
     }
 
-        // =======================================================================
+    // =======================================================================
     // RUNTIME API (ISR-SAFE)
     // =======================================================================
 

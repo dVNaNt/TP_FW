@@ -681,3 +681,58 @@ FLASH: 62056 bytes (47.34% of 131072 bytes): +0 bytes
 RAM: 7884 bytes (24.06% of 32768 bytes): +0 bytes
 
 
+## 2026-08-29 - PLL-based angular velocity estimation
+**Changes:**
+- Reformated FilterPLL: fs fixed at init, Fc retunable at runtime via set_fc()
+- Integrated FilterPLL into CurrentControl
+- omega now comes from the PLL instead of raw differentiation of quantized angle samples
+- electrical omega = PLL turns/s * 2*pi * pole_pairs passed to FocCurrentController
+
+**Reasoning:**
+- Remove quantization noise from speed estimation and decouple FOC bandwidth scheduling from raw LSB deltas
+
+**Notes:**
+- angular_speed (LSB/tick) for the adaptive-alpha LPF is now derived from the PLL omega
+- pole_pairs cached at init_foc_controller
+
+FLASH: 61200 bytes (46.69% of 131072 bytes): -856 bytes
+RAM: 7948 bytes (24.26% of 32768 bytes): +64 bytes
+
+
+## 2026-08-29 - BEMF feedforward compensation in FOC current controller
+**Changes:**
+- Added flux_linkage_wb estimated from torque constant
+- Added uq_ff_bemf = omega_e * psi_f * k_bemf term to q-axis feedforward
+- Added k_bemf tuning gain (0 disables)
+
+**Reasoning:**
+- Cancel speed-proportional BEMF disturbance in feedforward instead of letting the PI integrator wind up against it
+
+**Notes:**
+- psi_f is a coarse estimate (ignores saturation/cogging)
+- Compensation sign matches omega
+- D-axis untouched
+
+FLASH: 61860 bytes (47.20% of 131072 bytes): +660 bytes
+RAM: 7964 bytes (24.30% of 32768 bytes): +16 bytes
+
+
+## 2026-08-29 - Soft deadband for BEMF feedforward compensation
+**Changes:**
+- Added bemf_omega_deadband (epsilon, 5 rad/s el) and bemf_omega_soft_range (10 rad/s) parameters
+- BEMF term gated by C2-continuous smootherstep activation gain 6t^5-15t^4+10t^3 applied to |omega_e|
+- uq_ff_bemf = omega * gain(|omega|) * psi_f * k_bemf (odd symmetry preserved)
+
+**Reasoning:**
+- Eliminate standstill limit cycle: noisy PLL omega fed through BEMF feedforward closes omega->uq->torque->encoder->PLL positive feedback loop
+- smooth activation avoids torque kicks at zone boundary
+
+**Notes:**
+- Tune bemf_omega_deadband above the PLL noise floor
+- PI integrator absorbs residual EMF inside the forbidden zone
+- build OK: flash 62040, RAM 7972
+
+FLASH: 62040 bytes (47.33% of 131072 bytes): +180 bytes
+RAM: 7972 bytes (24.33% of 32768 bytes): +8 bytes
+
+

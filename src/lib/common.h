@@ -100,7 +100,6 @@ inline int16_t fast_sign_int(int32_t val) {
 #include "dev_log.h"
 
 // Include headers that depend on the utility functions above
-#include "math/controllers/pi.h"
 #include "math/filters/ema.h"
 #include "math/filters/median3.h"
 #include "math/helpers/fifo_buffer.h"
