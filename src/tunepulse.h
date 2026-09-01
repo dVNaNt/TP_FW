@@ -49,11 +49,11 @@
  *                       maximum measurable phase currents for phases A/B/C.
  */
 TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
-                          PWM_TIMER_PERIOD,
-                          SYS_PARAMS::MAX_SUPPLY_FS,
-                          SYS_PARAMS::IA_MAX_CURRENT_FS,
-                          SYS_PARAMS::IB_MAX_CURRENT_FS,
-                          SYS_PARAMS::IC_MAX_CURRENT_FS);
+                  PWM_TIMER_PERIOD,
+                  SYS_PARAMS::MAX_SUPPLY_FS,
+                  SYS_PARAMS::IA_MAX_CURRENT_FS,
+                  SYS_PARAMS::IB_MAX_CURRENT_FS,
+                  SYS_PARAMS::IC_MAX_CURRENT_FS);
 
 #include "target/cln17_v3/bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
 #include "target/cln17_v3/interrupt_setup.h"
@@ -139,11 +139,13 @@ void end_curnt_cal() {
  * 5. LED callbacks registered  - red/green/blue mapped to indices 0/1/2.
  * 6. ADC_Init()                - ADC channels for currents and supply voltage.
  * 7. PWM_Init()                - TIM1 complementary PWM.
- * 8. Encoder_SmartInit()       - SPI1 for the magnetic encoder.
+ * 8. Encoder_Init()            - SPI1 for the magnetic encoder (type set by
+ *                                ENCODER_TYPE in spi_setup.h).
  * 9. NVIC_Init()               - interrupt priorities.
  * 10. CAN bus configuration    - classic 1 Mbps arbitration / 2 Mbps FD data
  *     phase, external loopback mode, transceiver enabled, then CAN_Driver_Init().
- * 11. DRV8323H gate driver enabled via PB11 (DRV_EN = high).
+ * 11. DRV8323H gate driver enabled via DRV_EN (PB12 on the MT6835 board
+ *     revision, PB11 on the TLE5012B revision).
  * 12. COMP_Protection_Init()   - DAC-driven comparators for hardware OC/OV.
  * 13. Protection limits        - DAC threshold callbacks registered, then
  *     software limit values applied (see note below about log text mismatch).
@@ -219,7 +221,7 @@ inline void tunepulse_init() {
 
     delay(100);
 
-    Encoder_SmartInit();  // Initialize SPI1 for encoder
+    Encoder_Init();  // Initialize SPI1 for the encoder (ENCODER_TYPE in spi_setup.h)
 
     delay(100);
 
@@ -227,23 +229,15 @@ inline void tunepulse_init() {
 
     delay(500);
 
-    // CAN initialization moved to application code (main.cpp)
-    // Configure for EXTERNAL_LOOPBACK mode (self-test with physical pins)
-    CAN_BUS.set_baudrate_classic(1000000);         // 1 Mbps classic
-    CAN_BUS.set_baudrate_fd(2000000);              // 2 Mbps data phase
-    CAN_BUS.set_mode(CANMode::EXTERNAL_LOOPBACK);  // External loopback for testing
-    CAN_BUS.enable_auto_retry(false);              // No auto-retry for testing
-    CAN_BUS.enable_delay_compensation(true);
-
-    delay(100);
-
-    // Enable transceiver
-    CAN_BUS.enable();
-    CAN_Driver_Init();  // Initialize CAN-FD driver for CAN 2.0A at 1 Mbps
-
-    delay(100);
-
-    LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_11);  // DRV_EN = 1
+    // CAN bring-up moved to the application: main.cpp calls CAN_BUS.begin()
+    // with the fixed link configuration (FD-BRS, 1 Mbps / 5 Mbps, NORMAL).
+    // Gate-driver enable: the DRV_EN pin depends on the board revision, which
+    // follows the compile-time selected encoder type (see spi_setup.h).
+#if (ENCODER_TYPE == ENCODER_MT6835)
+    LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_12);  // DRV_EN = 1 (PB12, MT6835 board)
+#else
+    LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_11);  // DRV_EN = 1 (PB11, TLE5012B board)
+#endif
 
     delay(100);
 
@@ -259,7 +253,7 @@ inline void tunepulse_init() {
     // 6.2 A.
     TP.driver_phy.current.overcurrent.set_limit_amps().oc_ia(4.0).oc_ib(4.0).oc_ic(6.2);
     TP.driver_phy.supply.overvoltage.set_lim_callback(DAC_Set_COMP3_OV_Threshold);
-    TP.driver_phy.supply.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(48.0);
+    TP.driver_phy.supply.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(51.0);
 
     // Thermal protection (Temperature, see temperature.h):
     // - OT (overtemperature) trip at 85 degC — forces FAULT_OVERHEAT (Hi-Z safe state)
@@ -318,11 +312,14 @@ inline void tunepulse_init() {
     // interrupt-driven updates (see CODE_ISSUES.md).
     TP.current_driver.setup_status.set_driver_status(OperationStatus::DriverCalibration);
     TP.current_driver.start_motor_calibration();
+
     while (TP.current_driver.get_motor_status() != MotorStatus::Success) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
         if (TP.current_driver.get_motor_status() == MotorStatus::CalibError) {
-            SerialUSB.println("Motor calibration Error");
-            break;
+
+                SerialUSB.println("Motor calibration Error");
+                break;
+            
         }
     }
 }

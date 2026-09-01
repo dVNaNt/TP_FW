@@ -336,7 +336,10 @@ public: // Make the following methods public for external module access
 
         TP_LOG_VAL("Offset ", offst_val); // Output the discovered offset value
         TP_LOG_VAL("Offset idx ", offst_idx); // Output the starting index of the offset
-        TP_LOG_ARRAY("CalArr ", cal_table); // Output the entire calibration array for debugging
+        // NOTE: no TP_LOG_ARRAY here on purpose. This method runs inside the
+        // PWM-period control ISR; dumping the whole 200-value table over USB CDC
+        // blocks the control loop for as long as the host back-pressures the
+        // serial link, dropping control ticks and jerking the motor.
 
         // Iterate through each calibration point to compute deviations
         for (size_t i = 0; i < cal_size; ++i) { // Loop over every recorded calibration point
@@ -358,7 +361,6 @@ public: // Make the following methods public for external module access
         } // End of validation loop
 
         build_ecc_table(); // Construct the compact inverse eccentricity table upon successful validation
-TP_LOG_ARRAY("ECCArr ", ecc_table); // Output the entire calibration array for debugging
 
         return true; // Validation successful: all deviations are within acceptable physical bounds
     } // End of check() method

@@ -2,8 +2,9 @@
  * @file gpio_setup.h
  * @brief LL-driver GPIO initialization for CLN17 v3.
  *
- * Configures LED pins (PB1/PB2/PC4), gate-driver enable (PB11), comparator
- * inputs, encoder SPI pins and analog channels; provides IO_Init().
+ * Configures LED pins (PB1/PB2/PC4), gate-driver enable pin (PB12 on the
+ * MT6835 board revision / PB11 on the TLE5012B revision, see spi_setup.h),
+ * comparator inputs, encoder SPI pins and analog channels; provides IO_Init().
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
@@ -86,14 +87,23 @@ void IO_Init() {
 
     /////////////////////////// GENERAL PURPOSE GPIO //////////////////////////
 
-    // DRV_EN (PB11) - Driver enable output (active high)
-    GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+    // Gate-driver enable pins: assignment depends on the compile-time selected
+    // encoder type (see spi_setup.h / target.h).
+    GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;           // Push-pull outputs
     GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_MEDIUM;
     GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
     GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+#if (ENCODER_TYPE == ENCODER_MT6835)
+    // MT6835 board revision: PB12 = DRV_EN (active high), PB11 = tied LOW
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_11 | LL_GPIO_PIN_12;
+    LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_11 | LL_GPIO_PIN_12); // Both LOW until DRV_EN is asserted
+    LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+#else
+    // TLE5012B board revision: PB11 = DRV_EN (active high), PB12 = I_CAL (analog)
     GPIO_InitStruct.Pin = LL_GPIO_PIN_11;
     LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_11);  // Default disabled
     LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+#endif
 
 
     // LED pins (active low - common anode configuration)

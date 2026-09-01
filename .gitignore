@@ -16,3 +16,4 @@ private/
 
 .kiro/
 compile_commands.json
+*.txt

@@ -736,3 +736,279 @@ FLASH: 62040 bytes (47.33% of 131072 bytes): +180 bytes
 RAM: 7972 bytes (24.33% of 32768 bytes): +8 bytes
 
 
+## 2026-08-29 - Multi-probe upload support
+**Changes:**
+- Added tools/upload_all_stlinks.py PlatformIO post-script
+- Wired extra_scripts into cln17_v3_release env
+- Updated UPLOAD.md
+
+**Reasoning:**
+- Single command now flashes every board connected to every ST-Link in parallel
+
+**Notes:**
+- Uses OpenOCD hla_serial binding
+- Exit code fails if any board fails
+- 2/2 boards verified OK on live test
+
+FLASH: 61996 bytes (47.30% of 131072 bytes): -44 bytes
+RAM: 7980 bytes (24.35% of 32768 bytes): +8 bytes
+
+
+## 2026-08-29 - Added 8-byte chunk API (src/api)
+**Changes:**
+- New src/api/tp_api.h: zero-copy ApiChunk union, read/write hardware callbacks, packers for CMD 0x01-0x09 + heartbeat, codecs (bf16 from lib, float24, int24/48, Q1.3.8, Q1.1.4)
+- New src/api/API.md spec + roadmap
+- Wired TunePulseAPI into main.cpp over CAN (0x300/0x400+NodeID)
+
+**Reasoning:**
+- Transport-independent request/response layer reusing lib telemetry (Motor, Temperature, Power, SupplyVoltage)
+
+**Notes:**
+- Motor Properties CMD remapped 0x06->0x09 (collision)
+- motion/UID/efficiency left as STUBs
+
+FLASH: 64216 bytes (48.99% of 131072 bytes): +2220 bytes
+RAM: 8080 bytes (24.66% of 32768 bytes): +100 bytes
+
+
+## 2026-08-30 - Two-board CAN peer-to-peer text test
+**Changes:**
+- Rewrote main.cpp as a symmetric CAN test: SerialUSB text -> classic CAN frames (ID 0x123, 125 kbps)
+- CAN -> Serial line assembly
+- 2 s stats with FDCAN PSR (LEC/ACT)
+- boot-time EXTERNAL_LOOPBACK self-test
+- API temporarily disabled
+
+**Reasoning:**
+- Fix missing FDCAN1_IT0_IRQHandler in can_setup.h (first received frame hung the MCU in Default_Handler)
+- isolate firmware from physical wiring issues
+- validate the CAN link between two CLN17 boards
+
+**Notes:**
+- Verified live: bidirectional text exchange and multi-frame long lines delivered without loss
+- flash 58832 bytes, RAM 8132 bytes
+
+FLASH: 58832 bytes (44.89% of 131072 bytes): -5384 bytes
+RAM: 8132 bytes (24.82% of 32768 bytes): +52 bytes
+
+
+## 2026-08-30 - CAN stress test: bitrate sweep with packet-error logging
+**Changes:**
+- Added firmware commands B<bps>/T<count>/R/? for runtime bitrate reconfig and 1000-packet bursts with sequence-gap loss detection
+- stress mode in can_test_host.py logging speed, received, loss percent and FDCAN ECR protocol errors per bitrate
+
+**Reasoning:**
+- User added 120Ohm termination at both ends and common ground
+- re-verify the bus at 125k/250k/500k/1M to pick a working data rate
+
+**Notes:**
+- 1000/1000 packets delivered with 0 protocol errors (CEL=0 TEC=0 REC=0) at all speeds up to 1 Mbps
+- replaced misleading poll-count err metric with ECR.CEL/TEC/REC in stats
+
+FLASH: 59112 bytes (45.10% of 131072 bytes): +280 bytes
+RAM: 8132 bytes (24.82% of 32768 bytes): +0 bytes
+
+
+## 2026-08-30 - CAN stress test: bitrate sweep with packet-error logging
+**Changes:**
+- Added firmware commands B<bps>/T<count>/R/? for runtime bitrate reconfig and 1000-packet bursts with sequence-gap loss detection
+- stress mode in can_test_host.py logging speed, received, loss percent and FDCAN ECR protocol errors per bitrate
+
+**Reasoning:**
+- User added 120Ohm termination at both ends and common ground
+- re-verify the bus at 125k/250k/500k/1M to pick a working data rate
+
+**Notes:**
+- 1000/1000 packets delivered with 0 protocol errors (CEL=0 TEC=0 REC=0) at all speeds up to 1 Mbps
+- replaced misleading poll-count err metric with ECR.CEL/TEC/REC in stats
+
+FLASH: 60312 bytes (46.01% of 131072 bytes): +1200 bytes
+RAM: 8280 bytes (25.27% of 32768 bytes): +148 bytes
+
+
+## 2026-08-30 - CAN-FD stress test up to 5 Mbps data phase
+**Changes:**
+- Enabled transmitter delay compensation (TDC) in can_setup.h init() with empirically verified TDCO=16 kernel TQ cap
+- extended B command to B<arb>:<fd>[:<tdco>] for FD BRS frames
+- bounded TX retry loop (TXFAIL instead of firmware wedge)
+- stressfd mode in can_test_host.py
+
+**Reasoning:**
+- Test the FD data phase up to 5 Mbps on the terminated two-board bus
+- the driver flag enable_delay_compensation was never applied and FD frames failed above 3.4 Mbps due to wrong TDCO units (kernel TQ, not data mTQ)
+
+**Notes:**
+- 1000/1000 packets with 0 protocol errors at arb 1M + data 1M/2.5M/3.4M/4.25M/5M
+- classic 125k-1M re-verified 0 errors
+- note 2M/3M/4M are not exactly representable from the 170 MHz kernel clock (run at 2.02/3.04/4.05M)
+
+FLASH: 60956 bytes (46.51% of 131072 bytes): +644 bytes
+RAM: 8296 bytes (25.32% of 32768 bytes): +16 bytes
+
+
+## 2026-08-30 - Refactored CAN stack: hardware layer in can_setup, message layer in can_control.h
+**Changes:**
+- Created src/can_control.h (CANControl): interface setup at fixed 1 Mbps arb / 5 Mbps FD, non-blocking TX frame ring with 6+2 chunk framing, RX reassembly queue, status counters
+- cleaned test artifacts out of can_setup.h (NORMAL mode default, fixed TDCO=16, removed TDCO override)
+- main.cpp reduced to a SerialUSB<->CAN text bridge
+
+**Reasoning:**
+- User requested clear layered structure: hardware in can_setup, buffers and message protocol in can_control.h, minimal main
+- no test-only code in production firmware
+
+**Notes:**
+- Live-verified bidirectional text exchange with multi-chunk messages on both boards
+- flash 58784 bytes, RAM 9316 bytes
+
+FLASH: 58784 bytes (44.85% of 131072 bytes): -2172 bytes
+RAM: 9316 bytes (28.43% of 32768 bytes): +1020 bytes
+
+
+## 2026-08-30 - CAN chunk protocol: raw 8-byte commands with FD frame aggregation
+**Changes:**
+- Redesigned can_control.h: one chunk = one command = 8 bytes with zero service bytes
+- consecutive same-id chunks aggregate into single CAN-FD frames (up to 8 per 64B frame, DLC-derived unpacking)
+- lock-free SPSC RX chunk ring and TX frame ring with DMB barriers
+- API: send(id,chunk)/read(id,chunk)/is_rx_available/is_tx_empty/is_tx_full/flush/update
+- fixed bytes_to_dlc() bug for DLC 24/32/48/64 in can_setup.h
+
+**Reasoning:**
+- User requested flag-free 8-byte chunk protocol with hardware-level FD aggregation for same-id commands
+
+**Notes:**
+- Live verified: bidirectional text, 96-char line in 2 FD frames, 40-line flood with zero losses
+- flash 58748, RAM 9332
+
+FLASH: 58748 bytes (44.82% of 131072 bytes): -36 bytes
+RAM: 9332 bytes (28.48% of 32768 bytes): +16 bytes
+
+
+## 2026-08-30 - CAN control: write(id,msg,len) whole-message transmit API
+**Changes:**
+- Replaced chunk-loop send+flush with single write(id,msg,len): atomic all-or-nothing enqueue, direct bulk memcpy into frame-ring slots (one copy per frame, no intermediate aggregation buffer), FD tail zero-padded to legal DLC (5->6, 7->8 chunks)
+- send(id,chunk)=write of one chunk
+- read() stays one chunk per call
+- classic CAN splits into 8-byte frames
+- main.cpp uses a single write() per console line
+
+**Reasoning:**
+- User requested whole-message write semantics: what is written is what gets sent, no flush/pending state
+
+**Notes:**
+- Live verified: bidirectional text, 100-byte message in 2 FD frames, 60-line flood with zero losses
+- flash 58640, RAM 9256
+
+FLASH: 58640 bytes (44.74% of 131072 bytes): -108 bytes
+RAM: 9256 bytes (28.25% of 32768 bytes): -76 bytes
+
+
+## 2026-08-31 - spi_setup.h reworked: single internal MT6835 on SPI3
+**Changes:**
+- Removed SPI1/TLE5012 support, external-encoder auto-detection and ENCODER_USE_EXTERNAL routing
+- deleted ~380 lines of commented-out legacy code
+- Encoder_SmartInit() renamed to Encoder_Init()
+- added DMA transfer-error handling path
+
+**Reasoning:**
+- Only one internal encoder (MT6835 on SPI3) is used now, no external encoder exists
+
+**Notes:**
+- Public API kept: Encoder_GetAngle() / Encoder_StartTransfer() unchanged
+- tunepulse.h updated to call Encoder_Init()
+
+FLASH: 63300 bytes (48.29% of 131072 bytes): +4660 bytes
+RAM: 7404 bytes (22.60% of 32768 bytes): -1852 bytes
+
+
+## 2026-08-31 - spi_setup.h reworked: both encoders on SPI1, MT6835 primary
+**Changes:**
+- Replaced SPI3/MT6835-only design with single SPI1 bus hosting MT6835 (mode 3, probed first) and TLE5012B fallback (mode 1) with auto-detection
+- SPI1_SwitchToTLE() reconfigures CPOL and TX DMA buffer
+- transfer length switched per active encoder (6/4 bytes)
+
+**Reasoning:**
+- Both encoders are wired to the internal SPI1 bus (PA4 CS, PA5-PA7)
+- SPI3 is not used for encoders
+
+**Notes:**
+- API unchanged: Encoder_Init(), Encoder_GetAngle(), Encoder_StartTransfer()
+- new Encoder_IsUsingMT() replaces Encoder_IsUsingExternal()
+
+FLASH: 63616 bytes (48.54% of 131072 bytes): +316 bytes
+RAM: 7416 bytes (22.63% of 32768 bytes): +12 bytes
+
+
+## 2026-08-31 - USB log of detected encoder
+**Changes:**
+- Added TP_LOG messages to Encoder_Init(): reports MT6835 detected (primary) or fallback to TLE5012B over SerialUSB
+- included lib/dev_log.h
+
+**Reasoning:**
+- User requested visibility of which encoder was auto-detected at boot
+
+**Notes:**
+- Messages: 'ENCODER: MT6835 detected on SPI1 (primary)' / 'ENCODER: MT6835 not found, fallback to TLE5012B on SPI1'
+- zero cost when DEV_LOG_ENABLE is off
+
+FLASH: 63748 bytes (48.64% of 131072 bytes): +132 bytes
+RAM: 7416 bytes (22.63% of 32768 bytes): +0 bytes
+
+
+## 2026-08-31 - Encoder selection via compile-time define
+**Changes:**
+- Removed all runtime auto-detection logic
+- added ENCODER_TYPE define (ENCODER_MT6835 / ENCODER_TLE5012B) that selects buffers, SPI mode (3/1) and frame length (6/4 bytes)
+- USB log reports the configured type
+- #error guard against invalid selection
+
+**Reasoning:**
+- TLE5012B auto-detection was unreliable
+- user sets the encoder type manually
+
+**Notes:**
+- Both branches build-verified: MT6835 (Flash 63340) and TLE5012B (Flash 63312)
+- default = ENCODER_MT6835
+- Encoder_GetAngle()/Encoder_StartTransfer() API unchanged
+
+FLASH: 63340 bytes (48.32% of 131072 bytes): -408 bytes
+RAM: 7404 bytes (22.60% of 32768 bytes): -12 bytes
+
+
+## 2026-08-31 - Conditional DRV_EN pinout per encoder type
+**Changes:**
+- MT6835 board: DRV_EN moved to PB12, PB11 permanently driven LOW (both configured as outputs in IO_Init)
+- TLE5012B board: PB11 = DRV_EN, PB12 = I_CAL (unchanged)
+- spi_setup.h now included from target.h so ENCODER_TYPE drives PINOUT defines
+- tunepulse.h asserts the correct DRV_EN pin conditionally
+
+**Reasoning:**
+- DRV_EN/I_CAL pin assignment differs between MT6835 and TLE5012B board revisions
+
+**Notes:**
+- Both configs build-verified: MT6835 (Flash 63344) and TLE5012B (Flash 63312)
+- PINOUT::DRV_EN / PINOUT::DRV_LOW / PINOUT::I_CAL defined conditionally in target.h
+
+FLASH: 63344 bytes (48.33% of 131072 bytes): +4 bytes
+RAM: 7404 bytes (22.60% of 32768 bytes): +0 bytes
+
+
+## 2026-09-01 - Angle calibration: verified read-back after flash save; removed ISR-blocking USB dumps
+**Changes:**
+- CalStage_Save now reloads the freshly written table from flash via the regular boot load path before reaching Ready (verify_after_save flag)
+- motor profile publish (cal_id/offset/begin_save) deferred until read-back commit
+- read-back miss raises CalStage_Error
+- removed 200-element TP_LOG_ARRAY dumps of cal/ecc tables from check() (they ran inside the PWM-period ISR and block the control loop on USB back-pressure)
+
+**Reasoning:**
+- Post-fresh-calibration motor behaved erratically until reset while the same flash table worked after reboot - live state now provably equals the post-reset state, and the flash write itself is validated
+- calibration no longer stalls the control ISR during validation
+
+**Notes:**
+- Read-back adds ~14 ticks (0.7 ms at 20 kHz) of held-rotor time after the dump
+- Flash 63272 (-72), RAM 7396 (-8)
+- builds clean for cln17_v3_release
+
+FLASH: 63272 bytes (48.27% of 131072 bytes): -72 bytes
+RAM: 7396 bytes (22.57% of 32768 bytes): -8 bytes
+
+

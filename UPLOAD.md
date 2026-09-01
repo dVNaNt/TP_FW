@@ -41,6 +41,29 @@ python -m platformio run -e radix_release -t size
 
 По умолчанию используется **ST-Link** (`upload_protocol = stlink`).
 
+### Загрузка на все платы через все ST-Link
+
+В проект подключен скрипт `tools/upload_all_stlinks.py` (`extra_scripts = post:...`).
+Команда `python -m platformio run -e <env> -t upload` автоматически:
+
+- находит **все подключённые ST-Link** (Windows PnP, VID 0483, известные PID);
+- прошивает **все платы параллельно** — по одному экземпляру OpenOCD на каждый ST-Link
+  (привязка по серийному номеру через `hla_serial`);
+- верифицирует прошивку и перезапускает платы (`verify reset`);
+- возвращает ошибку, если хотя бы одна плата не прошилась.
+
+Вывод каждого ST-Link помечается его серийным номером: `[066CFF...] OpenOCD output...`.
+
+Список обнаруженных ST-Link без прошивки:
+```bash
+python tools/upload_all_stlinks.py --list
+```
+
+Прямой запуск (вручную, вне PlatformIO):
+```bash
+python tools/upload_all_stlinks.py .pio/build/cln17_v3_release/firmware.elf
+```
+
 Для использования DFU измените в `platformio.ini`:
 ```ini
 upload_protocol = dfu

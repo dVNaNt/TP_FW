@@ -16,6 +16,10 @@
 
 #include "Arduino.h"
 
+// Bring in the encoder selection (ENCODER_TYPE) first: the board pinout below
+// depends on the compile-time selected encoder type (MT6835 vs TLE5012B).
+#include "spi_setup.h"
+
 namespace PINOUT {
 // Motor Control (PWM & Sensing)
 constexpr PinName PWM1H = PA_8;   // TIM1_CH1 - High-side Gate 1
@@ -25,14 +29,24 @@ constexpr PinName PWM1L = PB_13;  // TIM1_CH1N - Low-side Gate 1
 constexpr PinName PWM2L = PB_14;  // TIM1_CH2N - Low-side Gate 2
 constexpr PinName PWM3L = PB_15;  // TIM1_CH3N - Low-side Gate 3
 
-constexpr PinName DRV_EN = PB_11;     // Driver Enable
+// Gate-driver enable / service pins: the assignment depends on the encoder
+// type selected in spi_setup.h (different board revisions).
+#if (ENCODER_TYPE == ENCODER_MT6835)
+constexpr PinName DRV_EN = PB_12;     // Driver Enable (MT6835 board revision)
+constexpr PinName DRV_LOW = PB_11;    // Permanently driven LOW (MT6835 board revision)
+#else
+constexpr PinName DRV_EN = PB_11;     // Driver Enable (TLE5012B board revision)
+constexpr PinName I_CAL = PB_12;      // Current Calibration/Offset (TLE5012B board revision)
+#endif
+
 constexpr PinName DRV_FAULT = PB_10;  // Driver Fault Input (active low)
 
 // Current sensing (ADC)
 constexpr PinName I_A = PA_3;   // ADC1_IN4 - Current Sense Phase A, COMP2 + DAC1.2
 constexpr PinName I_B = PA_1;   // ADC2_IN2 - Current Sense Phase B, COMP1 + DAC1.1
 constexpr PinName I_C = PB_0;   // ADC1_IN15 - Current Sense Phase C, COMP4 + DAC3.2
-constexpr PinName I_CAL = PB_12;  // Current Calibration/Offset
+// Note: I_CAL (PB_12) is defined in the encoder-type conditional above; the
+// current-calibration pin only exists on the TLE5012B board revision.
 
 // Voltage sensing
 constexpr PinName VSENS = PA_0;  // ADC2_IN1 - Bus Voltage Sense, COMP3 + DAC3.1

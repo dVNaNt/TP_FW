@@ -31,6 +31,11 @@
  *   table MUST be persisted ("dump_calibration" runs automatically) before
  *   the machine reaches Ready: appended into free space, or erase + rewrite
  *   from offset zero when no room remains.
+ * - The freshly written record is then READ BACK through the regular boot
+ *   load path (begin_load -> scan_word -> commit_candidate) and only a
+ *   verified record reaches Ready. This guarantees the live post-calibration
+ *   state is byte-identical to the state a power cycle would restore, and
+ *   validates the flash write itself (a failed read-back reports Error).
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
@@ -78,8 +83,8 @@ enum CalSamplingState {
  * @brief Calibration configuration constants
  */
 enum {
-    ANGLE_CAL_CAL_SETTLING_TIME_US = 10000,  // Settling time in microseconds
-    ANGLE_CAL_CAL_SPEED_US = 2500,           // Speed in angle increments per microsecond
+    ANGLE_CAL_CAL_SETTLING_TIME_US = 1000,  // Settling time in microseconds
+    ANGLE_CAL_CAL_SPEED_US = 25000,           // Speed in angle increments per microsecond
     ANGLE_CAL_CAL_OVERSEMPLING = 128,        // Number of samples per oversampling period
     ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 8      // Number of test steps in Pass0
 };
@@ -152,7 +157,23 @@ public:
                     if (ptab->is_loaded()) {   // Branch 1: valid table -> straight to Ready
                         TP_LOG("CALIBRATION: Valid table restored from flash");
                         loaded_from_flash = true;
+                        if (verify_after_save) {
+                            // Post-save read-back succeeded: the live RAM table now
+                            // went through the SAME commit path (scan_word ->
+                            // commit_candidate) as after a power cycle, so the
+                            // running state is provably identical to the state a
+                            // reset would restore. Publish the motor profile now,
+                            // after - not before - the verification.
+                            verify_after_save = false;
+                            motor.set_cal_id((uint8_t)ptab->dumped_id());             // Publish fresh table reference
+                            motor.set_calibration_offset((int32_t)ptab->get_offst_val());  // Publish measured angle offset
+                            motor.begin_save();  // Persist the motor profile (non-blocking, 8 words/tick)
+                        }
                         calibration_stage = CalStage_Ready;
+                    } else if (verify_after_save) {  // Read-back miss: the write is corrupted or lost
+                        verify_after_save = false;
+                        TP_LOG("CALIBRATION: ERROR - saved table read-back failed");
+                        calibration_stage = CalStage_Error;
                     } else {                       // Branch 2: none/invalid -> park in Reset
                         TP_LOG("CALIBRATION: No valid table in flash - waiting for calibrate()");
                         calibration_stage = CalStage_Reset;
@@ -164,16 +185,17 @@ public:
                 if (ptab->dump_tick()) {
                     if (ptab->dump_ok()) {
                         TP_LOG("CALIBRATION: Table saved to flash");
-                        // Publish the fresh calibration reference into the
-                        // motor profile: the ID is the chunk address of the
-                        // FA3E marker. Also store the measured angle offset,
-                        // then re-save the parameter record into system_dump
-                        // (non-blocking, 8 words per tick from TunePulseHeart::tick).
-                        motor.set_cal_id((uint8_t)ptab->dumped_id());
-                        motor.set_calibration_offset((int32_t)ptab->get_offst_val());
-                        motor.begin_save();
-                        calibration_requested = false;       // Cycle fully finished
-                        calibration_stage = CalStage_Ready;  // Ready only after a successful save
+                        // Do NOT trust the RAM state after the dump: reload the
+                        // freshly written record from flash through the regular
+                        // boot-time path. This guarantees that the motor behaves
+                        // after calibration exactly as it would after a reset
+                        // (same commit path), and validates the flash write.
+                        // The motor profile publish (cal_id / offset / save) is
+                        // deferred until the read-back commits in CheckMemory.
+                        calibration_requested = false;  // Cycle fully finished
+                        verify_after_save = true;
+                        ptab->begin_load(ptab->dumped_id());  // Arm read-back of the new record
+                        calibration_stage = CalStage_CheckMemory;
                     } else {
                         TP_LOG("CALIBRATION: ERROR - flash save failed");
                         calibration_stage = CalStage_Error;
@@ -479,6 +501,7 @@ private:
     bool calibration_requested = false;  // True between calibrate() call and cycle completion
     bool loaded_from_flash = false;      // True when a valid table was restored from flash
     bool boot_resolved_ = false;         // True once the boot-time load attempt produced an outcome
+    bool verify_after_save = false;      // True while the CheckMemory scan verifies a fresh dump
 
     /**
      * @brief Decrements a counter until it reaches zero

@@ -245,12 +245,13 @@ public:
      */
 
     float temperature = 0;
+    uint32_t counter = 0;
     void tick() {
         if (is_running.exchange(true, std::memory_order_acq_rel))  // Single-owner entry: drop the sample if a pass is in progress
             return;
         if (driver_phy.current.is_changed() & driver_phy.supply.is_changed()) {
             driver_phy.tick();
-            
+            counter++;
             led_control(0, driver_phy.get_fault());
 
 
