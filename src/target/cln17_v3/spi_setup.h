@@ -50,7 +50,7 @@
 #define ENCODER_MT6835   1 // 21-bit absolute encoder, SPI mode 3, 6-byte frames
 #define ENCODER_TLE5012B 2 // 15-bit absolute encoder, SPI mode 1, 4-byte frames
 
-#define ENCODER_TYPE ENCODER_TLE5012B // <<< CHANGE HERE to switch the encoder
+#define ENCODER_TYPE ENCODER_MT6835 // <<< CHANGE HERE to switch the encoder
 
 // Compile-time sanity check: an unsupported selection must fail the build.
 #if (ENCODER_TYPE != ENCODER_MT6835) && (ENCODER_TYPE != ENCODER_TLE5012B)

@@ -191,10 +191,19 @@ inline void tunepulse_init() {
     // Motor-parameter persistence: bind the motor record store to the
     // USER-DATA partition and arm the boot-time restore scan. The scan runs
     // non-blocking (8 words / 32 bytes per system tick from TunePulseHeart::
-    // tick()) and restores the NEWEST valid record with the matching Cal-ID,
-    // printing the restored parameter set over serial when done.
+    // tick()) and restores the NEWEST valid record, printing the restored
+    // parameter set over serial when done.
+    //
+    // NOTE: begin_load(MOTOR_ID_ANY) is mandatory here. The no-argument
+    // overload filters on the CURRENT cal_id_, which is still the constructor
+    // default (0) at this point - before any record has been restored. Since
+    // a recalibration appends its table record to the NEXT free flash chunk,
+    // the freshly saved profile usually carries a NON-ZERO Cal-ID; filtering
+    // the boot scan by 0 silently DROPPED it, so after the first re-edit the
+    // power-cycle state (stale profile / full re-calibration at every boot)
+    // diverged from the live post-calibration state.
     TP.motor_params.attach_flash(&TP.system_dump);
-    TP.motor_params.begin_load();
+    TP.motor_params.begin_load(MOTOR_ID_ANY);
 
     delay(100);
     IO_Init();  // Initialize GPIO pins

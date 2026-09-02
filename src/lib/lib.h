@@ -227,6 +227,16 @@ public:
     int32_t err_sign = -1;    ///< Sign correction applied to the mechanical encoder position.
     int32_t encoder_pos = 0;  ///< Last corrected mechanical encoder position (counts).
 
+    // Position-hold target for the position controller. Captured at the moment
+    // the angle calibration completes (and at every controller re-arm), so the
+    // rotor HOLDS where it is instead of being yanked to the absolute
+    // integrator zero. The hardcoded zero target made the drive fly up to a
+    // full turn across the 50-pole-pair detent field right after every
+    // calibration - which read as "the corrected angle is garbage" - while a
+    // reboot looked fine only because the previous session had already parked
+    // the rotor exactly at that zero.
+    int32_t pos_hold_target_ = 0;
+
     /**
      * @brief Periodic control-loop entry point (called once per fresh sample).
      *
@@ -271,20 +281,49 @@ public:
             // ========================================================================
             // Motor controller tick logic
             // ========================================================================
-            float targt = current_target_a;  // Local working copy of the current target [A]
+            bool flash_window = false;           // True when THIS pass leaves the bridge in a zero-current state
+            float targt = current_target_a;      // Local working copy of the current target [A]
             switch (motor_status) {
                 case MotorStatus::Success: {
                     if (!angle_calibrator.is_calibrated()) {
                         angle_el_ = angle_calibrator.tick(real_raw_pos, (int16_t)current_driver.motor.get_motor_type());
                         if (angle_calibrator.is_calibrated()) {
+                            current_driver.foc_current_.reset();
+                            // Hold the rotor exactly where the calibration left
+                            // it: capturing the target HERE (instead of using a
+                            // hardcoded absolute zero) prevents the post-
+                            // calibration lurch across the 50-pole-pair detent
+                            // field that read as "the corrected angle is garbage".
+                            pos_hold_target_ = real_pos;
                             targt = current_target_a = 0.5;
+                        } else if (angle_calibrator.is_settling() || angle_calibrator.is_persisting()
+                                   || motor_params.is_flash_busy()) {
+                            // Flash I/O window (boot scan / table dump / read-back
+                            // / MOTOR-PROFILE SAVE): every 32-byte flash programming
+                            // stalls the single-bank CPU for several PWM periods (a
+                            // full-region erase for tens of ms), so keep the phases
+                            // de-energized instead of holding 0.5 A at a frozen
+                            // angle. The motor-profile save started by
+                            // MotorCalibration on a first boot (no stored profile)
+                            // lands INSIDE this window and previously corrupted the
+                            // Pass0 step statistics ("Motion too inconsistent").
+                            targt = 0.0f;
+                            flash_window = true;  // Zero-current vector latched: NVM programming allowed
                         }
                         break;
                     } else {
                         // Real electrical angle (needed for closed loop and sync):
                         // apply flash-stored correction then the polarity sign.
                         angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_ang)) * el_sign);
-                        targt = position_controller.tick(real_pos, 0, 0.0, current_target_a, 0);
+                        targt = position_controller.tick(real_pos, pos_hold_target_, 0.0, current_target_a, 0);
+                        if (motor_params.is_flash_busy()) {
+                            // Motor-profile record write in progress (e.g. the
+                            // post-calibration profile save): the upcoming flash
+                            // programming would freeze this ISR mid-control, so
+                            // command zero current for the transfer ticks.
+                            targt = 0.0f;
+                            flash_window = true;  // Zero-current vector latched: NVM programming allowed
+                        }
                     }
 
                     break;
@@ -292,6 +331,7 @@ public:
                 case MotorStatus::CalibError:
                     // Calibration failed: force zero torque command.
                     targt = current_target_a = 0.0;
+                    flash_window = true;  // Zero torque: NVM programming safe
                     break;
                 case MotorStatus::NotCalibrated:
                     angle_calibrator.tick(real_raw_pos, (int16_t)current_driver.motor.get_motor_type());
@@ -300,6 +340,7 @@ public:
                         // sentinel handled by the PWM backend) and bail out.
                         pwm_voltage_ab.a = pwm_voltage_ab.b = INFINITY;
                         driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+                        tp_flash_programming_window = true;  // Phases shorted: NVM programming safe
                         is_running.store(false, std::memory_order_release);
                         return;
                     } else if (current_driver.motor.get_status() == MotorStatus::Success) {
@@ -317,6 +358,7 @@ public:
                     // (active brake / idle) and skip FOC this cycle.
                     pwm_voltage_ab.a = pwm_voltage_ab.b = NAN;
                     driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+                    tp_flash_programming_window = true;  // All low-side ON: NVM programming safe
                     is_running.store(false, std::memory_order_release);
                     return;
                 }
@@ -330,6 +372,14 @@ public:
             // an alpha-beta voltage vector and hand it to the physical layer.
             pwm_voltage_ab = current_driver.tick_control_foc((int16_t)angle_el_, targt);
             driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+
+            // Publish the NVM programming window: true only when THIS pass
+            // commanded zero current (flash-I/O gates above), so the vector
+            // latched on the bridge during the next flash programming stall
+            // cannot yank an energized rotor. IMPORTANT: the flag describes
+            // the vector that is ON the bridge RIGHT NOW - the write engines
+            // sample it on the NEXT pass, which is exactly the stall case.
+            tp_flash_programming_window = flash_window;
         }
         is_running.store(false, std::memory_order_release);
     }

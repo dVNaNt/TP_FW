@@ -19,7 +19,9 @@
  *    to eliminate hysteresis effects.
  * 3. Normalization: Find minimum value and use it as offset, align data to zero.
  * 4. Validation: Check that deviations from ideal linear progression are within bounds.
- * 5. ECC build: Build a compact inverse table of raw-angle eccentricity error.
+ * 5. ECC build: A compact inverse table of raw-angle eccentricity error, rebuilt at
+ *    every flash-record commit (commit_candidate) so a boot-loaded table and a
+ *    freshly calibrated one produce bit-identical RAM state.
  * 6. Correction: Use fast interpolation to output stable corrected angles.
  *
  * Copyright 2026, creapunk
@@ -183,6 +185,24 @@ public: // Make the following methods public for external module access
     }
 
     /**
+     * @brief Clears the WHOLE RAM state to pristine power-on values
+     *
+     * Samples, ECC table and every metadata field return to exactly the
+     * state a fresh power-up produces via create(). The flash binding is
+     * preserved (create() returns an unbound instance), so a subsequent
+     * begin_load()/load_tick() rebuilds the live state purely from the
+     * stored record - the same code path, and the same bytes, as after an
+     * HW reset. Used right after a dump completes: the running state is
+     * then guaranteed to contain NOTHING that survived from the physical
+     * calibration sweep itself.
+     */
+    void wipe() {
+        FlashEEPROM* bound = flash;  // Preserve the persistence binding
+        *this = create();            // Every field back to power-on defaults
+        attach_flash(bound);         // Re-bind the flash driver
+    }
+
+    /**
      * @brief Services one 32-byte block of the space scan / record write
      * @return true when the dump is finished (outcome via dump_ok())
      */
@@ -192,8 +212,18 @@ public: // Make the following methods public for external module access
                 if (f_addr + 32 > flash->get_max_size()) f_mode = MODE_IDLE; // Scanned everything
                 else {
                     uint32_t w[8];
-                    if (!flash->read_block(f_addr, w)) f_mode = MODE_IDLE;   // HW fault
-                    else {
+                    if (!flash->read_block(f_addr, w)) {
+                        // Read fault == the block was never programmed (erased
+                        // flash raises a double-bit ECC NMI, read_section
+                        // reports false). Free space therefore STARTS at this
+                        // chunk - appending here is safe. Treating this as a
+                        // HW fault (previous behavior) made every dump fall
+                        // into the erase-everything path: needless flash wear
+                        // plus a tens-of-ms __disable_irq() stall inside the
+                        // control ISR on every calibration.
+                        f_free = f_addr;
+                        f_mode = MODE_IDLE;
+                    } else {
                         f_addr += 32;
                         for (int i = 0; i < 8 && f_mode == MODE_SPACE; ++i)
                             if (w[i] == 0xFFFFFFFFul) {            // First unprogrammed word
@@ -210,13 +240,19 @@ public: // Make the following methods public for external module access
             uint32_t aligned = (f_free + 31) & ~31ul;
             if (aligned + need <= flash->get_max_size()) {         // Fits into the free tail: append
                 f_wri0 = aligned; f_wri = aligned; f_word = 0; f_mode = MODE_WRITE;
-            } else if (flash->erase(0xDEADC0DE)) {                 // Full: wipe and rewrite cleanly
-                TP_LOG("CALIBRATION: Flash full - erasing region");
+            } else if (!tp_flash_programming_window) {             // Full, but the bridge still carries
+                return false;                                      // an energized vector: WAIT for the
+            } else if (flash->erase(0xDEADC0DE)) {                 // de-energized window (a page erase
+                TP_LOG("CALIBRATION: Flash full - erasing region"); // stalls the ISR for tens of ms)
                 f_wri0 = 0; f_wri = 0; f_word = 0; f_mode = MODE_WRITE;
             }                                                      // Erase failed: stays IDLE = fail
             return f_mode != MODE_WRITE;
         }
         if (f_mode == MODE_WRITE) {                                // Phase 2: stream the record out
+            if (!tp_flash_programming_window) {                    // Zero-current vector must be latched
+                return false;                                      // on the bridge BEFORE programming:
+            }                                                      // each write tick stalls the ISR with
+                                                                   // IRQs off, holding the previous vector
             for (int r = 0; r < 1 && f_word < f_total; ++r) {      // 1 record = 8 words per tick
                 uint32_t rec[8];
                 uint32_t n = f_total - f_word < 8 ? f_total - f_word : 8; // Words left in this record
@@ -334,12 +370,14 @@ public: // Make the following methods public for external module access
         uint16_t avg_step = (uint16_t)(UINT16_MAX / (uint16_t)cal_size); // Theoretical step between array elements
         max_deviation = 0; // Reset maximum deviation counter for the check phase
 
-        TP_LOG_VAL("Offset ", offst_val); // Output the discovered offset value
-        TP_LOG_VAL("Offset idx ", offst_idx); // Output the starting index of the offset
-        // NOTE: no TP_LOG_ARRAY here on purpose. This method runs inside the
-        // PWM-period control ISR; dumping the whole 200-value table over USB CDC
-        // blocks the control loop for as long as the host back-pressures the
-        // serial link, dropping control ticks and jerking the motor.
+        // NOTE: no TP_LOG here on purpose (neither the offset values nor the
+        // per-sample deviations). This method runs inside the PWM-period
+        // control ISR WITH THE MOTOR ENERGIZED at the calibration holding
+        // current; any SerialUSB write can block on host back-pressure and
+        // freeze the control loop on a frozen voltage vector - the proven
+        // mechanism behind the post-calibration chaos. The same values are
+        // reported once per commit by commit_candidate(), which runs in the
+        // de-energized flash-I/O window instead.
 
         // Iterate through each calibration point to compute deviations
         for (size_t i = 0; i < cal_size; ++i) { // Loop over every recorded calibration point
@@ -355,12 +393,17 @@ public: // Make the following methods public for external module access
 
             // Check if deviation exceeds acceptable threshold (average step size)
             if (deviation >= 3 * avg_step) { // Verify linearity is within tolerable mechanical limits
-                TP_LOG_VAL("Dev ", deviation); // Output the failing deviation value for debugging
                 return false; // Validation failed: sensor non-linearity is too large
             } // End of deviation threshold check
         } // End of validation loop
 
-        build_ecc_table(); // Construct the compact inverse eccentricity table upon successful validation
+        // NOTE: build_ecc_table() is deliberately NOT called here. check() runs on
+        // the fresh-calibration path only, so an ECC table built here would exist
+        // ONLY in the post-calibration RAM state. The table is rebuilt by
+        // commit_candidate() instead - the single commit point shared by the boot
+        // flash load and the post-save read-back - which guarantees the live
+        // post-calibration state (cal_table AND ecc_table) is bit-identical to the
+        // state a power cycle restores from the same record.
 
         return true; // Validation successful: all deviations are within acceptable physical bounds
     } // End of check() method
@@ -638,6 +681,21 @@ private: // Restrict direct access to internal state memory and helper routines
         offst_idx = f_m[2] < f_sidx ? f_m[2] : 0;              // Bounds-checked start index
         cal_size = f_sidx;                                     // Adopt the candidate length
         temp_idx = 0;                                          // Reset sequential-fill tracker
+        // Rebuild the eccentricity table from the committed state. This is the
+        // SINGLE ECC build point: it runs both on the boot-time flash load and on
+        // the post-save read-back, so the freshly calibrated live state and the
+        // state restored after a power cycle are bit-identical (the ECC table is
+        // RAM-only metadata derived deterministically from the record, never
+        // stored in flash). The cost is O(cal_size + ECC_TABLE_SIZE * cal_size)
+        // once per commit - a few microseconds for the usual ~40-sample table.
+        build_ecc_table();
+        // Commit diagnostics: printed on EVERY successful load (boot restore AND
+        // post-save read-back). Compare the line printed right after a calibration
+        // with the line printed at the next boot: identical values prove the
+        // running state and the power-cycle state use the same bytes.
+        TP_LOG_VALS("CAL: committed size,div,offst,oidx,maxdev",
+                    (long)cal_size, (long)el_angle_div, (long)offst_val,
+                    (long)offst_idx, (long)max_deviation);
         load_ok = true;                                        // Scan produced a usable table
     }
 

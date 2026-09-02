@@ -1012,3 +1012,139 @@ FLASH: 63272 bytes (48.27% of 131072 bytes): -72 bytes
 RAM: 7396 bytes (22.57% of 32768 bytes): -8 bytes
 
 
+## 2026-09-01 - Fixed glacial calibration: armed fast-path miss skipped Setup stage, rotation ran at speed=1
+**Changes:**
+- CheckMemory miss with an armed calibration request now restarts the full physical cycle from CalStage_Setup (which computes speed = calculate_speed() = 50 inc/tick) instead of jumping straight to Reset
+- state (cycle stage, timers, cal_idx, ang_el_step) fully reinitialized on this path
+
+**Reasoning:**
+- With a stored motor profile the fast path (CheckMemory -> miss -> Reset) bypassed the only place where rotation speed is initialized, leaving speed at its default of 1 increment/tick: rotor sweep became ~50x slower than designed, Pass0 failed with 'Motion too inconsistent' due to cogging at crawl speed, and Pass1/Pass2 stretched to minutes
+- latent since the flash fast-path was introduced (unreachable on a device without a stored profile)
+
+**Notes:**
+- Expected log now includes 'Starting calibration process' and 'Reset stage'
+- BLDC Pass1 back to ~1.2 s per pass
+- Flash 63368 (+96), RAM 7396
+
+FLASH: 63368 bytes (48.35% of 131072 bytes): +96 bytes
+RAM: 7396 bytes (22.57% of 32768 bytes): +0 bytes
+
+
+## 2026-09-01 - Angle calibration: fixed post-calibration electrical chaos (root cause + parity hardening)
+**Changes:**
+- Root cause: check() ran 200-element TP_LOG_ARRAY dumps of the cal/ECC tables over SerialUSB while executing INSIDE the control ISR - fresh calibration path only
+- once the USB CDC TX buffer filled, print() blocked on host back-pressure and the control loop froze with the motor energized at 0.5 A
+- boot path never calls check() so the same flash data always worked after a reset
+- dump removal confirmed in place
+- ECC table now rebuilt at commit_candidate() (single commit point shared by boot load and post-save read-back) instead of inside check(), making live post-calibration RAM state bit-identical to the post-reboot state including the RAM-only ECC table
+- motor de-energized (targt=0) during the flash persistence window (Save + read-back via is_settling()/is_persisting()) and during motor-profile record writes (Motor::is_flash_busy())
+
+**Reasoning:**
+- Flash programming on the single-bank STM32G431 stalls the CPU for several PWM periods per 32-byte record (tens of ms for a full-region erase)
+- holding 0.5 A at a frozen voltage vector during those stalls yanked the rotor at the end of every calibration
+- USB CDC dumps inside the ISR could block indefinitely
+- ECC table was the only RAM state that differed between fresh calibration and boot load
+
+**Notes:**
+- Root cause matched the symptom exactly: chaos only after calibration completes, perfect behavior after reboot with the same data
+- user suspicion about premature Ready status was ruled out - Ready is already gated behind the verified flash read-back
+- expect a short de-energized coast during the save window (table is already captured, so it is harmless)
+
+FLASH: 63436 bytes (48.40% of 131072 bytes): +68 bytes
+RAM: 7404 bytes (22.60% of 32768 bytes): +8 bytes
+
+
+## 2026-09-01 - Angle calibration: strict reset-equivalence - RAM table wiped and rebuilt purely from freshly written flash
+**Changes:**
+- Save stage now calls CalibrationTable::wipe() (new method: full RAM state to pristine power-on values via create(), flash binding preserved) BEFORE the read-back
+- the live state is then rebuilt exclusively by begin_load->scan_word->commit_candidate from the just-written record - the identical code path and identical bytes as after an HW reset
+- nothing from the calibration sweep (samples, ECC, metadata, stale tail beyond cal_size) survives in RAM
+- added commit diagnostics line 'CAL: committed size,div,offst,oidx,maxdev' printed on EVERY successful table commit (both boot restore and post-save read-back) so the post-calibration state and the boot state can be compared byte-for-byte
+
+**Reasoning:**
+- User reported chaos persisting after calibration
+- static analysis could not separate the paths further, so equivalence is now enforced structurally instead of proven by inspection
+- the commit log turns the 'same data' assumption into a verifiable fact
+
+**Notes:**
+- Expected: the CAL: committed line right after calibration must be IDENTICAL to the line at the next boot - if they differ the record/dump path is broken, if they match the divergence is outside the table (please capture both lines plus what the motor does between Ready and the chaos)
+
+FLASH: 63760 bytes (48.65% of 131072 bytes): +324 bytes
+RAM: 7404 bytes (22.60% of 32768 bytes): +0 bytes
+
+
+## 2026-09-01 - Angle calibration: fixed read-back loading chunk 0 instead of the freshly written record
+**Changes:**
+- CalibrationTable::wipe() reset store_ok/f_wri0, so dumped_id() evaluated AFTER the wipe always returned 0: the post-save read-back loaded chunk 0 (the OLDEST record in the partition - possibly a stale table from the previous TLE5012B encoder era) instead of the just-written one, and motor.set_cal_id published 0 into the profile
+- the record id is now captured into saved_cal_id_ BEFORE the wipe and used both for begin_load() of the read-back and for the profile publish
+- commit log extended with the source chunk id ('table committed from chunk id = N')
+
+**Reasoning:**
+- The wipe-based reset-equivalence introduced a use-after-wipe of the dump engine state
+- loading chunk 0 fed get_el_angle_correction() with a stale/incompatible table immediately after calibration while a reboot restored a different (newest-profile) record - exactly the reported live-vs-reboot divergence
+
+**Notes:**
+- After flashing, the log right after calibration must show 'table committed from chunk id = N' where N matches 'Table saved to flash, id = N', and the next boot must commit the SAME id with identical size/div/offst/oidx/maxdev values
+
+FLASH: 63872 bytes (48.73% of 131072 bytes): +112 bytes
+RAM: 7412 bytes (22.62% of 32768 bytes): +8 bytes
+
+
+## 2026-09-01 - Fixed boot-time motor profile restore filtering out freshly saved profiles; erased-flash misclassified as HW fault in free-space scans
+**Changes:**
+- tunepulse_init() now arms the boot restore with begin_load(MOTOR_ID_ANY) instead of begin_load() which filtered the scan by the constructor-default cal_id_=0
+- CalibrationTable::dump_tick() and Motor::save_tick() now treat a flash read fault as the start of free space instead of no-space-found
+- removed SerialUSB logs from CalibrationTable::check() which ran inside the control ISR while the motor was energized
+
+**Reasoning:**
+- A recalibration appends its table record to the NEXT free flash chunk so the freshly saved profile carries a non-zero Cal-ID
+- the boot scan filtered by cal_id_=0 silently dropped it, so every power cycle restored a STALE profile (or none) and the post-reboot state diverged from the verified live post-calibration state - exactly the reported live-vs-reboot difference
+- erased flash raises a double-bit ECC NMI which read_block reports as a fault, so the free-space scans always aborted into the erase-everything path (needless wear plus a tens-of-ms IRQ-masked stall inside the control ISR)
+- USB writes inside the energized ISR are the previously proven freeze mechanism
+
+**Notes:**
+- Expected behavior: after a recalibration the next boot must restore the NEWEST profile (check the MOTOR: parameters restored log - cal_id must match the last CALIBRATION: table committed from chunk id) and the CAL: committed line must be identical after calibration and at the next boot
+- dumps now append without erasing the calibration partition
+- expect one extra appended record per recalibration until the 2KB partition fills (16 records), then one clean erase+rewrite
+
+FLASH: 63784 bytes (48.66% of 131072 bytes): -88 bytes
+RAM: 7412 bytes (22.62% of 32768 bytes): +0 bytes
+
+
+## 2026-09-01 - Fixed post-calibration angle chaos: position controller no longer yanks the rotor to absolute integrator zero; calibration loop now de-energized during motor-profile flash save
+**Changes:**
+- Position-hold target is captured at the moment the angle calibration completes (pos_hold_target_) instead of the hardcoded absolute zero target
+- the flash-I/O de-energize gate in the calibration branch now also covers motor_params.is_flash_busy()
+
+**Reasoning:**
+- The log proved the calibration table and profile are bit-identical between the live session and the reboot, so the divergence was behavioral: the hardcoded target 0 made the drive fly up to a full turn across the 50-pole-pair detent field right after every calibration (read as 'the corrected angle is garbage'), while a reboot looked fine only because the previous session had already parked the rotor at that zero
+- on a first boot (no stored profile) MotorCalibration starts the profile save which runs its write stall plus the float-heavy report() inside the control ISR while the calibration is energized, corrupting the Pass0 step statistics ('Motion too inconsistent')
+
+**Notes:**
+- Expected: right after the calibration completes the rotor must hold its position (no lurch), Pass0 must pass deterministically on a first boot after flashing, and the angle must stay valid without a reboot
+- to test the first-boot path erase the flash or use a fresh chip
+
+FLASH: 63812 bytes (48.68% of 131072 bytes): +28 bytes
+RAM: 7420 bytes (22.64% of 32768 bytes): +8 bytes
+
+
+## 2026-09-01 - Flash programming de-energized window gate + ISR-safe logging
+**Changes:**
+- Added tp_flash_programming_window flag published by TunePulseHeart::tick each pass
+- Motor::save_tick and CalibrationTable::dump_tick now wait for the zero-current window before flash write/erase (retry next tick)
+- TP_LOG* macros check CDC TX free room and drop output instead of blocking
+
+**Reasoning:**
+- Every 32-byte flash write stall (~0.5 ms with IRQs off) ran while an energized 0.5 A vector was still latched on the bridge: on a fresh flash the MotorCalibration-triggered profile save fired right at the angle-calibration start (derailed Pass0 + electrical noise)
+- after a reboot the post-calibration profile save produced the same yank right after completion. USBSerial::write additionally blocks on host back-pressure inside the control ISR - worst right after flashing while USB CDC re-enumerates
+
+**Notes:**
+- Saves now complete inside the existing de-energized windows (CheckMemory / Save / is_flash_busy)
+- expect the usual zero-current coast during saves but no rotor yank on the first write tick
+- logs may be truncated under heavy USB back-pressure
+- erased-flash reads still raise a recovered double-ECC NMI per word (bounded, ~1 us)
+
+FLASH: 64664 bytes (49.33% of 131072 bytes): +852 bytes
+RAM: 7420 bytes (22.64% of 32768 bytes): +0 bytes
+
+

@@ -36,6 +36,15 @@
  *   verified record reaches Ready. This guarantees the live post-calibration
  *   state is byte-identical to the state a power cycle would restore, and
  *   validates the flash write itself (a failed read-back reports Error).
+ *   commit_candidate() is also the single point where the RAM-only ECC
+ *   eccentricity table is rebuilt, so the parity above covers the whole
+ *   correction state.
+ *
+ * During the persistence window (Save + read-back) and any motor-profile
+ * flash write the control loop commands ZERO current: flash programming
+ * stalls the single-bank CPU for several PWM periods per 32-byte record
+ * (tens of ms for a full-region erase), which would otherwise yank a
+ * motor held at 0.5 A on a frozen voltage vector.
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
@@ -84,7 +93,7 @@ enum CalSamplingState {
  */
 enum {
     ANGLE_CAL_CAL_SETTLING_TIME_US = 1000,  // Settling time in microseconds
-    ANGLE_CAL_CAL_SPEED_US = 25000,           // Speed in angle increments per microsecond
+    ANGLE_CAL_CAL_SPEED_US = 2500,           // Speed in angle increments per microsecond
     ANGLE_CAL_CAL_OVERSEMPLING = 128,        // Number of samples per oversampling period
     ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 8      // Number of test steps in Pass0
 };
@@ -165,15 +174,41 @@ public:
                             // reset would restore. Publish the motor profile now,
                             // after - not before - the verification.
                             verify_after_save = false;
-                            motor.set_cal_id((uint8_t)ptab->dumped_id());             // Publish fresh table reference
-                            motor.set_calibration_offset((int32_t)ptab->get_offst_val());  // Publish measured angle offset
+                            // NOTE: publish the CAPTURED id, not dumped_id() - the
+                            // wipe in the Save handler reset store_ok, so dumped_id()
+                            // would return 0 (chunk zero = the oldest record).
+                            motor.set_cal_id((uint8_t)saved_cal_id_);                     // Publish fresh table reference
+                            motor.set_calibration_offset((int32_t)ptab->get_offst_val()); // Publish measured angle offset
                             motor.begin_save();  // Persist the motor profile (non-blocking, 8 words/tick)
                         }
+                        // Commit diagnostics: the id of the record the live state was
+                        // just rebuilt from (the freshly written record after a save,
+                        // the profile reference at boot). Compare with the next boot.
+                        TP_LOG_VAL("CALIBRATION: table committed from chunk id = ",
+                                   (long)motor.get_cal_id());
                         calibration_stage = CalStage_Ready;
                     } else if (verify_after_save) {  // Read-back miss: the write is corrupted or lost
                         verify_after_save = false;
                         TP_LOG("CALIBRATION: ERROR - saved table read-back failed");
                         calibration_stage = CalStage_Error;
+                    } else if (calibration_requested) {
+                        // Armed calibration request with a stored profile whose
+                        // table is gone/invalid: restart the FULL physical cycle
+                        // from the Setup stage. NOTE: it is NOT safe to jump
+                        // straight into Reset here - the rotation speed is
+                        // computed only in the Setup completion handler
+                        // (speed = calculate_speed(...)). Skipping Setup leaves
+                        // `speed` at its default of 1 increment per tick, which
+                        // makes the rotor sweep ~50x slower than designed: the
+                        // crawl excites cogging/jerk, Pass0 reports
+                        // "Motion too inconsistent" and the whole cycle drags
+                        // for minutes.
+                        TP_LOG("CALIBRATION: No valid table in flash - starting full cycle");
+                        calibration_stage = CalStage_Setup;
+                        cal_cycle_stage = CalSamplingState_Setup;
+                        time_in_state = 0;
+                        cal_idx = 0;
+                        ang_el_step = 0;
                     } else {                       // Branch 2: none/invalid -> park in Reset
                         TP_LOG("CALIBRATION: No valid table in flash - waiting for calibrate()");
                         calibration_stage = CalStage_Reset;
@@ -184,17 +219,26 @@ public:
             case CalStage_Save:  // Persist the freshly validated table, 8 words (32 bytes) per tick
                 if (ptab->dump_tick()) {
                     if (ptab->dump_ok()) {
-                        TP_LOG("CALIBRATION: Table saved to flash");
-                        // Do NOT trust the RAM state after the dump: reload the
-                        // freshly written record from flash through the regular
-                        // boot-time path. This guarantees that the motor behaves
-                        // after calibration exactly as it would after a reset
-                        // (same commit path), and validates the flash write.
-                        // The motor profile publish (cal_id / offset / save) is
-                        // deferred until the read-back commits in CheckMemory.
-                        calibration_requested = false;  // Cycle fully finished
+                        // Capture the record id BEFORE wiping: dumped_id() reads
+                        // store_ok/f_wri0, which wipe() resets to pristine values
+                        // (it would otherwise always return 0 = chunk zero = the
+                        // OLDEST record in the partition instead of the fresh one).
+                        const uint32_t fresh_id = ptab->dumped_id();
+                        saved_cal_id_ = fresh_id;              // Remember for the profile publish
+                        TP_LOG_VAL("CALIBRATION: Table saved to flash, id = ", (long)fresh_id);
+                        // RESET-EQUIVALENCE: wipe the RAM table to the pristine
+                        // power-on state, then reload the freshly written record
+                        // through the regular boot-time path (begin_load ->
+                        // scan_word -> commit_candidate). The live state is thus
+                        // rebuilt from the same bytes, by the same code, as after
+                        // an HW reset - nothing from the calibration sweep
+                        // (samples, ECC, metadata, stale tail values) survives in
+                        // RAM. The motor profile publish (cal_id / offset / save)
+                        // is deferred until the read-back commits in CheckMemory.
+                        ptab->wipe();                          // RAM == fresh power-up state
+                        calibration_requested = false;         // Cycle fully finished
                         verify_after_save = true;
-                        ptab->begin_load(ptab->dumped_id());  // Arm read-back of the new record
+                        ptab->begin_load(fresh_id);            // Arm read-back of the new record
                         calibration_stage = CalStage_CheckMemory;
                     } else {
                         TP_LOG("CALIBRATION: ERROR - flash save failed");
@@ -451,6 +495,19 @@ public:
         return calibration_stage == CalStage_CheckMemory;  // Check if in Ready stage
     }
 
+    /**
+     * @brief True while the freshly validated table is being written to flash
+     *
+     * The motor must NOT be energized during this window: flash programming
+     * stalls the CPU (single-bank layout), so every 32-byte record write
+     * freezes the control ISR for several PWM periods and a full-region erase
+     * for tens of milliseconds. The control loop commands zero current while
+     * this is true (see TunePulseHeart::tick).
+     */
+    bool is_persisting() const {
+        return calibration_stage == CalStage_Save;  // Save stage services dump_tick()
+    }
+
     bool is_idle() const {
         return calibration_stage == CalStage_Reset;  // Check if in Ready stage
     }
@@ -502,6 +559,9 @@ private:
     bool loaded_from_flash = false;      // True when a valid table was restored from flash
     bool boot_resolved_ = false;         // True once the boot-time load attempt produced an outcome
     bool verify_after_save = false;      // True while the CheckMemory scan verifies a fresh dump
+    uint32_t saved_cal_id_ = 0;          // Chunk id of the record written by the last dump
+                                         // (captured BEFORE the table wipe, because wiped
+                                         // state makes dumped_id() return 0)
 
     /**
      * @brief Decrements a counter until it reaches zero

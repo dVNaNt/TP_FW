@@ -28,8 +28,35 @@
     #include <Arduino.h>
     #endif
 
+    // =====================================================================
+    // ISR-safety guard. USBSerial::write() spins on host back-pressure
+    // while the CDC port is connected (its TX queue is full and the host
+    // is not draining it). Called from the 20 kHz control ISR with the
+    // motor energized, that freeze latches the last voltage vector on
+    // the bridge: loud electrical noise and corrupted calibration runs
+    // - exactly what happens right after flashing, while USB CDC is
+    // still re-enumerating. Every print therefore checks the free TX
+    // room first and is DROPPED instead of blocking when it is low.
+    // =====================================================================
+
+    /** Free-TX-room threshold below which log output is dropped. */
+    constexpr size_t TP_LOG_TX_MARGIN = 32;
+
+    /**
+     * @brief True when at least @p bytes can be queued without blocking.
+     * @param bytes Number of bytes the caller is about to print.
+     *
+     * The queue occupancy is also mutated from the USB interrupt; the
+     * lock-free SPSC design makes this read slightly stale at worst,
+     * which is acceptable for a drop/no-drop threshold.
+     */
+    inline bool tp_log_room(size_t bytes) {
+        return SerialUSB.availableForWrite() > static_cast<int>(TP_LOG_TX_MARGIN + bytes);
+    }
+
     /** Print @p msg as a complete line over SerialUSB. */
-    #define TP_LOG(msg) SerialUSB.println(msg)
+    #define TP_LOG(msg) \
+        do { if (tp_log_room(sizeof(msg))) SerialUSB.println(msg); } while (0)
 
     /**
      * Print @p msg (no newline) followed by @p val and a newline.
@@ -37,17 +64,20 @@
      */
     #define TP_LOG_VAL(msg, val) \
         do { \
-            SerialUSB.print(msg); \
-            SerialUSB.println(val); \
+            if (tp_log_room(sizeof(msg))) SerialUSB.print(msg); \
+            if (tp_log_room(16)) SerialUSB.println(val); \
         } while (0)
 
     /**
      * Helper template that automatically deduces the size N of a static array
      * passed by reference and prints its elements comma-separated.
+     * Output is dropped element-wise when the CDC TX queue runs low, so the
+     * call can never block the control ISR on host back-pressure.
      */
     template <typename T, size_t N>
     inline void _tp_print_array(const T (&arr)[N]) {
         for (size_t i = 0; i < N; ++i) {
+            if (!tp_log_room(12)) return;  // TX queue nearly full: drop the tail
             SerialUSB.print(arr[i]);
             if (i < N - 1) {
                 SerialUSB.print(", ");
@@ -73,8 +103,11 @@
     }
 
     /// Variadic template that recursively prints comma-separated arguments.
+    /// Output is dropped element-wise when the CDC TX queue runs low, so the
+    /// call can never block the control ISR on host back-pressure.
     template<typename T, typename... Args>
     inline void _tp_print_args(T first, Args... args) {
+        if (!tp_log_room(12)) return;  // TX queue nearly full: drop the tail
         SerialUSB.print(first);
         if (sizeof...(args) > 0) {
             SerialUSB.print(", ");

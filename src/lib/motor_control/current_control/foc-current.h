@@ -235,7 +235,7 @@ public:
      * estimates); values above 1.0 over-compensate.
      * Default: 1.0 (full compensation).
      */
-    float k_bemf = 1.0f;
+    float k_bemf = 0.0f;
 
     /**
      * @brief Soft deadband (forbidden zone) on electrical speed for BEMF

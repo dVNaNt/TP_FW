@@ -32,6 +32,28 @@ struct FlashReadResult {
 };
 
 /**
+ * @brief De-energized window flag for flash programming (single-TU global).
+ *
+ * Flash programming (a 32-byte row write, and especially a page erase)
+ * executes with __disable_irq() and stalls the single-bank CPU for several
+ * PWM periods (tens of ms for an erase). During such a stall the previously
+ * latched voltage vector stays on the motor bridge, so programming is only
+ * allowed when that vector commands ZERO current (or the phases are
+ * shorted / Hi-Z). TunePulseHeart::tick() updates this flag once per control
+ * pass; the NVM write engines (Motor::save_tick, CalibrationTable::dump_tick)
+ * poll it and simply retry on the next tick while the window is closed.
+ *
+ * Without this gate the first write tick of every save executed while an
+ * energized 0.5 A vector was still latched: right after flashing (no stored
+ * profile) the MotorCalibration-triggered save yanked the rotor at the very
+ * start of the angle calibration (derailed Pass0 + electrical noise), and
+ * the post-calibration profile save produced the same yank/noise right
+ * after the calibration completed.
+ */
+extern volatile bool tp_flash_programming_window;
+
+
+/**
  * @class FlashEEPROM
  * @brief Middleware layer between STM32 Hardware API and high-level application software.
  * 
@@ -236,5 +258,9 @@ public:
         return result;
     }
 };
+
+// Single-TU definition (tunepulse.h architecture): the control loop is the
+// only writer, the flash engines are the only readers.
+volatile bool tp_flash_programming_window = false;
 
 #endif // FLASH_EEPROM_HPP

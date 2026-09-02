@@ -537,6 +537,11 @@ public:
     /// Bind the USER-data flash driver used for parameter persistence.
     void attach_flash(FlashEEPROM* mem) { flash_ = mem; }
 
+    /// True while the record engine is mid-transfer (load scan / space scan / write).
+    /// Each write tick programs 32 bytes and stalls the single-bank flash for
+    /// several PWM periods, so the control loop de-energizes while this is set.
+    bool is_flash_busy() const { return f_mode_ != FMODE_IDLE; }
+
     /// True when a completed scan restored a valid record.
     bool is_loaded() const { return load_ok_; }
 
@@ -656,8 +661,17 @@ public:
             }
 
             uint32_t w[BLOCK_WORDS];
-            if (f_addr_ + RECORD_BYTES > region || !flash_->read_block(f_addr_, w)) {
-                f_mode_ = FMODE_IDLE;  // Region exhausted / HW fault: no free slot found
+            if (f_addr_ + RECORD_BYTES > region) {
+                f_mode_ = FMODE_IDLE;  // Region exhausted: no free slot found
+            } else if (!flash_->read_block(f_addr_, w)) {
+                // Read fault == never-programmed (erased) block: erased flash
+                // raises a double-bit ECC NMI and read_section() reports false.
+                // A free slot therefore starts RIGHT HERE - appending avoids
+                // the needless erase-and-rewrite of the whole partition
+                // (flash wear + a tens-of-ms __disable_irq() stall inside the
+                // control ISR on every save).
+                f_free_ = f_addr_;
+                f_mode_ = FMODE_IDLE;
             } else {
                 if (w[0] == ERASED_WORD32) {
                     f_free_ = f_addr_;  // Leading word erased: whole slot is free
@@ -673,6 +687,11 @@ public:
             if (f_free_ <= region - RECORD_BYTES) {
                 f_word_ = 0;
                 f_mode_ = FMODE_WRITE;  // Append into the free slot
+            } else if (!tp_flash_programming_window) {
+                // Partition full: the whole-region erase stalls the ISR with
+                // IRQs disabled for tens of ms. Wait for the de-energized
+                // window (zero-current vector latched) before wiping.
+                f_mode_ = FMODE_SPACE;  // Re-evaluate the decision on the next tick
             } else if (flash_->erase(0xDEADC0DE)) {
                 TP_LOG("MOTOR: system_dump full - erasing and rewriting");
                 f_free_ = 0;
@@ -686,6 +705,13 @@ public:
         }
 
         if (f_mode_ == FMODE_WRITE) {
+            if (!tp_flash_programming_window) {
+                // De-energized window closed: the previous control pass left
+                // an energized vector latched on the bridge. Programming now
+                // would freeze that vector for the whole stall (~0.5 ms with
+                // IRQs off) and yank the rotor - retry on the next tick.
+                return false;
+            }
             uint32_t blk[BLOCK_WORDS];
             uint32_t remaining = RECORD_WORDS - f_word_;
             uint32_t n = (remaining < BLOCK_WORDS) ? remaining : BLOCK_WORDS;
