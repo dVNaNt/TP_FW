@@ -166,6 +166,14 @@ public:
                     if (ptab->is_loaded()) {   // Branch 1: valid table -> straight to Ready
                         TP_LOG("CALIBRATION: Valid table restored from flash");
                         loaded_from_flash = true;
+                        // A valid table (boot-restored or freshly saved AND
+                        // read-back verified) means the full calibration
+                        // completed at some point: the mech fields published
+                        // in the motor record (direction, cal_id, offset) are
+                        // real, so profile persistence may proceed. This also
+                        // covers the post-save publish below (the flag is set
+                        // BEFORE motor.begin_save() is reached).
+                        motor.set_mech_calibrated(true);
                         if (verify_after_save) {
                             // Post-save read-back succeeded: the live RAM table now
                             // went through the SAME commit path (scan_word ->
@@ -423,6 +431,10 @@ public:
         // to reuse its calibration table (referenced by the profile's Cal-ID
         // = chunk address). A hit goes straight to Ready; a miss falls
         // through to the full physical cycle below (request stays armed).
+        // Either way the mech identity is invalidated until the new table
+        // commits (CheckMemory sets it back), so no profile record with
+        // stale/dummy mech data can be written while the cycle is running.
+        motor.set_mech_calibrated(false);
         if (motor.is_loaded()) {
             TP_LOG_VAL("CALIBRATION: trying stored table, id = ", (long)motor.get_cal_id());
             ptab->begin_load(motor.get_cal_id());

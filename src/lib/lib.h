@@ -95,8 +95,8 @@ typedef void (*LED_Control_Callback)(bool state);
  */
 struct TunePulseHeart {
 public:
-    Frequency clock_;       ///< System/PWM timing reference (170 MHz core, programmable carrier).
-    Motor motor_params;     ///< Motor description parameters (type, poles, limits).
+    Frequency clock_;               ///< System/PWM timing reference (170 MHz core, programmable carrier).
+    Motor motor_params;             ///< Motor description parameters (type, poles, limits).
     CurrentControl current_driver;  ///< FOC control current_driver operating on driver_phy.
 
     /**
@@ -153,7 +153,7 @@ public:
      */
     TunePulseHeart(uint16_t freq_hz, uint16_t pwm_res, float max_sup, float iA_fs, float iB_fs, float iC_fs)
         : clock_(170000000, freq_hz),
-          current_driver(motor_params, driver_phy),                            // Pass feedback and motor reference
+          current_driver(motor_params, driver_phy),                    // Pass feedback and motor reference
           angle_calibrator(freq_hz, motor_params, &calibration_dump),  // Whole motor (with its table) + table flash
           driver_phy(iA_fs, iB_fs, iC_fs, 128, max_sup),
           motor_status(MotorStatus::NotCalibrated) {}
@@ -223,7 +223,6 @@ public:
      */
     void load_motor_params(uint8_t id = MOTOR_ID_ANY) { motor_params.begin_load(id); }
 
-    int32_t el_sign = -1;     ///< Sign correction applied to the electrical angle readout.
     int32_t err_sign = -1;    ///< Sign correction applied to the mechanical encoder position.
     int32_t encoder_pos = 0;  ///< Last corrected mechanical encoder position (counts).
 
@@ -264,8 +263,6 @@ public:
             counter++;
             led_control(0, driver_phy.get_fault());
 
-
-
             uint32_t real_raw_ang = encoder.get_angle();           // Raw mechanical angle (no sign fix)
             int32_t real_pos = encoder.get_position() * err_sign;  // Corrected mechanical position
             encoder_pos = real_pos;
@@ -281,8 +278,8 @@ public:
             // ========================================================================
             // Motor controller tick logic
             // ========================================================================
-            bool flash_window = false;           // True when THIS pass leaves the bridge in a zero-current state
-            float targt = current_target_a;      // Local working copy of the current target [A]
+            bool flash_window = false;       // True when THIS pass leaves the bridge in a zero-current state
+            float targt = current_target_a;  // Local working copy of the current target [A]
             switch (motor_status) {
                 case MotorStatus::Success: {
                     if (!angle_calibrator.is_calibrated()) {
@@ -296,8 +293,8 @@ public:
                             // field that read as "the corrected angle is garbage".
                             pos_hold_target_ = real_pos;
                             targt = current_target_a = 0.5;
-                        } else if (angle_calibrator.is_settling() || angle_calibrator.is_persisting()
-                                   || motor_params.is_flash_busy()) {
+                        } else if (angle_calibrator.is_settling() || angle_calibrator.is_persisting() ||
+                                   motor_params.is_flash_busy()) {
                             // Flash I/O window (boot scan / table dump / read-back
                             // / MOTOR-PROFILE SAVE): every 32-byte flash programming
                             // stalls the single-bank CPU for several PWM periods (a
@@ -314,7 +311,8 @@ public:
                     } else {
                         // Real electrical angle (needed for closed loop and sync):
                         // apply flash-stored correction then the polarity sign.
-                        angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_ang)) * el_sign);
+                        angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_ang)) *
+                                               -motor_params.get_direction());
                         targt = position_controller.tick(real_pos, pos_hold_target_, 0.0, current_target_a, 0);
                         if (motor_params.is_flash_busy()) {
                             // Motor-profile record write in progress (e.g. the
@@ -328,11 +326,6 @@ public:
 
                     break;
                 }
-                case MotorStatus::CalibError:
-                    // Calibration failed: force zero torque command.
-                    targt = current_target_a = 0.0;
-                    flash_window = true;  // Zero torque: NVM programming safe
-                    break;
                 case MotorStatus::NotCalibrated:
                     angle_calibrator.tick(real_raw_pos, (int16_t)current_driver.motor.get_motor_type());
                     if (driver_phy.current.is_calibrated() == false) {

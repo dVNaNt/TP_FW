@@ -1197,6 +1197,11 @@ name = TP.current_driver.foc_current_.ubemf
 visibility = true
 format = DEC
 
+[group0-plot1-series3]
+name = TP.el_sign
+visibility = true
+format = DEC
+
 [group0-plot2]
 name = Error
 type = 0
@@ -1426,6 +1431,16 @@ visibility = true
 format = DEC
 
 [group0-plot4-series16]
+name = TP.el_sign
+visibility = true
+format = DEC
+
+[group0-plot4-series17]
+name = TP.err_sign
+visibility = true
+format = DEC
+
+[group0-plot4-series18]
 name = TP.position_controller.degrade_rate
 visibility = true
 format = DEC

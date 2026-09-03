@@ -291,7 +291,7 @@ inline void tunepulse_init() {
         .ext_cb(PWM_Set_All_HiZ)
         .uv_cb(PWM_Set_All_HiZ)
         .ot_cb(PWM_Set_All_HiZ)   // Software overtemperature: same Hi-Z safe state as hardware faults
-        .op_cb(PWM_Set_All_HiZ);  // Software overpower: Hi-Z safe state on power/current limit violation
+        .op_cb(PWM_Set_All_HiZ).phase_cb(PWM_Set_All_HiZ);  // Software overpower: Hi-Z safe state on power/current limit violation
     TP.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
 
     delay(100);
@@ -325,7 +325,7 @@ inline void tunepulse_init() {
     while (TP.current_driver.get_motor_status() != MotorStatus::Success) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
         if (TP.current_driver.get_motor_status() == MotorStatus::CalibError) {
-
+          
                 SerialUSB.println("Motor calibration Error");
                 break;
             

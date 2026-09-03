@@ -31,6 +31,15 @@
  * back-to-back without any gaps. Both the load scan and the save write move
  * EXACTLY ONE 8-word block per service call, so a system tick never spends
  * more than one row-program/read inside flash (no blocking).
+ *
+ * SAVE GATE: the record embeds mechanical parameters (direction in w0,
+ * cal_id/pole pairs in w1, angle-calibration offset in w6) that are only real
+ * after the FULL calibration (electrical identification + angle/mech sweep)
+ * has completed. begin_save() therefore refuses to arm until the angle
+ * calibrator publishes set_mech_calibrated(true) - the identified electrical
+ * parameters survive in RAM and are persisted by the calibrator's commit path
+ * together with the fresh table reference.
+ *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
@@ -191,6 +200,9 @@ private:
     uint8_t load_id_;                 ///< Cal-ID filter of the running scan.
     uint32_t cand_buf_[RECORD_WORDS]; ///< Newest valid candidate seen by the scan.
     bool cand_valid_;                 ///< cand_buf_ holds a usable record.
+    bool mech_calibrated_;            ///< Full (electrical + mech/angle) calibration done.
+    bool save_pending_;               ///< A begin_save() was gated: re-arm when the
+                                      ///< calibration table commits (set_mech_calibrated(true)).
 
 public:
     /// Encoder calibration table - owned by the motor, filled by the calibrator.
@@ -207,7 +219,7 @@ public:
           cal_id_(0),
           max_temp_deg_c_(80),
           pole_count_(7),
-          direction_(1),
+          direction_(0),
           electric_angle_(0),
           mechanic_angle_(0),
           total_resistance_mohm_(0),
@@ -231,6 +243,8 @@ public:
           store_ok_(false),
           load_id_(MOTOR_ID_ANY),
           cand_valid_(false),
+          mech_calibrated_(false),
+          save_pending_(false),
           cal_table(CalibrationTable::create()) {
     }
 
@@ -252,6 +266,28 @@ public:
 
     /// Set the calibration-table sample ID (persisted with the record).
     inline void set_cal_id(uint8_t id) { cal_id_ = id; }
+
+    /// Publish the full-calibration state: true only when the COMPLETE
+    /// calibration (electrical identification + angle/mech sweep) has finished,
+    /// so every mech field of the record (direction, cal_id, offset) is real.
+    /// When a save was previously deferred by the begin_save() gate, it is
+    /// re-armed HERE - exactly at the moment the calibration table record has
+    /// been written to flash AND read back verified, so the profile reference
+    /// (cal_id) always points at a table that is already committed. This also
+    /// covers the reboot path where the boot restore finishes AFTER the
+    /// electrical identification deferred its save and the stored table only
+    /// commits later (boot restore branch, verify_after_save == false).
+    inline void set_mech_calibrated(bool done) {
+        mech_calibrated_ = done;
+        if (done && save_pending_) {  // Deferred request waiting for this commit
+            save_pending_ = false;    // Consume it exactly once
+            begin_save();             // Re-arm with the now-real mech fields
+        }
+    }
+
+    /// True once the full calibration completed and the profile record
+    /// contains real (non-dummy) mechanical parameters.
+    inline bool is_mech_calibrated() const { return mech_calibrated_; }
 
     /// Set maximum allowed temperature [deg C].
     inline void set_max_temp(uint8_t temp_deg_c) { max_temp_deg_c_ = temp_deg_c; }
@@ -633,6 +669,20 @@ public:
      */
     void begin_save() {
         store_ok_ = false;
+        if (!mech_calibrated_) {
+            // Record gate: w0 embeds the measured rotation direction, w1 the
+            // cal_id/pole pairs and w6 the angle-calibration offset - all of
+            // them are still dummy/default values until the FULL calibration
+            // (including the angle/mech sweep) commits its table. Never
+            // persist such a half-valid record: remember the request and
+            // re-arm it exactly when set_mech_calibrated(true) reports that
+            // the fresh table has been written to flash AND read back
+            // verified, so the cal_id reference can never point at a
+            // not-yet-written (or failed) table record.
+            save_pending_ = true;
+            TP_LOG("MOTOR: save deferred - full calibration not complete");
+            return;
+        }
         if (!flash_ || flash_->get_max_size() == 0) {
             return;  // Nothing bound yet: silently ignore
         }

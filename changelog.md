@@ -1148,3 +1148,302 @@ FLASH: 64664 bytes (49.33% of 131072 bytes): +852 bytes
 RAM: 7420 bytes (22.64% of 32768 bytes): +0 bytes
 
 
+## 2026-09-02 - New CLN234 environment (STM32G474CEU6)
+**Changes:**
+- Added boards/cln234.json + env cln234_release
+- New target src/target/cln234 (gpio/adc/pwm/clock/spi/can/bootloader/nvm/cordic)
+- DRV8353 SPI driver with register map 0x00-0x07, config write + readback verify + fault decode
+- Shared SPI1 bus arbitration: DRV8353 mode1 16-bit first, then MT6835 mode3 8-bit DMA polling
+- WS2812 LED driver on PC6 (TIM8_CH1 open-drain + DMA) with color self-check
+- DRV_ERR (PB1) EXTI as external fault source
+- tunepulse.h and main.cpp generalized for both targets
+
+**Reasoning:**
+- Bring-up of the new CLN234 hardware revision
+
+**Notes:**
+- Clocked from HSI16 (no HSE crystal on board)
+- FLASH_SIZE now taken from HAL
+- both cln17_v3_release and cln234_release build-verified
+
+FLASH: 66400 bytes (50.66% of 131072 bytes): +1736 bytes
+RAM: 7560 bytes (23.07% of 32768 bytes): +140 bytes
+
+
+## 2026-09-02 - CLN234 bring-up self-test mode
+**Changes:**
+- Added target/cln234/selftest.h: non-blocking [T01]..[T12] boot sequencer with raw register dumps, WS2812 step-code blink, SPI raw probe, DRV8353 readback, MT6835 angle samples, 2 s heartbeat
+- main.cpp split into selftest/normal paths via USE_BOARD_SELFTEST
+- clock_setup made non-fatal (SystemClock_Status instead of Error_Handler hang)
+- LED_Show bounded wait with timeout counters
+- DRV8353::Status restored
+
+**Reasoning:**
+- Board showed USB enumeration but no output - need per-step diagnostics instead of a silent blocking chain
+
+**Notes:**
+- Self-test enabled by default (-D USE_BOARD_SELFTEST=1 in cln234_release)
+- set 0 for normal firmware
+- cln17_v3 unaffected
+
+FLASH: 62960 bytes (48.03% of 131072 bytes): -3440 bytes
+RAM: 7432 bytes (22.68% of 32768 bytes): -128 bytes
+
+
+## 2026-09-02 - LED polarity fix + encoder polling in self-test
+**Changes:**
+- WS2812: TIM8 CH1 switched to PWM mode 2 - open-drain idle is now LOW, high pulses 0.4/0.8us (was inverted waveform -> white LED)
+- DMA 16-bit
+- both chain LEDs mirror the color
+- ENC_CAL (PA2) driven LOW permanently
+- self-test polls encoder every 10 ms (was frozen: no TIM1 CC4 in test mode)
+- [T09b] direct register dump
+- DRV8353 mode 1 confirmed via moteus reference
+
+**Reasoning:**
+- White LED = inverted WS2812 waveform on open-drain pin
+- angle frozen = no periodic Encoder_StartTransfer in test mode
+- DRV8353 SPI silence = no VM power (vbus raw 640 ~ 0V), mode 1 verified correct
+
+**Notes:**
+- Uploaded to board via ST-Link (0672FF39374B513043084209), verify OK
+- need VM power for DRV8353 SPI
+
+FLASH: 44440 bytes (33.91% of 131072 bytes): -18520 bytes
+RAM: 7048 bytes (21.51% of 32768 bytes): -384 bytes
+
+
+## 2026-09-02 - CLN234: complementary PWM test + 2-LED WS2812 color test
+**Changes:**
+- Selftest [T06] now outputs complementary PWM 20 kHz @ 50% duty (CCER=0x1555, CCR=ARR/2, MOE+deadtime, CEN - counter was never started)
+- WS2812 driver extended to 2 daisy-chained LEDs (48-bit frames, LED_SetRGB2)
+- WS2812B reset time >=280 us enforced between frames
+- LED brightness reduced (R48/G25/B48)
+- new continuous color test: only pure dim R/G/B, two LEDs always different colors, rotating constantly
+
+**Reasoning:**
+- Complementary waveform was invisible because TIM1 CEN was never set in the selftest
+- the 2nd LED in the chain never received data (only 24 bits sent)
+- full-brightness WS2812 is blinding
+- WS2812B latches need >=280 us idle-low
+
+**Notes:**
+- [T06] is measurable on PA8/PA9/PA10 + PB13/PB14/PB15 while DRV_EN is still LOW (gates Hi-Z until [T07])
+- bridge keeps running at 50% after [T07] - do not connect motor during selftest
+- builds: cln234_release OK, cln17_v3_release OK
+
+FLASH: 44284 bytes (33.79% of 131072 bytes): -156 bytes
+RAM: 7104 bytes (21.68% of 32768 bytes): +56 bytes
+
+
+## 2026-09-02 - CLN234: WS2812 datasheet-exact timing + selftest bring-up rules
+**Changes:**
+- WS2812 timing fixed to WS2812B datasheet windows: bit period 1.300us (was 1.247us < 1.25us min), T0H 312ns (was 400ns > 380ns max), T1H 629ns, T0L 988ns, T1L 671ns (was 447ns < 580ns min - the white-LED garbage root cause), reset 300us
+- selftest [T04]: DRV_EN (PB12) driven HIGH from GPIO init
+- DRV_ERR (PB1) pull-up input + EXTI armed from boot
+- [T08] DRV8353 config is WRITE-ONLY (no register reads, no fault polling, no dump - WriteConfig() added)
+- [T06] complementary 20kHz/50% PWM never disabled
+
+**Reasoning:**
+- White second LED + dark first LED = out-of-spec T1L/bit-period corrupting the WS2812 decoder
+- bring-up checklist requires DRV_EN high output, PB1 always pull-up input, PWM left running and no driver register reads
+
+**Notes:**
+- If LED1 stays dark after this fix, check the DIN wiring of the first LED in the chain (hardware)
+- second LED showing correct colors then confirms chain order
+- do not connect motor during selftest - bridge is live at 50%
+
+FLASH: 44284 bytes (33.79% of 131072 bytes): +0 bytes
+RAM: 7104 bytes (21.68% of 32768 bytes): +0 bytes
+
+
+## 2026-09-02 - CLN234: WS2812 datasheet-exact timing + selftest bring-up rules
+**Changes:**
+- WS2812 timing fixed to WS2812B datasheet windows: bit period 1.300us (was 1.247us < 1.25us min), T0H 312ns (was 400ns > 380ns max), T1H 629ns, T0L 988ns, T1L 671ns (was 447ns < 580ns min - the white-LED garbage root cause), reset 300us
+- selftest [T04]: DRV_EN (PB12) driven HIGH from GPIO init
+- DRV_ERR (PB1) pull-up input + EXTI armed from boot
+- [T08] DRV8353 config is WRITE-ONLY (no register reads, no fault polling, no dump - WriteConfig() added)
+- [T06] complementary 20kHz/50% PWM never disabled
+
+**Reasoning:**
+- White second LED + dark first LED = out-of-spec T1L/bit-period corrupting the WS2812 decoder
+- bring-up checklist requires DRV_EN high output, PB1 always pull-up input, PWM left running and no driver register reads
+
+**Notes:**
+- If LED1 stays dark after this fix, check the DIN wiring of the first LED in the chain (hardware)
+- second LED showing correct colors then confirms chain order
+- do not connect motor during selftest - bridge is live at 50%
+
+FLASH: 42728 bytes (32.60% of 131072 bytes): -1556 bytes
+RAM: 7080 bytes (21.61% of 32768 bytes): -24 bytes
+
+
+## 2026-09-02 - TIM1 PWM neg-channel-only test mode
+**Changes:**
+- CCER phase masks 0x05 (CCxE|CCxNE) -> 0x04 (CCxNE only) in pwm_phase_ccr
+- MX_TIM1_Start CCER 0x1555 -> 0x1444
+- selftest [T06] CCER 0x1555 -> 0x1444
+- docs/comments updated
+
+**Reasoning:**
+- For test purposes the direct (positive) channel outputs must be disabled, keeping PWM only on the complementary NEG channels
+
+**Notes:**
+- Applied to both cln17_v3 and cln234 timer backends
+- CC4E kept for the ADC trigger
+- neg-channel duty is inverted vs the direct channel
+- Hi-Z/Low safe states unchanged (already 0x1444)
+
+FLASH: 64664 bytes (49.33% of 131072 bytes): +21936 bytes
+RAM: 7420 bytes (22.64% of 32768 bytes): +340 bytes
+
+
+## 2026-09-02 - TIM1 PWM positive-channel-only test mode
+**Changes:**
+- CCER phase masks 0x04 (CCxNE) -> 0x01 (CCxE only) in pwm_phase_ccr
+- MX_TIM1_Start CCER 0x1444 -> 0x1111
+- selftest [T06] CCER 0x1444 -> 0x1111
+- PWM_Set_All_HiZ disables all outputs (0x1000)
+- PWM_Set_All_Low holds high-side OFF via CCR=0 (0x1111)
+- docs updated
+
+**Reasoning:**
+- Reversed the test setup: PWM must now be present only on the direct (positive) timer channels with the complementary NEG outputs disabled
+
+**Notes:**
+- Applied to both cln17_v3 and cln234 timer backends
+- CC4E kept for the ADC trigger
+- low-side braking via CCxNE is unavailable in this mode
+- negative duty behaves like positive
+
+FLASH: 64664 bytes (49.33% of 131072 bytes): +0 bytes
+RAM: 7420 bytes (22.64% of 32768 bytes): +0 bytes
+
+
+## 2026-09-02 - Removed all DRV8353 SPI register access
+**Changes:**
+- Deleted src/target/cln234/drv8353.h
+- removed DRV8353::Init() and WriteConfig() calls
+- removed SPI_Bus_ConfigureDRV, SPI1_TransferDRV and DRV_CS (PC15) from spi_setup.h
+- SPI1_Init now boots directly in MT6835 encoder mode
+- selftest [T08] removed and steps renumbered
+
+**Reasoning:**
+- The gate driver must run purely on its hardware defaults with no register writes or reads
+
+**Notes:**
+- DRV_EN (PB12) and nFAULT (PB1) handling kept
+- encoder bring-up unchanged
+- cln234 Flash -1188 bytes, RAM -52 bytes
+
+FLASH: 41540 bytes (31.69% of 131072 bytes): -23124 bytes
+RAM: 7028 bytes (21.45% of 32768 bytes): -392 bytes
+
+
+## 2026-09-02 - Restored full complementary PWM (CCxE+CCxNE)
+**Changes:**
+- pwm_phase_ccr active mask back to 0x05 (CCxE|CCxNE)
+- MX_TIM1_Start and selftest [T06] CCER back to 0x1555
+- HiZ/Low safe states restored to original 0x1444 logic
+- TEST MODE comments removed
+
+**Reasoning:**
+- End of the PWM channel test sessions: return to standard complementary drive while keeping the DRV8353 SPI register access fully removed
+
+**Notes:**
+- Both cln17_v3 and cln234 timer backends restored to the original state (git diff clean for both timer_pwm_setup.h)
+- CC4E ADC trigger unchanged
+- no SPI driver code reintroduced
+
+FLASH: 41540 bytes (31.69% of 131072 bytes): +0 bytes
+RAM: 7028 bytes (21.45% of 32768 bytes): +0 bytes
+
+
+## 2026-09-02 - WS2812 LED test rewritten as dumb bit-bang driver
+**Changes:**
+- Replaced TIM8 PWM + DMA + TC-IRQ data path with direct GPIO open-drain bit-banging (DWT cycle counter timing, IRQs off per 62us frame)
+- PC6 is now a plain open-drain output, HIGH level comes from the external pull-up
+- T03 selftest logs GPIO config and cycle counts instead of TIM8 registers
+- removed DMA timeout diagnostics (led_to)
+
+**Reasoning:**
+- Constant white LED was caused by the fragile timer/DMA pipeline
+- a blocking stateless bit-bang has nothing to silently break and works at any SystemCoreClock (timings derived at runtime)
+
+**Notes:**
+- Same public API (LED_Init/LED_SetRGB/LED_SetRGB2/LED_Off/LED_ColorCheck), ~1ms blocking per frame, WS2812B datasheet windows with margin (T0H 300ns, T1H 650ns, bit 1.3us, reset 300us)
+
+FLASH: 42332 bytes (32.30% of 131072 bytes): +792 bytes
+RAM: 6932 bytes (21.15% of 32768 bytes): -96 bytes
+
+
+## 2026-09-03 - Restore CLN17 V3 as active target; CLN234 kept as target-only
+**Changes:**
+- Reverted main.cpp, tunepulse.h, platformio.ini, mcuview.mcuvproj to CLN17 V3 state
+- Removed cln234_release env (target folder src/target/cln234 and boards/cln234.json preserved)
+- Added boards/cln17_v3.json custom board config
+- env cln17_v3_release switched to board = cln17_v3
+
+**Reasoning:**
+- Return firmware focus to CLN17 V3 hardware
+- keep CLN234 sources for future bring-up
+
+**Notes:**
+- Build verified on cln17_v3_release
+
+FLASH: 64632 bytes (49.31% of 131072 bytes): +22300 bytes
+RAM: 7420 bytes (22.64% of 32768 bytes): +488 bytes
+
+
+## 2026-09-03 - Save motor profile only after full calibration
+**Changes:**
+- Added mech_calibrated_ flag to Motor (set true when a valid angle-calibration table commits, cleared on calibrate() start)
+- Motor::begin_save() now refuses to arm while the full calibration is incomplete and logs a deferral note
+
+**Reasoning:**
+- The profile record embeds mech fields (direction in w0, cal_id/pole pairs in w1, angle offset in w6) that are dummy values on a first boot before the angle/mech calibration, so the MotorCalibration-triggered save persisted a half-valid record
+
+**Notes:**
+- Deferred electrical parameters are not lost: the angle-calibrator commit path re-arms begin_save() with real mech values after the fresh table is written and read-back verified
+
+FLASH: 64740 bytes (49.39% of 131072 bytes): +108 bytes
+RAM: 7420 bytes (22.64% of 32768 bytes): +0 bytes
+
+
+## 2026-09-03 - Enforced table-first profile persistence ordering
+**Changes:**
+- Added save_pending_ to Motor: a gated begin_save() now remembers the deferred request and set_mech_calibrated(true) re-arms it exactly when the calibration table record is written AND read-back verified
+
+**Reasoning:**
+- On the reboot path with changed parameters the deferred save was previously dropped (boot table restore never re-armed it)
+- also guarantees the profile cal_id reference is only ever written after the referenced table record is committed in flash
+
+**Notes:**
+- Verified empty-flash first-boot sequence: full angle sweep -> table dump (chunk 0 ok, 2KB partition = 64 chunks fits 8-bit cal_id) -> read-back verify -> profile save
+- boot table load is direct-addressed so chunk id 0 resolves correctly
+
+FLASH: 64744 bytes (49.40% of 131072 bytes): +4 bytes
+RAM: 7412 bytes (22.62% of 32768 bytes): -8 bytes
+
+
+## 2026-09-03 - Detailed electrical calibration error logging
+**Changes:**
+- Extended set_error() with abort-reason argument and one-shot diagnostic dump (stage, phase pattern, motor type, Vbus/injected/limit voltages, measured power vs limits, phase currents)
+- Added stage_name/type_name/pattern_name helpers
+- Added per-tick diagnostic snapshot (Vbus, P, Ia, Ib)
+- Overpower during SlowRotation now reports its typical causes
+- Resistance-measure failure split into UNDERPOWER vs PHASE PATTERN NOT RECOGNIZED with expected-vs-measured criteria
+- Added warnings: warmup ended underpowered, HFI ripple too small (L=0), HFI Z without inductive part
+- Added HFI dual-frequency results and spread log
+
+**Reasoning:**
+- Calibration aborts previously gave no indication of the cause, making wrong phase wiring and overpower faults impossible to diagnose from the USB log
+
+**Notes:**
+- All logs use ISR-safe TP_LOG macros (dropped, never blocking when CDC TX queue is low)
+- Error dump is one-shot at abort time
+
+FLASH: 67756 bytes (51.69% of 131072 bytes): +3012 bytes
+RAM: 7428 bytes (22.67% of 32768 bytes): +16 bytes
+
+

@@ -5,6 +5,12 @@
  * Implements the MotorStatus state machine stages: winding-resistance
  * measurement (DC injection), high-frequency-injection inductance measurement
  * on the D/Q axes, and pole-pair/direction detection during slow rotation.
+ *
+ * Every fatal calibration path routes through set_error(), which emits a
+ * detailed one-shot diagnostic dump over the USB log: the abort reason
+ * (overpower / underpower / unrecognized phase connection), the failing
+ * stage, detected motor type and phase pattern, supply/injected/limit
+ * voltages, measured power against the limits, and the phase currents.
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
@@ -119,6 +125,14 @@ private:
     float max_power_watts_;
     float soft_power_limit_watts_;
 
+    // Last-tick diagnostic snapshot for the error dump: refreshed on every
+    // tick_calibration() call so set_error() can report the real measured
+    // conditions at the moment of the failure (values in SI units).
+    float diag_power_watts_;   // Measured electrical power [W]
+    float diag_ia_amps_;       // Filtered phase A current [A]
+    float diag_ib_amps_;       // Filtered phase B current [A]
+    float diag_supply_volts_;  // Supply (Vbus) voltage [V]
+
 public:
     // Constructor - initialize all calibration variables
     MotorCalibration(DriverPWM& drv)
@@ -154,7 +168,11 @@ public:
           stability_check_(0.05, 240),
           drv(drv),
           max_power_watts_(50.0f),
-          soft_power_limit_watts_(0.75f) {}
+          soft_power_limit_watts_(0.75f),
+          diag_power_watts_(0.0f),
+          diag_ia_amps_(0.0f),
+          diag_ib_amps_(0.0f),
+          diag_supply_volts_(0.0f) {}
 
     // Getters for calibration variables
     float get_voltage() const { return voltage_volts_; }
@@ -262,6 +280,13 @@ public:
                           Motor& motor,
                           DriverStatus& setup_status,
                           int16_t& angle_ref) {
+        // Refresh the diagnostic snapshot used by the set_error() dump so any
+        // later abort reports the actual measured electrical conditions.
+        diag_supply_volts_ = supply_voltage_volts;
+        diag_power_watts_ = power_watts;
+        diag_ia_amps_ = current_a_amps;
+        diag_ib_amps_ = current_b_amps;
+
         update_voltage_range(supply_voltage_volts);
 
         switch (status_tracker) {
@@ -279,6 +304,17 @@ public:
 
                 if ((stability_check_.tick(measured_current_amps) && power_watts > (max_power_watts_ * CAL_UNDERPOWER_RATIO)) ||
                     timeout_.tick() == 0) {
+                    // Warn when warmup ends without reaching a stable current:
+                    // a tiny measured current hints at a disconnected phase,
+                    // too low Vbus, or a very high-resistance winding. This is
+                    // not fatal by itself but degrades all later measurements.
+                    if (power_watts <= (max_power_watts_ * CAL_UNDERPOWER_RATIO)) {
+                        TP_LOG_VALS("ELEC CAL WARNING: warmup ended underpowered: P[W],threshold[W],I_meas[A],V_inj[V]",
+                                    power_watts, (max_power_watts_ * CAL_UNDERPOWER_RATIO), measured_current_amps,
+                                    voltage_volts_);
+                        TP_LOG("ELEC CAL WARNING: hint: phase disconnected? Vbus too low? calibration continues with reduced accuracy");
+                    }
+
                     target_current_amps_ = measured_current_amps;
 
                     timeout_.set_timeout(SETTLE_TIMEOUT);
@@ -321,7 +357,14 @@ public:
                 voltage_q_out_volts_ = 0.0f;
 
                 if (power_watts >= max_power_watts_) {
-                    set_error(status_tracker, motor, setup_status);
+                    // Overpower during the slow rotation sweep: the dragged
+                    // vector consumes more power than the motor profile allows.
+                    // Typical causes: rotor stalled/jammed, load or rotor
+                    // inertia too high for the sweep speed, or P_max set too
+                    // low for this motor.
+                    set_error(status_tracker, motor, setup_status,
+                              "OVERPOWER: rotation power reached the max limit "
+                              "(rotor stalled/jammed? load or inertia too high? P_max too low?)");
                     break;
                 }
 
@@ -505,10 +548,20 @@ private:
 
                 if (X_L_sq > 0.0f)
                     *result_L = (sqrtf(X_L_sq) / omega_rad_per_sec) * 1e6f;  // uH
-                else
-                    *result_L = 0.0f;  // R dominated Z entirely (shouldn't happen at 1kHz+)
+                else {
+                    // R dominated Z entirely (shouldn't happen at 1kHz+): the
+                    // measured impedance carries no usable inductive part.
+                    TP_LOG_VALS("ELEC CAL WARNING: HFI Z has no inductive part, L=0: i_peak[A],v_peak[V],Z[Ohm],R[Ohm]",
+                                i_peak_amps, v_peak_volts, impedance_ohms, resistance_ohms);
+                    *result_L = 0.0f;
+                }
 
             } else {
+                // Current ripple too small for a valid inductance estimate:
+                // the HFI amplitude adaptation failed to excite a measurable
+                // current (winding impedance too high / phase disconnected).
+                TP_LOG_VALS("ELEC CAL WARNING: HFI ripple too small, L=0: i_peak[A],v_peak[V],periods",
+                            i_peak_amps, v_peak_volts, (long)hfi_periods_);
                 *result_L = 0.0f;
             }
 
@@ -521,6 +574,12 @@ private:
                 float diff_d = (Ld_f1_ > 0.0f) ? fabsf(Ld_f1_ - Ld_f2_) / Ld_f1_ : 0.0f;
 
                 float diff_q = (Lq_f1_ > 0.0f) ? fabsf(Lq_f1_ - Lq_f2_) / Lq_f1_ : 0.0f;
+
+                // Log the dual-frequency measurement results: a large spread
+                // between the 1 kHz and 1.5 kHz estimates means the HFI model
+                // assumptions broke down (results are still committed).
+                TP_LOG_VALS("ELEC CAL: HFI results uH: Ld_f1,Ld_f2,Lq_f1,Lq_f2", Ld_f1_, Ld_f2_, Lq_f1_, Lq_f2_);
+                TP_LOG_VALS("ELEC CAL: HFI spread: diff_d,diff_q", diff_d, diff_q);
 
                 // Average the 1kHz and 1.5kHz results
                 float final_Ld = (Ld_f1_ + Ld_f2_) * 0.5f;
@@ -542,11 +601,95 @@ private:
         slow_rotation_power_limit_watts_ = power_limit_watts;
     }
 
-    void set_error(MotorStatus& status_tracker, Motor& motor, DriverStatus& setup_status) {
+    /**
+     * @brief Map a MotorStatus state-machine stage to a human-readable name.
+     * @param s Stage to convert.
+     * @return Static string with the stage name (never NULL).
+     */
+    static const char* stage_name(MotorStatus s) {
+        switch (s) {
+            case MotorStatus::SoftWarmup:               return "SoftWarmup";
+            case MotorStatus::Settle:                   return "Settle";
+            case MotorStatus::SlowRotation:             return "SlowRotation";
+            case MotorStatus::ResistanceMeasure:        return "ResistanceMeasure";
+            case MotorStatus::InductanceMeasure:        return "InductanceMeasure";
+            case MotorStatus::InductanceMeasureWarmup:  return "HFI_Warmup";
+            case MotorStatus::InductanceMeasureD:       return "HFI_D_f1";
+            case MotorStatus::InductanceMeasureD2:      return "HFI_D_f2";
+            case MotorStatus::InductanceMeasureQ:       return "HFI_Q_f1";
+            case MotorStatus::InductanceMeasureQ2:      return "HFI_Q_f2";
+            case MotorStatus::ElectricCalibrationDone:  return "ElectricCalibrationDone";
+            case MotorStatus::CalibError:               return "CalibError";
+            case MotorStatus::Success:                  return "Success";
+            case MotorStatus::NotCalibrated:            return "NotCalibrated";
+            default:                                    return "Unknown";
+        }
+    }
+
+    /**
+     * @brief Map a MotorType to a human-readable name.
+     * @param t Motor type to convert.
+     * @return Static string with the type name (never NULL).
+     */
+    static const char* type_name(MotorType t) {
+        switch (t) {
+            case MotorType_STEP:    return "STEP";
+            case MotorType_BLDC:    return "BLDC";
+            default:                return "Invalid";
+        }
+    }
+
+    /**
+     * @brief Map a PhasePattern to a human-readable name.
+     * @param p Phase pattern to convert.
+     * @return Static string with the pattern name (never NULL).
+     */
+    static const char* pattern_name(PhasePattern p) {
+        switch (p) {
+            case PhasePattern_ABC:  return "ABC";
+            case PhasePattern_CBA:  return "CBA";
+            case PhasePattern_ACB:  return "ACB";
+            default:                return "Invalid";
+        }
+    }
+
+    /**
+     * @brief Abort the calibration with a detailed one-shot diagnostic dump.
+     *
+     * Called from every fatal error path (overpower, underpower, unrecognized
+     * phase connection). Prints the abort reason plus the diagnostic snapshot
+     * (failing stage, detected type/pattern, supply/applied/limit voltages,
+     * measured power against the limits, phase currents) so the exact failure
+     * cause can be identified from the USB log alone.
+     *
+     * All output uses the ISR-safe TP_LOG macros: lines are DROPPED (never
+     * blocking) when the CDC TX queue is nearly full.
+     *
+     * @param status_tracker Calibration state machine reference (holds the
+     *                       failing stage on entry, set to CalibError on exit).
+     * @param motor          Motor profile (provides detected type/pattern).
+     * @param setup_status   Driver status word (set to OperationStatus::Error).
+     * @param reason         Short human-readable error description (RAM string).
+     */
+    void set_error(MotorStatus& status_tracker, Motor& motor, DriverStatus& setup_status, const char* reason) {
+        const MotorStatus failed_stage = status_tracker;  // Remember the stage that aborted
+        const float applied_volts = voltage_volts_;       // Remember the injected voltage before reset
+
         setup_status.set_driver_status(OperationStatus::Error);
         status_tracker = MotorStatus::CalibError;
         motor.set_status(MotorStatus::CalibError);
         reset_voltage();
+
+        // One-shot detailed failure dump (lines are dropped, never blocking,
+        // when the USB CDC TX queue runs low - see dev_log.h).
+        TP_LOG("==================================================");
+        TP_LOG_VAL("ELEC CALIBRATION FAILED: ", reason);
+        TP_LOG_VALS("  failed_stage,phase_pattern,motor_type", stage_name(failed_stage),
+                    pattern_name(motor.get_phase_pattern()), type_name(motor.get_motor_type()));
+        TP_LOG_VALS("  Vbus[V],V_injected[V],V_limit[V]", diag_supply_volts_, applied_volts, voltage_limit_volts_);
+        TP_LOG_VALS("  P_meas[W],P_max[W],P_soft_lim[W]", diag_power_watts_, max_power_watts_, soft_power_limit_watts_);
+        TP_LOG_VALS("  Ia[A],Ib[A]", diag_ia_amps_, diag_ib_amps_);
+        TP_LOG("==================================================");
     }
 
     void start_inductance_measurement(float supply_voltage_volts,
@@ -593,6 +736,12 @@ private:
         }
 
         if (!same)
+            // NOTE: Motor::begin_save() self-gates on the full-calibration
+            // state: the record embeds mech fields (direction, cal_id, angle
+            // offset) that are dummy until the angle/mech calibration table
+            // exists. On a first boot the save is deferred here and re-armed
+            // by the angle-calibrator commit path once the fresh table has
+            // been written and read back verified.
             motor.begin_save();  // Non-blocking, serviced 8 words per tick
 
         reset_voltage();
@@ -676,6 +825,12 @@ private:
                 start_inductance_measurement(supply_voltage_volts, status_tracker, motor, setup_status, angle_ref);
                 return;
             }
+
+            // Abort reason for the final set_error() below: defaults to the
+            // "phase pattern not recognized" case, switched to underpower in
+            // the else-branch when the injected power was too small to judge.
+            const char* fail_reason =
+                "PHASE PATTERN NOT RECOGNIZED: measured currents match no known connection type (check phase wiring / motor type)";
 
             if (power_watts >
                 (max_power_watts_ * CAL_UNDERPOWER_RATIO)) {  // We have sufficient power, current calculations are reliable
@@ -770,10 +925,33 @@ private:
                         return;
                     }
                 }
+
+                // None of the known winding/connection signatures matched the
+                // measured phase currents: dump the full measured data set
+                // together with the criteria that are expected for each pass,
+                // so a wiring fault (swapped/disconnected phase) or an
+                // unsupported motor type can be diagnosed from the log alone.
+                TP_LOG_VALS("ELEC CAL: pattern check failed: angle_ref,Ia[A],Ib[A]",
+                            (long)angle_ref, ia_amps, ib_amps);
+                TP_LOG_VALS("ELEC CAL: R_est_a[Ohm],R_est_b[Ohm],V_inj[V],P[W]",
+                            resistance_a_ohms, resistance_b_ohms, applied_voltage_volts, power_watts);
+                TP_LOG("ELEC CAL: expected @+45deg: |Ia-Ib| balanced 10x; "
+                       "@+90deg: BLDC iA<0 dominant & iB~-iA/2, or STEP |iB|<0.0625*|iA|; "
+                       "@-135deg: |Ia-Ib| balanced 10x");
+            } else {
+                // UNDERPOWER: the injected voltage produced a current so small
+                // that resistance/pattern measurements are unreliable. Typical
+                // causes: phase wire disconnected, Vbus too low, or a winding
+                // resistance far outside the expected range.
+                TP_LOG_VALS("ELEC CAL: underpower at pattern check: P[W],threshold[W],Ia[A],Ib[A],V_inj[V]",
+                            power_watts, (max_power_watts_ * CAL_UNDERPOWER_RATIO), ia_amps, ib_amps,
+                            applied_voltage_volts);
+                TP_LOG("ELEC CAL: hint: phase wire disconnected? Vbus too low? winding resistance out of range?");
+                fail_reason = "UNDERPOWER: injected power below the reliable-measurement threshold";
             }
 
             drv.motor_ctrl.set_motor_type(MotorType_Invalid);
-            set_error(status_tracker, motor, setup_status);
+            set_error(status_tracker, motor, setup_status, fail_reason);
         }
     }
 };
