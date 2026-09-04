@@ -1447,3 +1447,143 @@ FLASH: 67756 bytes (51.69% of 131072 bytes): +3012 bytes
 RAM: 7428 bytes (22.67% of 32768 bytes): +16 bytes
 
 
+## 2026-09-04 - CLN234 LED driver: TIM8_CH1 + DMA (zero-CPU WS2812)
+**Changes:**
+- Rewrote target/cln234/ws2812.h: TIM8_CH1 (PC6, AF4, open-drain) + DMA1_Channel2 streams 48 CCR1 compare values from a RAM buffer (one 16-bit word per WS2812 bit + trailing line-LOW entry)
+- PWM mode 2 + OC1PE preload, DMA request on CH1 compare, no IRQs
+- LED_Show is now non-blocking
+- restored cln234_release env in platformio.ini
+- main.cpp split into TARGET_CLN234 LED rotation test / CLN17 CAN bridge via preprocessor
+
+**Reasoning:**
+- Eliminate bit-bang CPU cost: frame is generated entirely by hardware, CPU only packs ~50 cycles per frame
+- zero steady-state load for the control loop
+
+**Notes:**
+- DMA1_Channel2 chosen (CH1=encoder SPI, CH5=ADC)
+- reset latch >=300us enforced by micros() guard
+- LED_SetRGB/LED_SetRGB2/LED_Off/LED_Show API preserved, LED_Show returns busy flag
+- reference: ws2812b-protocol-on-STM32-without-empty-loops (Habr idea)
+
+FLASH: 28264 bytes (21.56% of 131072 bytes): -39492 bytes
+RAM: 3864 bytes (11.79% of 32768 bytes): -3564 bytes
+
+
+## 2026-09-04 - CLN234 WS2812 fix: idle polarity + DMA self-start
+**Changes:**
+- Idle/trailing CCR changed 0xFFFF -> 0 (PWM mode 2: OCREF always active -> open-drain transistor ON -> line LOW
+- 0xFFFF released the pin and external pull-up held the line HIGH so the WS2812 reset latch never happened and frames were never accepted)
+- removed manual CCR1 priming - the idle compare event at CNT==0 (shadow CCR=0) pulls the first DMA word one period early, bits stream in order with a harmless leading LOW period
+- guard extended to 50 periods
+
+**Reasoning:**
+- Fix static white/yellow LEDs: frames were transmitted but never latched because the line idled HIGH instead of LOW between frames
+
+**Notes:**
+- Clocks verified: TIM8 APB2=170MHz (APB2 prescaler DIV1), DMA1/DMAMUX AHB1=170MHz, GPIOC AHB2=170MHz
+- tick counts derived from SystemCoreClock
+- scope note: frame is a 65us burst every 500ms, use normal/single trigger
+
+FLASH: 28248 bytes (21.55% of 131072 bytes): -16 bytes
+RAM: 3864 bytes (11.79% of 32768 bytes): +0 bytes
+
+
+## 2026-09-04 - CLN234 WS2812: DMA request moved to TIM8_UP + continuous debug send
+**Changes:**
+- DMA request source switched from TIM8_CH1 compare to TIM8_UP update event (DMAMUX 0x35, DIER=UDE): exactly one guaranteed request per bit period regardless of CCR value
+- main.cpp CLN234 branch now resends colors continuously (non-blocking, self-paced) with 1s color rotation and a 1Hz register diagnostics dump (EN/CNDTR/CCR1/ARR/DIER/CCER/BDTR/DMAMUX) over USB CDC
+
+**Reasoning:**
+- Constant white LEDs: with idle CCR=0 the first CH1 compare request coincides with the update event and never pulled the stream - DMA never started, line stayed LOW, LEDs kept the power-on latch
+
+**Notes:**
+- Watch console for [led] dumps: healthy idle EN=0 CNDTR=0 CCR1=0x0 ARR=0xDC DIER=0x100 CCER=0x1 BDTR=0x8000 DMAMUX=0x35
+- frame is now a continuous ~2.7 kHz burst stream, scope shows a solid waveform
+
+FLASH: 28692 bytes (21.89% of 131072 bytes): +444 bytes
+RAM: 3876 bytes (11.83% of 32768 bytes): +12 bytes
+
+
+## 2026-09-04 - CLN234 triple-ADC bring-up
+**Changes:**
+- Re-wired ADC sampling to 3 converters: ADC1+ADC2 dual regular simultaneous (I_A|I_B rank1, VSENS|TEMP rank2, 2-word packed CDR DMA) + ADC3 single-rank I_C (PB0/ADC3_IN12)
+- removed internal VSENSE channel
+- TEMP stays slow-sampled (247.5 cyc) after bench test showed bimodal garbage at 6.5 cyc
+- ADC3eos debug flag added to USB log
+
+**Reasoning:**
+- PA3 has no ADC3 routing (CubeMX G474CEUx DB): ADC3_IN12 is PB0, so I_C moved to ADC3 for true 3-converter simultaneous burst
+- all-zero analog readings traced to unpowered bench hardware, not firmware
+
+**Notes:**
+- Verified on COM15: dual chain + DMA + resync + ADC3 conversion all live
+- 100 Hz soft trigger
+- Flash 32936 B, RAM 4424 B
+
+FLASH: 32936 bytes (25.13% of 131072 bytes): +4244 bytes
+RAM: 4424 bytes (13.50% of 32768 bytes): +548 bytes
+
+
+## 2026-09-04 - CLN234 ADC: root-caused stale slave data + DRV_EN
+**Changes:**
+- DRV_EN (PB12) driven HIGH in bring-up so DRV8353 CSA outputs go live (IA/IB/IC now ~1650 mV mid-rail)
+- TEMP channel back to shortest 6.5-cycle window per board filter cap
+- root cause found: in dual regular simultaneous mode the rank DMA request fires at the MASTER EOC while the slave finishes late - CDR slave half-word was one rank old (TEMP slot carried I_B)
+- fix: master (ADC1) samples 47.5 cycles, slave (ADC2) 6.5 cycles
+- USB log now prints pin voltages in mV
+
+**Reasoning:**
+- Bench diagnosis via ADC2->DR vs CDR comparison: both held the stale rank-1 value while VBUS in the same word was always fresh
+- equal sampling times created a latch race, and the earlier 247.5-cycle TEMP window made the slave always-late (read as stable zeros)
+
+**Notes:**
+- Verified on COM15: IA=1645 IB=1682 IC=1655 VBUS=670 NTC=2107 mV, T=32 degC rock stable, no OVERHEAT
+- debug instrumentation removed
+- Flash 32508 B, RAM 4424 B
+
+FLASH: 32508 bytes (24.80% of 131072 bytes): -428 bytes
+RAM: 4424 bytes (13.50% of 32768 bytes): +0 bytes
+
+
+## 2026-09-04 - CLN234 ADC: master/slave EOC race fixed, fastest correct timing
+**Changes:**
+- Root cause isolated by bisection: equal master/slave sampling windows make the rank-2 CDR slave half-word read one rank old (request fires at master EOC, slave latches 2-3 cycles later
+- TEMP slot carried I_B in ~70% of sequences). CLN17 V3 avoids visible damage structurally (rank-1 slave dummy echoes I_B, rank-3 master window is long). Removed ADC_DMA_Resync entirely (circular DMA is phase-locked, CLN17 V3 style)
+- master (ADC1) now samples 12.5 cycles vs slave (ADC2) 6.5 - slave latches 141 ns before master EOC, race impossible
+- demo trigger raised 100 Hz -> 1 kHz
+- sequence only 50 ADC cycles ~1.2 us
+
+**Reasoning:**
+- User asked to mirror CLN17 V3 equal-times config and maximize ADC speed
+- bisection proved the staleness persists without Resync, so the deterministic ordering fix is the minimal correct timing
+
+**Notes:**
+- Verified on COM15 at 1 kHz: IA=1649 IB=1682 IC=1646 VBUS=671 NTC=2113 mV, T=32 degC - zero stale samples
+- Flash 32440 B, RAM 4424 B
+
+FLASH: 32440 bytes (24.75% of 131072 bytes): -68 bytes
+RAM: 4424 bytes (13.50% of 32768 bytes): +0 bytes
+
+
+## 2026-09-04 - CLN234 read-only SPI register dump for DRV8353 + MT6835
+**Changes:**
+- Restored shared SPI1 arbitration in spi_setup.h as READ-ONLY: SPI_Bus_ConfigureDRV (16-bit, mode 1) + SPI1_DrvChipSelect on PC15
+- DRV8353_ReadReg, MT6835_ReadReg, SPI1_Transfer8/16 polled primitives
+- encoder bus speed raised BR 5->4 (2.66->5.3125 MHz)
+- main.cpp cln234 branch replaced by 2 s register dump with live mode switching
+
+**Reasoning:**
+- User requested register read-out only - no register writes on either chip
+- 8 MHz unreachable (PCLK2/2^n), 5.3125 MHz chosen per user decision as in-spec for both chips (DRV8353 max 10 MHz, MT6835 max 16 MHz)
+
+**Notes:**
+- DRV8353 frames always set R/W=1
+- MT6835 frames use OP_READ 0b0011 / OP_ANGLE 0b1010
+- dump prints DRV regs 0x00-0x07 + MT regs USERID..CAL_STATUS + angle/status/CRC + drv_en/nfault
+- DRV_EN (PB12) high is required for DRV SPI response
+- requires VM power on the board
+
+FLASH: 29696 bytes (22.66% of 131072 bytes): -2744 bytes
+RAM: 3760 bytes (11.47% of 32768 bytes): -664 bytes
+
+

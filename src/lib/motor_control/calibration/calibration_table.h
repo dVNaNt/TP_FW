@@ -34,7 +34,7 @@
 #include "../../drivers/flash_eeprom.h" // EEPROM-emulation driver used for calibration-table persistence
 
 #ifndef CAL_TABLE_CAPACITY // Check if CAL_TABLE_CAPACITY is not defined externally
-#define CAL_TABLE_CAPACITY 200 // Maximum number of calibration points allocated in memory
+#define CAL_TABLE_CAPACITY 400 // Maximum number of calibration points allocated in memory
 #endif // End of CAL_TABLE_CAPACITY definition block
 
 #ifndef ECC_TABLE_SIZE // Check if ECC_TABLE_SIZE is not defined externally
