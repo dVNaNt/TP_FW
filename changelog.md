@@ -1587,3 +1587,126 @@ FLASH: 29696 bytes (22.66% of 131072 bytes): -2744 bytes
 RAM: 3760 bytes (11.47% of 32768 bytes): -664 bytes
 
 
+## 2026-09-04 - CLN234 SPI dump: angle in degrees, CRC-8 validation, root-caused MT6835 garbage data
+**Changes:**
+- Angle burst decoded to degrees (raw/2097152*360)
+- MT6835 CRC-8 (poly 0x07) computed locally over angle21+status and compared to sensor CRC
+- logging 200 ms angle + 1 s dumps
+- PA2 (ENC_CAL) forced LOW permanently
+- ROOT CAUSE of invalid data: RX/TX DMAEN left set in encoder SPI config made CPU DR writes ignored (DMA-only FIFO) - sensor clocked garbage
+- bus speed 5.3125 MHz verified CRC-clean after fix
+- DRV8353 reads annotated as write-only (SDO not routed, changelog T08), health via nFAULT
+
+**Reasoning:**
+- User reported noisy/invalid data
+- CS framing and pins confirmed
+- full 6-byte raw frames exposed periodic corruption pattern that pointed to mis-clocked commands, not electrical noise
+
+**Notes:**
+- MT6835 STATUS=2 (weak field) is sensor-internal and data stays CRC-valid
+- DRV8353 register reads cannot work on this board - SDO silent by design
+- DRV_EN/nFAULT/enc_cal logged every second
+- verified live on COM15: crc_errs=0, stable 272.9 deg readings
+
+FLASH: 30944 bytes (23.61% of 131072 bytes): +1248 bytes
+RAM: 3768 bytes (11.50% of 32768 bytes): +8 bytes
+
+
+## 2026-09-05 - DRV8353 SPI reads fixed: MISO pull-up + conservative bus speed
+**Changes:**
+- Pull-up enabled on MISO (PA6) - both SDO outputs are tri-stated while both CS idle-high, floating bus read as all-zero
+- DRV8353 branch slowed to PCLK2/128 = 1.328 MHz per moteus reference (2 MHz unreliable, 1 MHz OK)
+- RX FIFO fully drained + OVR cleared on bus mode switch
+- 1 us CS setup/hold around each DRV frame
+- removed wrong write-only note - DRV8353 reads work
+
+**Reasoning:**
+- User reported driver registers reading as zeros despite valid hardware
+- moteus drv8323.cc confirmed single-frame read protocol AND the MISO pull-up requirement
+
+**Notes:**
+- Verified live on COM15: GATE_HS=0x1FF, GATE_LS=0x3FF, OCP_CTRL=0x024, CSA_CTRL=0x001 (TI reset values, stable across dumps), FAULT=0x000, VGS=0x000 (no faults), nFAULT=1
+- MT6835 unchanged: 5.3125 MHz, CRC-OK angle in degrees at 200 ms
+
+FLASH: 30948 bytes (23.61% of 131072 bytes): +4 bytes
+RAM: 3768 bytes (11.50% of 32768 bytes): +0 bytes
+
+
+## 2026-09-05 - New src/hardware register maps + measured SPI reconfig cost
+**Changes:**
+- Added src/hardware/drv8353s.h (DRV8353S map: Reg/F/VAL namespaces, CmdRead/CmdWrite/Data frame builders, RESET values, constexpr Get/Put via __builtin_ctz) and src/hardware/mt6835.h (MT6835 map: opcodes, 12-bit addresses, Cmd BYTE0/1/2 wire-byte builders, Angle/Status/AngleToDeg/Crc8 constexpr CRC-8)
+- spi_setup.h refactored onto the maps, duplicate local CRC removed
+- measured SPI1 mode reconfig via DWT: encoder 46 cyc / 270 ns, drv 79 cyc / 464 ns
+- DRV dump primed with 4 frames after power-up (first 2 frames clock out idle data)
+- fixed MT6835 BYTE0/1/2 naming clash with Arduino binary.h B0/B1 macros
+
+**Reasoning:**
+- User asked how many cycles the SPI re-profiling takes and requested flash/ram-lean register map files with simple command access
+
+**Notes:**
+- Verified on COM15: reconfig cost line at boot, DRV8353 registers GATE_HS=0x1FF GATE_LS=0x3FF OCP=0x024 CSA=0x001 FAULT=0 from first dump, MT6835 angle 42.2 deg CRC OK, crc_errs=0
+- cln234 31240 bytes flash / 3768 RAM, cln17_v3_release SUCCESS
+
+FLASH: 31240 bytes (23.83% of 131072 bytes): +292 bytes
+RAM: 3768 bytes (11.50% of 32768 bytes): +0 bytes
+
+
+## 2026-09-05 - CLN17/CLN234 target split finished: tunepulse.h per target + run.h app layer
+**Changes:**
+- Restored MT6835::Crc8 (dropped in the map refactor) and fixed the MT6835::Angle() field-overlap bug; added AngleToDeg helper
+- SPI1 encoder DMA mode restored (RX/TX DMAEN) - the DMA angle polling that drives POSITION_Callback was dead since the dump-only fix; added SPI_Bus_ConfigureEncoderPolled() for the read-only register dumps
+- CLN234 tunepulse.h completed: full tunepulse_init() (clock/CORDIC/NVM partitions/IO/WS2812/ADC/PWM/SPI/NVIC/nFAULT/DRV_EN, software protection limits + NTC conversion callback, fault + PWM callbacks, both blocking calibrations, tp_stack_ready release)
+- CLN234 run.h completed: run_setup() (BOOT button, stabilization, one-shot READ-ONLY DRV8353 + MT6835 dumps, motor stack, CAN) and run_loop() (console<->CAN chunk bridge + 500 ms live MT6835 telemetry with CRC link monitoring, zero extra SPI traffic)
+- WS2812 LED_Update() pumped from the 20 kHz control ISR; LED callback semantics fixed (index 0 = fault indicator, dim red)
+- interrupt_setup.h: added missing temperature.h include (Temperature_NTC_Feed was undefined) 
+
+**Reasoning:**
+- Complete the target-per-MCU refactor: main.cpp is generic (SerialUSB + run_setup/run_loop), all board specifics live in target/<board>
+
+**Notes:**
+- cln17_v3_release: SUCCESS, 67780 B flash (59.1% of 114688) / 7832 B RAM
+- cln234_release: SUCCESS, 47816 B flash / 4328 B RAM
+- CLN17 upload attempted via ST-Link (tools/upload_all_stlinks.py); verify the boot log on COM14 at 576000 8N1 after flashing
+
+
+## 2026-09-05 - Target-based refactor completed (CLN17 V3 + CLN234)
+**Changes:**
+- Finished cln234 tunepulse.h: full tunepulse_init() with NVM bindings, WS2812 LED callback, ADC/PWM/SPI1+MT6835 DMA bring-up, DRV_ERR EXTI fault input, software protection limits (OC/UV/OV/OT/OP), NTC temperature conversion callback, fault safe-state callbacks, current-offset and motor angle calibrations
+- ISR gate tp_stack_ready released last
+- TARGET_* macro guards added to both target.h to kill redefinition warnings
+
+**Reasoning:**
+- main.cpp is now target-agnostic: it only brings up SerialUSB and calls run_setup()/run_loop() from the per-target run.h
+- each target owns its own tunepulse.h (peripherals, limits, callbacks)
+- CLN234 hardware protection is delegated to the DRV8353 nFAULT (no COMP/DAC on board)
+
+**Notes:**
+- Both environments build clean: cln17_v3_release 67780 B flash / 7832 B RAM (of 114688/32768), cln234_release 71076 B flash / 7984 B RAM (of 520192/131072)
+- ST-Link upload blocked by a host-side USB access error (LIBUSB_ERROR_ACCESS) - replug the probe and run: python -m platformio run -e cln17_v3_release -t upload
+
+FLASH: 67780 bytes (51.71% of 131072 bytes): +36540 bytes
+RAM: 7832 bytes (23.90% of 32768 bytes): +4064 bytes
+
+
+## 2026-09-05 - CLN234: remove SPI register-dump logging, MT6835-only bring-up, CLN17-style ISR wiring
+**Changes:**
+- Deleted DRV8353/MT6835 register dumps from run.h
+- run_setup() now goes straight to tunepulse_init()
+- removed unused DRV_Pins_Init()
+- POSITION_Callback() now drives TP.tick() unconditionally like CLN17 (tp_stack_ready gate removed)
+- docs updated
+
+**Reasoning:**
+- The encoder-DMA->TP.tick() gate deadlocked the motor calibration (calibrator executes its motion inside tick(), which never ran)
+- register dumps added boot-time SPI mode switching the user asked to drop
+
+**Notes:**
+- DRV8353 SPI primitives kept in spi_setup.h but unused
+- pins DRV_EN(PB12)=HIGH / nFAULT(PB1) EXTI initialized in tunepulse_init()
+- COM16 verified: boot, current cal OK, MT6835 telemetry CRC ok
+- el-cal now reports real underpower-at-pattern-check (CSA full scales still CLN17 defaults, see target.h note)
+
+FLASH: 69072 bytes (52.70% of 131072 bytes): +1292 bytes
+RAM: 7984 bytes (24.37% of 32768 bytes): +152 bytes
+
+

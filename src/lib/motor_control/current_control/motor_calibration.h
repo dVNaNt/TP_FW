@@ -167,7 +167,7 @@ public:
           timeout_(CALIB_PAUSE_CYCLES),
           stability_check_(0.05, 240),
           drv(drv),
-          max_power_watts_(50.0f),
+          max_power_watts_(500.0f),
           soft_power_limit_watts_(0.75f),
           diag_power_watts_(0.0f),
           diag_ia_amps_(0.0f),

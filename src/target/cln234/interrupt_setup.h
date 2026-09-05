@@ -21,6 +21,8 @@
 
 #include "spi_setup.h"        // Include the shared SPI bus (DRV8353 + MT6835)
 #include "timer_pwm_setup.h"  // Include PWM timer hardware definitions and functions
+#include "temperature.h"      // External NTC model: Temperature_NTC_Feed() raw domain
+#include "ws2812.h"           // WS2812 status LED: LED_Update() pumped from the 20 kHz tick
 
 // OPTIMIZATION (P2.5): cache &TP.driver_phy once instead of walking
 // the global object member chain on every sample. The address is fixed at
@@ -57,10 +59,15 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
 
     phy->current.set_currents_irq(current_values);
     phy->supply.set_voltage_irq(voltage_supply);
-    // Feed the thermal protection pipeline (raw 12-bit left-aligned). A zero
-    // word means "no injected conversion completed yet" (the sensor reads
-    // ~1.4 V, never 0), so it is skipped to keep the filter unprimed.
-    phy->temperature.set_temperature_irq(temperature_adc);
+    // Feed the thermal protection pipeline. The low-side NTC divider is
+    // ANTI-monotonic with temperature (hotter = smaller code), so the raw
+    // word is inverted ONCE at ingestion into the internal monotonic domain
+    // (0 = coldest, 65535 = hottest) expected by filter/thresholds (see
+    // temperature.h). A zero word means "no injected conversion completed
+    // yet" and is skipped to keep the filter unprimed.
+    if (temperature_adc != 0U) {
+        Temperature_NTC_Feed(phy->temperature, temperature_adc);
+    }
 
 }  // End of ADC_READY_Callback function
 
@@ -69,6 +76,14 @@ inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA
     // Self-test: the angle is already published in POSITION_ENCODER_MT_RAW
     // and polled by the test loop; do NOT run the FOC machinery here.
 #else
+    // Same wiring as CLN17 v3: the encoder DMA ISR owns the whole control
+    // pass. TP.tick() is the ONLY driver of the calibration state machines
+    // (the angle calibrator executes its motion inside tick()), so gating
+    // this call until boot completes would deadlock the motor calibration.
+    // Early-boot safety comes from inside the stack instead: tick() returns
+    // immediately while no fresh ADC sample has arrived, and the
+    // NotCalibrated state holds the phases shorted (INFINITY) until the
+    // current-sense offset calibration completes.
     TP.encoder.set_raw_position(Encoder_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
     TP.tick();
 #endif
@@ -89,6 +104,8 @@ inline void NVIC_Init() {  // Define the initialization function for the Nested 
  * This function bypasses HAL entirely. It must be called directly from TIM1_CC_IRQHandler.
  */
 inline void FOC_TimTrig_Callback() {  // Define custom inline callback for the timer trigger event
+    LED_Update();                     // Pump the WS2812 non-blocking frame stream (IRQ-safe, ~5 cycles hot path)
+
     ADC1_StartDMAConversion();        // Trigger hardware dual ADC conversion (ADC1 and ADC2 start synchronously)
 
     Encoder_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading

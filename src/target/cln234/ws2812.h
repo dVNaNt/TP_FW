@@ -20,6 +20,7 @@
  *    pending flag and invalidate the packed buffer - a couple of cycles,
  *    callable from any context.
  * 2. LED_Update() is a flat state machine with no spin loops:
+ *    (DMA1_Channel3; see the resource map in the LED_Init() notes below)
  *    - hot path (nothing pending): one flag read + return, ~5 cycles;
  *    - frame in flight: one CNDTR read + return, ~10 cycles;
  *    - completion: timestamp the moment (the line is now LOW);
@@ -119,7 +120,8 @@ inline uint32_t ws2812_ns_to_ticks(uint32_t ns) {
  *          with CCR preload. Mode 1 + open-drain: line HIGH for CCR ticks
  *          after each update event, LOW for the rest. CCR1 = 0 -> line LOW
  *          (reset/idle state, both LEDs dark).
- * - DMA1_Channel2 (free on this board: CH1 = encoder SPI, CH5 = ADC):
+ * - DMA1_Channel3 (free on this board: CH1 = encoder SPI RX, CH2 = encoder
+ *          SPI TX, CH5 = ADC):
  *          memory->peripheral, 16-bit, incrementing, request = TIM8_CH1
  *          (one request per compare event = one per bit period). No IRQs.
  *
@@ -143,20 +145,22 @@ inline void LED_Init() {
     GPIOC->AFR[0] &= ~(0xFU << (6 * 4));      // Clear PC6 alternate function
     GPIOC->AFR[0] |= (4U << (6 * 4));         // AF4 = TIM8_CH1
 
-    // ---- DMA1_Channel2: CCR1 waveform stream (request = TIM8_CH1) ----
+    // ---- DMA1_Channel3: CCR1 waveform stream (request = TIM8_CH1) ----
+    // NOTE: CH1/CH2 belong to the encoder SPI RX/TX (spi_setup.h) and CH5 to
+    // the ADC12 DMA (adc_setup.h); CH3 is the only free DMA1 channel here.
     RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN | RCC_AHB1ENR_DMAMUX1EN;  // Clock DMA1 + DMAMUX
-    LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_CHANNEL_2,
+    LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_CHANNEL_3,
                                     LL_DMA_DIRECTION_MEMORY_TO_PERIPH);  // RAM -> CCR1
-    LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PRIORITY_HIGH);  // Above average bus load
-    LL_DMA_SetMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MODE_NORMAL);  // One-shot: stops after the frame
-    LL_DMA_SetPeriphIncMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PERIPH_NOINCREMENT);  // Fixed CCR1 address
-    LL_DMA_SetMemoryIncMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MEMORY_INCREMENT);    // Walk the bit buffer
-    LL_DMA_SetPeriphSize(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PDATAALIGN_HALFWORD);    // CCR1 is 16-bit
-    LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MDATAALIGN_HALFWORD);    // Buffer entries are 16-bit
-    LL_DMA_SetPeriphRequest(DMA1, LL_DMA_CHANNEL_2, LL_DMAMUX_REQ_TIM8_CH1);     // One request per compare event
-    LL_DMA_SetPeriphAddress(DMA1, LL_DMA_CHANNEL_2, (uint32_t)&TIM8->CCR1);      // Destination: compare register
-    LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_2);                               // Idle until LED_Update()
-    LL_DMA_ClearFlag_GI2(DMA1);                                                  // Clear stale completion flags
+    LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_3, LL_DMA_PRIORITY_HIGH);  // Above average bus load
+    LL_DMA_SetMode(DMA1, LL_DMA_CHANNEL_3, LL_DMA_MODE_NORMAL);  // One-shot: stops after the frame
+    LL_DMA_SetPeriphIncMode(DMA1, LL_DMA_CHANNEL_3, LL_DMA_PERIPH_NOINCREMENT);  // Fixed CCR1 address
+    LL_DMA_SetMemoryIncMode(DMA1, LL_DMA_CHANNEL_3, LL_DMA_MEMORY_INCREMENT);    // Walk the bit buffer
+    LL_DMA_SetPeriphSize(DMA1, LL_DMA_CHANNEL_3, LL_DMA_PDATAALIGN_HALFWORD);    // CCR1 is 16-bit
+    LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_3, LL_DMA_MDATAALIGN_HALFWORD);    // Buffer entries are 16-bit
+    LL_DMA_SetPeriphRequest(DMA1, LL_DMA_CHANNEL_3, LL_DMAMUX_REQ_TIM8_CH1);     // One request per compare event
+    LL_DMA_SetPeriphAddress(DMA1, LL_DMA_CHANNEL_3, (uint32_t)&TIM8->CCR1);      // Destination: compare register
+    LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);                               // Idle until LED_Update()
+    LL_DMA_ClearFlag_GI3(DMA1);                                                  // Clear stale completion flags
 
     // ---- TIM8: 1.3 us period, CH1 = PWM mode 1 + preload, DMA on compare ----
     RCC->APB2ENR |= RCC_APB2ENR_TIM8EN;       // Clock TIM8 (APB2 = 170 MHz, x1)
@@ -235,7 +239,7 @@ inline bool LED_Update() {
     if (ws2812_pending == 0U) {                 // Hot path: nothing to send
         return false;                           // ~5 cycles
     }
-    if (DMA1_Channel2->CNDTR != 0U) {           // Frame still on the wire?
+    if (DMA1_Channel3->CNDTR != 0U) {           // Frame still on the wire?
         return false;                           // Retry on a later tick (~10 cycles)
     }
     const uint32_t now = micros();              // One time read per tick
@@ -252,14 +256,14 @@ inline bool LED_Update() {
         // Re-arm: EN is still set after the previous frame (G4 classic DMA
         // never auto-clears it), so force-disable and wait for the release -
         // with an exhausted counter this completes in a couple of bus cycles.
-        LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_2);
-        while (LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_2)) {
+        LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_3);
+        while (LL_DMA_IsEnabledChannel(DMA1, LL_DMA_CHANNEL_3)) {
         }
-        LL_DMA_ClearFlag_GI2(DMA1);                                     // Clear GIF/TCIF/HTIF/TEIF
-        LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_2,
+        LL_DMA_ClearFlag_GI3(DMA1);                                     // Clear GIF/TCIF/HTIF/TEIF
+        LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_3,
                                  (uint32_t)ws2812_dma_buf);             // Stream buf[0..48]
-        LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, WS2812_BUF_SIZE);  // 49 transfers
-        LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_2);                   // Arm the compare-event stream
+        LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_3, WS2812_BUF_SIZE);  // 49 transfers
+        LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_3);                   // Arm the compare-event stream
         ws2812_low_us = 0;                      // Re-stamp at the next completion
         ws2812_packed = 0;                      // Buffer consumed
         ws2812_tc_count++;                      // Diagnostics: frame counter

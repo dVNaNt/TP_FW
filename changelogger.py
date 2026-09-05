@@ -2,6 +2,11 @@ import argparse
 import datetime
 import os
 import re
+import sys                                      # Path of the tools directory
+
+sys.path.insert(0, os.path.join(                # Make tools/ importable by path
+    os.path.dirname(os.path.abspath(__file__)), "tools"))
+import tg_log                                   # Console + Telegram logging setup
 
 MAX_FLASH = 131072
 MAX_RAM = 32768
@@ -73,9 +78,12 @@ RAM: {args.ram} bytes ({ram_pct:.2f}% of {MAX_RAM} bytes): {format_delta(delta_r
     with open(changelog_path, 'a', encoding='utf-8') as f:
         f.write(entry + "\n\n")
         
-    # Обновленный вывод в консоль
-    print(f"📦 FLASH: {args.flash} bytes ({format_delta(delta_flash)} bytes)")
-    print(f"📦 RAM:   {args.ram} bytes ({format_delta(delta_ram)} bytes)")
+    # Mirror the report to console and the Telegram chat via the shared logger
+    log = tg_log.setup_logging("changelogger")
+    log.info("📦 FLASH: %d bytes (%s bytes)\n📦 RAM:   %d bytes (%s bytes)",
+             args.flash, format_delta(delta_flash),
+             args.ram, format_delta(delta_ram))
+    log.info(entry)                             # Full changelog entry to Telegram
 
 if __name__ == "__main__":
     main()

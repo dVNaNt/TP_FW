@@ -5,9 +5,6 @@
  * @file tunepulse.h
  * @brief Board-level integration layer for the TunePulse CLN17-v3 controller.
  *
- * This header wires together all firmware subsystems into a single global
- * application object (@c TP of type TunePulseHeart):
- *
  * - Instantiates the core @c TunePulseHeart object with board-specific
  *   hardware parameters (PWM frequency/resolution, supply voltage full-scale,
  *   per-phase current-sense full scales).
@@ -16,7 +13,6 @@
  * - Implements tunepulse_init(): the sequential bring-up routine that
  *   configures clocks, peripherals, protection limits and runs both the
  *   current-sense offset calibration and the motor angle calibration.
- *
  * The macros SupplyVoltage / Motor / MotorType / PhasePattern / ControlMode /
  * DriverStatus are #undef'd after including target.h so that their names can
  * be reused freely by the library without colliding with target-layer
@@ -55,15 +51,14 @@ TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
                   SYS_PARAMS::IB_MAX_CURRENT_FS,
                   SYS_PARAMS::IC_MAX_CURRENT_FS);
 
-#include "target/cln17_v3/bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
-#include "target/cln17_v3/interrupt_setup.h"
+#include "bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
+#include "interrupt_setup.h"  // ISR glue: ADC / encoder / comparators -> TP
 
-#include "target/cln17_v3/can_setup.h"  // Include CAN-FD driver setup
-#include "target/cln17_v3/comp_setup.h"
-#include "target/cln17_v3/cordic_setup.h"  // Include CORDIC hardware accelerator setup
-#include "target/cln17_v3/interrupt_setup.h"
-#include "target/cln17_v3/nvm_flash.h"
-#include "target/cln17_v3/timer_pwm_setup.h"
+#include "can_setup.h"        // CAN-FD driver + chunk API (CAN_BUS)
+#include "comp_setup.h"       // Comparator (hardware OC/OV) protection
+#include "cordic_setup.h"     // CORDIC hardware trigonometry accelerator
+#include "nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
+#include "timer_pwm_setup.h"  // TIM1 complementary PWM backend
 
 /**
  * @brief Red LED control callback (active LOW: true = ON, false = OFF).

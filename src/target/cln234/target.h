@@ -11,9 +11,10 @@
  * - Encoder        : MT6835 (21-bit absolute), SPI mode 3
  * - Shared SPI bus : DRV8353 and MT6835 both sit on SPI1 with separate
  *                    chip selects (DRV_CS on PC15, ENC_CS on PA4). The bus
- *                    starts in DRV8353 mode (16-bit frames, SPI mode 1),
- *                    then is reconfigured for the MT6835 (8-bit, mode 3)
- *                    once the driver configuration is done.
+ *                    boots directly in MT6835 encoder mode (8-bit, mode 3,
+ *                    DMA angle polling). The DRV8353 SPI primitives are
+ *                    kept but unused for now - the gate driver runs on its
+ *                    hardware defaults (DRV_EN = HIGH only).
  * - Status LED     : WS2812 on PC6 (TIM8_CH1 PWM, open-drain output)
  * - CAN            : FDCAN1 on PB8/PB9, transceiver standby on PC13
  *
@@ -25,7 +26,9 @@
 
 #pragma once
 
+#ifndef TARGET_CLN234  // Also passed on the command line (-D) - avoid redefinition warnings
 #define TARGET_CLN234
+#endif
 
 #include "Arduino.h"
 
@@ -99,10 +102,10 @@ namespace SYS_PARAMS {
     // CLN17 v3 design as a bring-up default. They MUST be re-derived for
     // the CLN234 shunt resistors and the DRV8353 CSA gain (see drv8353.h,
     // CSA_CTRL.CSA_GAIN) once the board BOM is fixed.
-    constexpr float MAX_SUPPLY_FS = 102.3;       // Bus voltage ADC full scale [V]
-    constexpr float IA_MAX_CURRENT_FS = 11.0;    // Phase A current full scale [A]
-    constexpr float IB_MAX_CURRENT_FS = 11.0;    // Phase B current full scale [A]
-    constexpr float IC_MAX_CURRENT_FS = 16.5;    // Phase C current full scale [A]
+    constexpr float MAX_SUPPLY_FS = 109.4;       // Bus voltage ADC full scale [V]
+    constexpr float IA_MAX_CURRENT_FS = 23.5;    // Phase A current full scale [A]
+    constexpr float IB_MAX_CURRENT_FS = 23.5;    // Phase B current full scale [A]
+    constexpr float IC_MAX_CURRENT_FS = 23.5;    // Phase C current full scale [A]
     constexpr int32_t ADC_DELAY_TICKS_CONST = 120;  // ADC trigger offset after PWM center
     constexpr int32_t DEADTIME_TICKS_CONST = 20;    // TIM1 dead-time in timer ticks
 }
