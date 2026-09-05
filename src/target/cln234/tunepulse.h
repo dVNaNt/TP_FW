@@ -16,9 +16,12 @@
  *                        the MT6835 encoder, separate chip selects). Hardware
  *                        OC/UVLO/OTSD is delegated to the DRV8353, which
  *                        reports through nFAULT (PB1, EXTI1 -> external
- *                        fault). There are NO MCU comparators/DACs on this
- *                        board, so no COMP/DAC threshold setup is needed -
- *                        only software protection limits are installed.
+ *                        fault). On top of that, the MCU COMPARATORS are
+ *                        wired EXACTLY like on CLN17 v3 (same pins, same
+ *                        DAC threshold parameters, see comp_setup.h):
+ *                        COMP1 (I_B/PA1), COMP2 (I_A/PA3), COMP4 (I_C/PB0)
+ *                        for per-phase hardware overcurrent and COMP3
+ *                        (VSENS/PA0) for hardware overvoltage.
  * - Status LED         : WS2812 chain (2 px) on PC6 (TIM8_CH1 + DMA)
  *                        instead of the discrete red/green/blue GPIO LEDs.
  * - Temperature        : external NTC 100k on PC4 (piecewise beta model)
@@ -59,30 +62,28 @@ TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
 #include "ws2812.h"           // WS2812 status LED (TIM8_CH1 + DMA)
 #include "bootloader_jump.h"  // SW1 (PC14) hold-to-bootloader (USB DFU)
 #include "interrupt_setup.h"  // ISR glue + NVIC (pulls clock/gpio/adc/spi/timer_pwm/drv_err/temperature)
+#include "comp_setup.h"       // Comparator (hardware OC/OV) protection (same circuit as CLN17 v3)
 #include "cordic_setup.h"     // CORDIC hardware trigonometry accelerator
 #include "nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
 #include "can_setup.h"        // CAN-FD driver + chunk API (CAN_BUS)
 
 /**
- * @brief Status-LED control callback for the WS2812 chain (PC6).
+ * @brief LED apply callback for the WS2812 chain (PC6).
  *
- * The TunePulseHeart LED API is a boolean per-index callback; the CLN234 has
- * no discrete LEDs, so index 0 maps to the whole WS2812 chain: true = dim
- * RED on both pixels, false = dark. Index 0 is driven by TunePulseHeart::
- * tick() as the FAULT indicator (led_control(0, driver_phy.get_fault())),
- * matching the red fault LED of the CLN17 board. Colors are only written to
- * the shadow buffer - LED_Update() streams the frame out non-blocking (it
- * is pumped from the 20 kHz control ISR, see interrupt_setup.h).
+ * The library LED driver hands over TWO packed RGB888 words (0x00RRGGBB, one
+ * per LED element), which map 1:1 onto the two daisy-chained WS2812B pixels.
+ * Colors are only written to the WS2812 shadow buffer - LED_Update() streams
+ * the frame out non-blocking (pumped from the 20 kHz control ISR, see
+ * interrupt_setup.h).
  *
- * @param state true switches the status LED on (dim red = fault indicator).
+ * @param led1 Packed RGB888 color for LED element 1 (WS2812 pixel 1).
+ * @param led2 Packed RGB888 color for LED element 2 (WS2812 pixel 2).
  */
-void LED_WS2812_Control(bool state) {
-    if (state) {
-        LED_SetRGB(60, 0, 0);  // Both LEDs: dim RED (fault indicator, index 0)
-    } else {
-        LED_Off();             // Both LEDs dark
-    }
-    LED_Update();              // Arm the non-blocking frame transfer
+void LED_Apply(int32_t led1, int32_t led2) {
+    // Unpack both words into the WS2812 shadow buffer (IRQ-safe, ~cycles)
+    LED_SetRGB2((led1 >> 16) & 0xFF, (led1 >> 8) & 0xFF, led1 & 0xFF,
+                (led2 >> 16) & 0xFF, (led2 >> 8) & 0xFF, led2 & 0xFF);
+    LED_Update();  // Arm the non-blocking frame transfer
 }
 
 /**
@@ -216,13 +217,13 @@ inline void tunepulse_init() {
 
     LED_Init();  // WS2812 chain: TIM8_CH1 + DMA1_Channel3, line parked LOW
 
-    // Register the status-LED callback in TunePulseHeart (index 0 = FAULT
-    // indicator, driven from the system tick; the WS2812 frame itself is
-    // streamed non-blocking from the 20 kHz control ISR).
-    TP.set_led_callback(0, LED_WS2812_Control);
+    // Register the single LED apply callback in TunePulseHeart: two packed
+    // RGB888 words map 1:1 onto the two WS2812 pixels. The fault indicator
+    // (LED1 red channel) is driven from the system tick; the frame itself is
+    // streamed non-blocking from the 20 kHz control ISR.
+    TP.led.set_callback().apply_cb(&LED_Apply);
 
-    LED_Off();     // Both WS2812 pixels dark initially (applied on first tick)
-    LED_Update();  // Push the "all dark" frame out right away
+    TP.led.off();  // Both WS2812 pixels dark initially (applied immediately)
 
     delay(100);
 
@@ -256,20 +257,42 @@ inline void tunepulse_init() {
 
     delay(100);
 
-    // Protection limits (software only on this board - the DRV8353 handles
-    // the hardware VDS/SEN overcurrent, UVLO and OTSD internally and reports
-    // through nFAULT / DRV_ERR_Init()):
+    // Hardware comparator protection (identical to CLN17 v3): DAC1/DAC3 +
+    // COMP1/COMP2/COMP3/COMP4 with the same startup thresholds and EXTI edges.
+    COMP_Protection_Init();
+
+    delay(100);
+
+    // Protection limits:
+    // - Hardware OC thresholds: the DAC threshold callbacks below convert the
+    //   amp limits into 12-bit DAC codes feeding COMP1/COMP2/COMP4 (per-phase
+    //   hardware overcurrent shutdown). CLN234 channel pairing: the driver's
+    //   CH1/CH2/CH3 correspond to pwm_ch1/pwm_ch2/pwm_ch3, and on this board
+    //   pwm_ch1 carries I_B (PA1 -> COMP1/DAC1_CH1), pwm_ch2 carries I_A
+    //   (PA3 -> COMP2/DAC1_CH2) and pwm_ch3 carries I_C (PB0 -> COMP4/DAC3_CH2).
+    //   Each channel's threshold (derived from that channel's own zero-current
+    //   offset) is therefore routed to the comparator watching the SAME pin
+    //   its current comes from - see interrupt_setup.h for the matching ADC
+    //   slot reorder.
     // - OC (software overcurrent) trip at 4.0 A on phases A/B and 6.2 A on
     //   phase C (full scales are provisional bring-up defaults, see target.h).
-    // - Bus undervoltage 16.0 V / overvoltage 51.0 V.
+    // - Hardware OV threshold: DAC_Set_COMP3_OV_Threshold callback feeds
+    //   COMP3 (bus overvoltage, regenerative braking safe state).
+    // - Bus undervoltage 16.0 V / overvoltage 51.0 V (same as CLN17 v3).
     // - OT (overtemperature) trip at 85 degC with a 10 degC hysteresis band;
     //   the fault releases only after the filtered temperature falls back
     //   below 75 degC (no chatter around one threshold).
     // - Overpower: 60 W / 2.5 A (bring-up defaults, same policy as CLN17 v3).
-    TP.driver_phy.current.overcurrent.set_limit_amps().oc_ia(4.0).oc_ib(4.0).oc_ic(4.0);
-    TP.driver_phy.supply.set_limit_volts().uv_lim_volts(16.0).ov_lim_volts(51.0);
+    TP.driver_phy.current.overcurrent.set_callback()
+        .oc_lim_ia_cb(DAC_Set_COMP1_OC_Threshold)  // CH1 = pwm_ch1 = I_B (PA1) -> COMP1 / DAC1_CH1
+        .oc_lim_ib_cb(DAC_Set_COMP2_OC_Threshold)  // CH2 = pwm_ch2 = I_A (PA3) -> COMP2 / DAC1_CH2
+        .oc_lim_ic_cb(DAC_Set_COMP4_OC_Threshold);  // CH3 = pwm_ch3 = I_C (PB0) -> COMP4 / DAC3_CH2
+    TP.driver_phy.supply.overvoltage.set_lim_callback(DAC_Set_COMP3_OV_Threshold);
+    TP.driver_phy.current.overcurrent.set_limit_amps().oc_ia(10.0).oc_ib(10.0).oc_ic(10.0);
+    TP.driver_phy.supply.set_limit_volts().uv_lim_volts(10.0).ov_lim_volts(51.0);
     TP.driver_phy.temperature.set_limit_celsius().ot_lim_celsius(85.0f).ot_hyst_celsius(10.0f);
-    TP.driver_phy.power.overpower.set_limit().op_lim_watts(60.0f).op_lim_amps(2.50f);
+    TP.driver_phy.power.overpower.set_limit().op_lim_watts(600.0f).op_lim_amps(10.50f);
+    TP.driver_phy.motor_ctrl.set_current_epsilon(5000);
     // Raw -> degC recalculation callback (external NTC 100k on PC4,
     // temperature.h piecewise-beta model): Temperature converts the filtered
     // internal-sensor reading into real degrees Celsius and compares the OT
@@ -310,7 +333,9 @@ inline void tunepulse_init() {
     while (TP.driver_phy.current.is_calibrated() == false) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
     }
-
+    SerialUSB.println(TP.driver_phy.current.cal_val_.a);
+    SerialUSB.println(TP.driver_phy.current.cal_val_.b);
+    SerialUSB.println(TP.driver_phy.current.cal_val_.c);
     SerialUSB.println("Current sensing setup complete");
 
     // Motor (electrical-angle) calibration:

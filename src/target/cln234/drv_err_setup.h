@@ -2,12 +2,13 @@
  * @file drv_err_setup.h
  * @brief DRV8353 nFAULT (DRV_ERR) input handling for CLN234.
  *
- * The CLN234 delegates hardware overcurrent/overvoltage detection to the
+ * The CLN234 additionally delegates gate-driver hardware protection to the
  * DRV8353 smart gate driver (VDS_OCP / SEN_OCP / UVLO / OTSD), which
  * reports any fault on the open-drain nFAULT output wired to PB1
- * (DRV_ERR, active low, external pull-up). There are no MCU comparator
- * channels on this board, so unlike the CLN17 v3 no COMP/DAC setup is
- * needed.
+ * (DRV_ERR, active low, external pull-up). The MCU comparator channels
+ * (COMP1/2/3/4, see comp_setup.h) handle the fast per-phase overcurrent
+ * and bus overvoltage shutdown exactly like on CLN17 v3 - this module
+ * only covers the gate-driver nFAULT line.
  *
  * PB1 is routed through SYSCFG to EXTI line 1 with BOTH-edge triggering:
  * - Falling edge (pin LOW)  : set the external fault (safe state callback

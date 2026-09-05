@@ -87,17 +87,17 @@ private:
     CalibrationCallback cal_complete_cb_ = nullptr;  ///< Callback invoked when calibration completes
 
     // --- State ---
-    Vec3D_i32 cal_val_ = {0, 0, 0};                       ///< Per-channel calibration accumulator / zero-current offset
     Vec3D cal_n_ = {-1, -1, -1};                          ///< Per-channel calibration sample counter
     Vec3D scale_ = {0, 0, 0};                             ///< Precomputed per-channel ratio in Q15
     Vec3D out_norm_ = {INT16_MIN, INT16_MIN, INT16_MIN};  ///< Normalized current outputs in Q15
-
+    
     // --- Input Buffer (SeqLock) ---
     alignas(4) uint16_t input_currents_[3] = {0, 0, 0};  ///< Input buffer holding the latest raw ADC readings
     std::atomic<uint32_t> input_seq_{0};                 ///< SeqLock counter for lock-free atomic updates
     std::atomic<bool> is_changed_{false};                ///< Flag indicating new currents were written since last tick
-
-public:
+    
+    public:
+    Vec3D_i32 cal_val_ = {0, 0, 0};                       ///< Per-channel calibration accumulator / zero-current offset
     /**
      * @brief Construct a CurrentSense instance.
      * @param ch1_fs_amps Full-scale current for Phase A in amps (0.0f = sensor missing)

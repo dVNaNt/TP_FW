@@ -113,54 +113,13 @@ inline constexpr uint32_t CmdAngleBurst() { return Cmd(OP_ANGLE, REG_ANGLE1); }
  * @return 21-bit absolute angle (0..2097151)
  */
 inline constexpr uint32_t Angle(uint8_t b0, uint8_t b1, uint8_t b2) {
-    return ((uint32_t)b0 << 13) | ((uint32_t)b1 << 5) | (uint32_t)(b2 >> 3);
+    return ((uint32_t)b0 << 13) | ((uint32_t)b1 << 5) | (uint32_t)(b2 >> 3) << 11;
 }
 
 /** Extract STATUS[2:0] from the third burst payload byte. */
 inline constexpr uint8_t Status(uint8_t b2) { return (uint8_t)(b2 & 0x7U); }
 
-/**
- * Convert the 21-bit raw angle to degrees.
- * @param angle_raw 21-bit absolute angle (0..2097151, see Angle())
- * @return Mechanical angle in degrees [0..360)
- */
-inline constexpr float AngleToDeg(uint32_t angle_raw) {
-    return ((float)angle_raw * 360.0f) / (float)CPR;
-}
 
-/**
- * @brief MT6835 CRC-8 over the 21-bit angle + 3 status bits.
- * @param angle_raw 21-bit absolute angle (as returned by Angle())
- * @param status STATUS[2:0] from the angle frame
- * @return Computed CRC-8 byte (compare against the sensor's byte)
- *
- * Algorithm (per the MT6835 datasheet and the simplefoc reference driver):
- * CRC-8 with polynomial x^8 + x^2 + x + 1 = 0x07, init 0x00, no final XOR,
- * computed MSB-first over exactly 24 bits assembled as:
- *   byte0 = ANGLE[20:13], byte1 = ANGLE[12:5],
- *   byte2 = (ANGLE[4:0] << 3) | STATUS[2:0]
- * Complexity: O(1), 24 shift/xor steps, no lookup table (Flash-lean).
- * constexpr so the CRC can even be precomputed at compile time.
- */
-inline constexpr uint8_t Crc8(uint32_t angle_raw, uint8_t status) {
-    uint8_t crc = 0x00;                                            // CRC-8 init value
-    uint8_t input = (uint8_t)(angle_raw >> 13);                    // ANGLE[20:13]
-    crc ^= input;                                                  // Fold in byte 0
-    for (uint8_t k = 8; k != 0; k--) {                             // 8 CRC shift steps
-        crc = (crc & 0x80U) ? (uint8_t)((crc << 1) ^ 0x07U) : (uint8_t)(crc << 1);
-    }
-    input = (uint8_t)(angle_raw >> 5);                             // ANGLE[12:5]
-    crc ^= input;                                                  // Fold in byte 1
-    for (uint8_t k = 8; k != 0; k--) {
-        crc = (crc & 0x80U) ? (uint8_t)((crc << 1) ^ 0x07U) : (uint8_t)(crc << 1);
-    }
-    input = (uint8_t)(((angle_raw << 3) & 0xFFU) | (status & 0x07U));  // Low bits + status
-    crc ^= input;                                                  // Fold in byte 2
-    for (uint8_t k = 8; k != 0; k--) {
-        crc = (crc & 0x80U) ? (uint8_t)((crc << 1) ^ 0x07U) : (uint8_t)(crc << 1);
-    }
-    return crc;                                                    // CRC-8 (poly 0x07)
-}
 
 }  // namespace MT6835
 

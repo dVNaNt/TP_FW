@@ -1710,3 +1710,92 @@ FLASH: 69072 bytes (52.70% of 131072 bytes): +1292 bytes
 RAM: 7984 bytes (24.37% of 32768 bytes): +152 bytes
 
 
+## 2026-09-05 - Unified RGB LED driver (LedDriver)
+**Changes:**
+- New src/lib/drivers/led_driver.h: two-element RGB driver (packed RGB888 shadow words) with ONE apply callback (int32 per LED, board-implemented) and a fluent set() API (.led/.led1/.led2/.r/.g/.b)
+- Removed the legacy 3-slot boolean LED callbacks (LED_Control_Callback/set_led_callback/led_control/get_led_callbacks) from TunePulseHeart
+- CLN17 v3: three per-color GPIO callbacks merged into a single LED_Apply() decoding RGB888 onto PB1/PC4/PB2
+- CLN234: WS2812 status callback replaced by LED_Apply() mapping the two words 1:1 onto the two pixels
+- fault indicator in tick() now drives LED1 red channel
+
+**Reasoning:**
+- One callback replaces three per-color callbacks
+- unified fluent write API for both boards
+
+**Notes:**
+- CLN234 fault indication is now full-red on pixel 1 (pixel 2 dark) instead of dim red on both
+
+FLASH: 67828 bytes (51.75% of 131072 bytes): -1244 bytes
+RAM: 7832 bytes (23.90% of 32768 bytes): -152 bytes
+
+
+## 2026-09-05 - CLN234 protective comparators restored
+**Changes:**
+- Added target/cln234/comp_setup.h (port of CLN17 v3 COMP protection: DAC1/DAC3 + COMP1/2/3/4, same pins and parameters)
+- COMP_Protection_Init() + DAC threshold callbacks wired into tunepulse_init()
+- OC limits aligned to CLN17 (4.0/4.0/6.2 A)
+- docs updated (tunepulse.h, run.h, drv_err_setup.h)
+
+**Reasoning:**
+- Per-phase hardware OC and bus OV comparator shutdown was missing on CLN234 although the board wiring is identical to CLN17
+
+**Notes:**
+- G474-only change: COMP4 uses the shared COMP4_5_6 IRQ vector
+- PB1 nFAULT stays in drv_err_setup.h
+- builds: cln234_release OK, cln17_v3_release OK
+
+FLASH: 69924 bytes (53.35% of 131072 bytes): +2096 bytes
+RAM: 7976 bytes (24.34% of 32768 bytes): +144 bytes
+
+
+## 2026-09-05 - CLN234 OC protection channel pairing fix
+**Changes:**
+- Swapped the first two ADC slots fed to set_currents_irq() so driver CH1/CH2 receive I_B (PA1)/I_A (PA3) matching pwm_ch1/pwm_ch2
+- rerouted the COMP DAC threshold callbacks (CH1->COMP1/DAC1_CH1, CH2->COMP2/DAC1_CH2, CH3->COMP4 unchanged)
+- documented the CLN234 channel pairing in comp_setup.h, tunepulse.h and interrupt_setup.h
+
+**Reasoning:**
+- The driver hard-pairs current channel N with PWM half-bridge N
+- on CLN234 pwm_ch1 carries I_B and pwm_ch2 carries I_A, so the crossed pairing made the FOC current loop read one bridge while driving the other, constantly tripping OC (A B A B ISR prints)
+
+**Notes:**
+- Test on COM16: printout should be quiet at idle
+- Set COMP1/COMP2 thresholds now derive from each comparator's own pin offset
+- verify motor spin direction since FOC phase sequence is now (B, A, C)
+
+FLASH: 69964 bytes (53.38% of 131072 bytes): +40 bytes
+RAM: 7976 bytes (24.34% of 32768 bytes): +0 bytes
+
+
+## 2026-09-05 - CLN234 comparator IRQs temporarily disabled
+**Changes:**
+- Commented out NVIC_SetPriority/NVIC_EnableIRQ for COMP1_2_3_IRQn and COMP4_5_6_IRQn in COMP_EXTI_Init()
+
+**Reasoning:**
+- Bypass hardware OC/OV comparator interrupts during bring-up while the channel-pairing fix is validated (kept EXTI lines armed
+- software OC fallback and DRV8353 nFAULT remain active)
+
+**Notes:**
+- TEMPORARY: re-enable both NVIC blocks before release
+- comparators themselves still run and pending EXTI flags accumulate harmlessly
+
+FLASH: 69940 bytes (53.36% of 131072 bytes): -24 bytes
+RAM: 7976 bytes (24.34% of 32768 bytes): +0 bytes
+
+
+## 2026-09-05 - Fault trigger logging over SerialUSB
+**Changes:**
+- Added reported_flags_ edge-detection latch and log_fault_trigger() to DriverPWM
+- tick_icr() now reports every newly set fault bit with an analog snapshot (Vbus, Ia, Ib, P, T)
+
+**Reasoning:**
+- Make the unified fault manager report what became the trigger instead of only entering the safe state
+
+**Notes:**
+- Drop-safe: prints are skipped when CDC TX queue is low, control ISR can never block on USB back-pressure
+- covers all 7 fault sources including manual set_fault() triggers
+
+FLASH: 68460 bytes (52.23% of 131072 bytes): -1480 bytes
+RAM: 7832 bytes (23.90% of 32768 bytes): -144 bytes
+
+

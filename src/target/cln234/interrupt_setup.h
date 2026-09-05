@@ -48,16 +48,31 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
     constexpr uint32_t valid_range =
         upper_th - lower_th;  // Calculate the allowed ADC range at compile time to avoid runtime math
 
-    if ((uint32_t)(current_values[0] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase A
-        current_values[0] = UINT16_MAX;  // Mark Phase A reading as invalid if it falls outside the valid range
+    if ((uint32_t)(current_values[0] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for I_A (PA3)
+        current_values[0] = UINT16_MAX;  // Mark the I_A reading as invalid if it falls outside the valid range
 
-    if ((uint32_t)(current_values[1] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase B
-        current_values[1] = UINT16_MAX;  // Mark Phase B reading as invalid if it falls outside the valid range
+    if ((uint32_t)(current_values[1] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for I_B (PA1)
+        current_values[1] = UINT16_MAX;  // Mark the I_B reading as invalid if it falls outside the valid range
 
-    if ((uint32_t)(current_values[2] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase C
-        current_values[2] = UINT16_MAX;  // Mark Phase C reading as invalid if it falls outside the valid range
+    if ((uint32_t)(current_values[2] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for I_C (PB0)
+        current_values[2] = UINT16_MAX;  // Mark the I_C reading as invalid if it falls outside the valid range
 
-    phy->current.set_currents_irq(current_values);
+    // CLN234 hardware channel order fix:
+    // The driver hard-pairs its current-sense channel N with PWM half-bridge N
+    // (FOC phase k duty -> CCRk, channel k current, channel k DAC threshold).
+    // On this board the phase current of pwm_ch1 (TIM1_CH1) is I_B (PA1) and
+    // the phase current of pwm_ch2 (TIM1_CH2) is I_A (PA3), while I_C (PB0)
+    // already matches pwm_ch3. ADC_get_values() returns the physical labels
+    // [I_A, I_B, I_C], so the first two slots are swapped here to feed the
+    // driver with [pwm_ch1 = I_B, pwm_ch2 = I_A, pwm_ch3 = I_C]. Without this
+    // reorder the FOC current loop reads the current of one bridge while
+    // driving the other, which trips the OC protection constantly. The same
+    // pairing is applied to the comparator DAC wiring in tunepulse.h
+    // (CH1 -> COMP1/I_B, CH2 -> COMP2/I_A, CH3 -> COMP4/I_C).
+    const uint16_t driver_channels[3] = {current_values[1], current_values[0],
+                                         current_values[2]};  // Reorder raw readings into driver CH1/CH2/CH3 order
+
+    phy->current.set_currents_irq(driver_channels);  // Publish phase currents paired with their own PWM channels
     phy->supply.set_voltage_irq(voltage_supply);
     // Feed the thermal protection pipeline. The low-side NTC divider is
     // ANTI-monotonic with temperature (hotter = smaller code), so the raw

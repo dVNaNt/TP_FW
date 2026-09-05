@@ -354,8 +354,8 @@ public:
      * 1. Sync fault flags with sub-system recovery timers (OC, OV, UV)
      * 2. Read external hardware fault pin
      * 3. Evaluate priority — fire callback if priority changed
-     * 4. If any fault is active, skip PWM application (hardware stays in safe state)
-     * 5. Otherwise, read duty cycle via SeqLock (PwmWrapper::read_ticks) and apply to hardware
+     * 5. If any fault is active, skip PWM application (hardware stays in safe state)
+     * 6. Otherwise, read duty cycle via SeqLock (PwmWrapper::read_ticks) and apply to hardware
      *
      * @note Call tick() before tick_icr() in each cycle.
      * @warning PWM outputs are NOT updated when any fault bit is set.

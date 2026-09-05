@@ -22,6 +22,8 @@
  * NOT used for now: hardware OC/UVLO/OTSD protection is delegated to the
  * gate driver itself and reported through nFAULT (PB1), and the gate
  * driver runs on its hardware-default configuration (DRV_EN = HIGH).
+ * Fast per-phase overcurrent and bus overvoltage shutdown are handled by
+ * the MCU comparators (comp_setup.h), wired exactly like on CLN17 v3.
  *
  * main.cpp only prepares the USB console and calls these two entry points.
  * The full board integration (TP object, ISR glue, callbacks, motor-stack
@@ -140,35 +142,6 @@ inline void run_loop() {
             line_done = false;               // Continue with the next line
         }
         (void)cid;                           // ID unused in this demo
-    }
-
-    // --- Live MT6835 telemetry from the DMA-parsed angle frame -------------
-    // Zero extra SPI traffic: POSITION_ENCODER_MT_RAW / STATUS / CRC are
-    // published by the encoder DMA ISR (spi_setup.h), so polling here can
-    // never steal the bus from the live FOC control loop. The CRC-8 of each
-    // telemetry sample is re-validated locally as a link monitor.
-    const uint32_t now = millis();
-    if ((now - telemetry_t0) >= TELEMETRY_PERIOD_MS) {
-        telemetry_t0 = now;                                      // Restart the pacer
-
-        const uint32_t angle_raw21 = Encoder_GetAngle() >> 11;   // Q0.32 -> 21-bit raw
-        const uint8_t status = Encoder_GetMTStatus();            // STATUS[2:0] flags
-        const bool crc_ok =                                      // Link-integrity verdict
-            (MT6835::Crc8(angle_raw21, status) == Encoder_GetMTCRC());
-        if (crc_ok) {
-            crc_ok_count++;                      // One more validated frame
-        } else {
-            crc_errs++;                          // Bus-noise / frame corruption
-        }
-
-        SerialUSB.print("[mt6835] ");            // Telemetry line prefix
-        SerialUSB.print(MT6835::AngleToDeg(angle_raw21), 3);  // Angle in degrees
-        SerialUSB.print(" deg  status=");        // STATUS[2:0]: ovsp/weak/uv
-        SerialUSB.print(status, HEX);
-        SerialUSB.print("  crc ok=");            // Validated frame counter
-        SerialUSB.print(crc_ok_count);
-        SerialUSB.print(" err=");                // CRC failure counter
-        SerialUSB.println(crc_errs);
     }
 }
 
