@@ -43,6 +43,14 @@
     constexpr size_t TP_LOG_TX_MARGIN = 32;
 
     /**
+     * Bytes reserved for the value list of a TP_LOG_VALS line, on top of the
+     * label itself. Four floats printed by Print::print() run to roughly this
+     * much including separators; reserving it up front keeps a line atomic
+     * instead of emitting a label whose values are then dropped.
+     */
+    constexpr size_t TP_LOG_VALS_PAYLOAD = 48;
+
+    /**
      * @brief True when at least @p bytes can be queued without blocking.
      * @param bytes Number of bytes the caller is about to print.
      *
@@ -77,7 +85,12 @@
     template <typename T, size_t N>
     inline void _tp_print_array(const T (&arr)[N]) {
         for (size_t i = 0; i < N; ++i) {
-            if (!tp_log_room(12)) return;  // TX queue nearly full: drop the tail
+            if (!tp_log_room(12)) {
+                // TX queue nearly full: drop the tail, but still terminate the
+                // line so the next message cannot concatenate onto this one.
+                if (tp_log_room(2)) SerialUSB.println();
+                return;
+            }
             SerialUSB.print(arr[i]);
             if (i < N - 1) {
                 SerialUSB.print(", ");
@@ -86,9 +99,15 @@
         SerialUSB.println();
     }
 
-    /** Print @p msg followed by all elements of static array @p arr, comma-separated. */
+    /**
+     * Print @p msg followed by all elements of static array @p arr, comma-separated.
+     * The label is room-checked like every other macro: an unguarded print here
+     * would spin in the control ISR, which is exactly what this header exists
+     * to prevent.
+     */
     #define TP_LOG_ARRAY(msg, arr) \
         do { \
+            if (!tp_log_room(sizeof(msg))) break; \
             SerialUSB.print(msg); \
             _tp_print_array(arr); \
         } while (0)
@@ -107,7 +126,12 @@
     /// call can never block the control ISR on host back-pressure.
     template<typename T, typename... Args>
     inline void _tp_print_args(T first, Args... args) {
-        if (!tp_log_room(12)) return;  // TX queue nearly full: drop the tail
+        if (!tp_log_room(12)) {
+            // TX queue nearly full: drop the tail, but still terminate the line
+            // so the next message cannot concatenate onto this one.
+            if (tp_log_room(2)) SerialUSB.println();
+            return;
+        }
         SerialUSB.print(first);
         if (sizeof...(args) > 0) {
             SerialUSB.print(", ");
@@ -115,9 +139,17 @@
         _tp_print_args(args...);
     }
 
-    /** Print @p msg followed by any number of comma-separated values. */
+    /**
+     * Print @p msg followed by any number of comma-separated values.
+     *
+     * The room check covers the label PLUS a value payload, so the line is
+     * emitted whole or not at all: printing the label unguarded (as this macro
+     * previously did) both risked spinning in the control ISR and reliably
+     * produced label-only lines whose numbers had been dropped behind them.
+     */
     #define TP_LOG_VALS(msg, ...) \
         do { \
+            if (!tp_log_room(sizeof(msg) + TP_LOG_VALS_PAYLOAD)) break; \
             SerialUSB.print(msg); \
             _tp_print_args(__VA_ARGS__); \
         } while (0)
