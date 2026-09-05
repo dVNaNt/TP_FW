@@ -77,3 +77,54 @@ drive instance on the same MCU or shared code in a multi-node CAN network. The r
 (R2/R5) addresses this; the application layer (S6) should be designed node-ID-relative from the
 start.
 
+
+## S16. Resistance identification is unreliable
+
+The DC two-point fit in `process_resistance_measure()` is ill-conditioned on real hardware: it
+solves `R = V1 / (2*dI)` from a small difference of two large currents, and measured `dI` lands at
+11-13% of `I1` where the model expects ~50%. Observed across three boots of one board: `dI` =
+0.26 / 0.11 / 0.23 A, mapping to R = 15.8 / 37.4 / 17.4 Ohm. The correction is now rejected by
+`RES_CORRECTION_MAX_FACTOR`, so R falls back to the raw `V/I` estimate — biased high by the bridge
+offset drop the correction existed to remove, and still noisy (4.11 / 4.67 / 4.64 Ohm).
+
+Prime suspect is a large residual current-sense offset (~1.4 A): it cancels out of `dI` and out of
+the HFI ripple, but inflates `I1`, which is exactly the disagreement observed. The HFI impedances
+are ripple-based and therefore offset-immune, and solving `Z(1 kHz) = 9.55` / `Z(1.5 kHz) = 14.77`
+for both unknowns yields L ~1604 uH and a small R — self-consistent, and matching the 1.6 mH the
+board later measures.
+
+Next step: log the phase currents with zero voltage commanded, right after the current-sense offset
+calibration completes, to confirm or rule out the offset. Likely real fix: derive R and L jointly
+from the two HFI frequencies (data already collected every boot, offset-immune) and retire the DC
+two-point correction along with its guard.
+
+## S17. Flash-programming window is published from the target, not the bridge vector
+
+`TunePulseHeart::tick()` opens the NVM window in the calibrated branch by zeroing the current
+*target* and immediately setting `flash_window = true`. The target feeds `tick_control_foc()`, whose
+PI integrator does not empty in one pass, so the bridge is still driving while the flag claims a
+zero-current vector is latched. Flash programming then stalls the ISR with interrupts off and
+freezes that live vector, yanking the rotor: observed as `tick/s` collapsing 20000 -> ~1500 and the
+supply pumped from 23 V to 37 V by regenerative energy.
+
+Every other path that opens the window bypasses FOC and drives a sentinel directly (`INFINITY` in
+the `NotCalibrated` branch, `NAN` in the default branch). The calibrated branch should do the same —
+short the phases and reset the FOC integrator for the duration of the transfer — so the published
+flag describes the vector actually on the bridge, as the invariant requires.
+
+## S18. Motor-profile save churns on the 15% resistance band
+
+`finish_calibration_success()` re-saves the profile whenever the freshly measured resistance differs
+from the stored one by more than 15%. With R as noisy as S16 leaves it, that test flips irregularly
+between boots, so the profile is rewritten to flash on a large fraction of startups — each write
+triggering S17. Fixing S16 removes the trigger; fixing S17 makes it harmless. Hysteresis on the
+comparison would be a cheap third line of defence.
+
+## S19. HFI generator sample rate is hardcoded
+
+`MotorCalibration` constructs `hfi_gen_(20000)` and never calls
+`FrequencyGenerator::set_frequency_system()`, so the injection sample rate is fixed at compile time
+rather than taken from `TunePulseHeart::clock_`. It matches `PWM_TIMER_FREQ_HZ` today, but the
+surrounding cycle-count comments are written against 18 kHz (`CALIB_PAUSE_CYCLES`,
+`INDUCTANCE_MEASURE_CYCLES_F1/F2`), so the two already disagree by ~10%. If the PWM frequency is
+ever changed, the injected pitch and the measured inductance drift with it silently.
