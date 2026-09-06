@@ -35,12 +35,12 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#include "../target/cln17_v3/bootloader_jump.h"  // USB DFU entry for the reboot opcode
-#include "../target/cln17_v3/can_setup.h"        // CAN_BUS: the FDCAN1 driver
-#include "../target/cln17_v3/nvm_flash.h"        // Configuration partition callbacks
-#include "tp_engine.h"                           // The protocol engine
-#include "tp_hid.h"                              // Protocol transport over the vendor HID endpoints
-#include "tp_serial.h"                            // Framed protocol transport over USB CDC
+#include "../../target/cln17_v3/bootloader_jump.h"  // USB DFU entry for the reboot opcode
+#include "../../target/cln17_v3/can_setup.h"        // CAN_BUS: the FDCAN1 driver
+#include "../../target/cln17_v3/nvm_flash.h"        // Configuration partition callbacks
+#include "../tp_engine.h"                           // The protocol engine
+#include "tp_hid.h"                                 // Protocol transport over the vendor HID endpoints
+#include "tp_serial.h"                              // Framed protocol transport over USB CDC
 
 /** @brief The protocol engine instance for this drive. */
 inline TpProtocol TP_API;

@@ -55,9 +55,9 @@
 
 #include <Arduino.h>
 
-#include "../target/cln17_v3/usb_hid_setup.h"  // Composite device and the report endpoints
-#include "tp_chunks.h"                         // TpFrame
-#include "tp_wire.h"                           // Identifier map
+#include "../../target/cln17_v3/usb_hid_setup.h"  // Composite device and the report endpoints
+#include "../tp_chunks.h"                         // TpFrame
+#include "../tp_wire.h"                           // Identifier map
 
 /** Bytes per record on the wire: two of identifier and length, eight of payload. */
 #define TP_HID_REC_LEN 10u

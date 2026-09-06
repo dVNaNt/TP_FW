@@ -508,3 +508,58 @@ FLASH: 99400 bytes (75.84% of 131072 bytes): +0 bytes
 RAM: 11248 bytes (34.33% of 32768 bytes): +0 bytes
 
 
+## 2026-09-06 - Split src/api into concern-sized files
+**Changes:**
+- tp_wire.h split four ways into wire/ (identifier map and predicates, opcodes, status enums, fixed-point codecs) and kept as an umbrella
+- tp_chunks.h split by opcode family into chunks/ with union TpFrame left in the umbrella
+- tp_node.h split into node/ as config record, identity, flash store and discovery
+- tp_registers.h split into registers/ with the 446-line TP_REGISTERS table in its own file
+- TpProtocol method bodies moved out of the class into nine engine/*_impl.h files as out-of-class inline definitions, leaving tp_engine.h as declarations plus state
+- tp_can.h, tp_hid.h and tp_serial.h moved to transport/ with run.h repointed
+- CAN_PROTOCOL.md section 13 implementation map rewritten for the new layout
+
+**Reasoning:**
+- tp_engine.h was one 1849-line class in which pack_chunk alone ran 227 lines and handle_request 165, so no single file answered a question like how persistence works without scrolling past telemetry packing and motion queueing
+- the register table was 59 percent of tp_registers.h and TpNodeStore 49 percent of tp_node.h, so both files read as one concern buried under another
+- largest file drops from 1849 to 523 lines and that 523 is now pure declarations, which doubles as the index to the nine engine files
+
+**Notes:**
+- Pure code motion with no behaviour change - all 2747 symbol sizes in the map file are identical to the pre-refactor build and flash and RAM are unchanged
+- every old top-level header survives as an umbrella so existing includes keep working, and the only edit outside src/api is run.h repointed at api/transport/tp_can.h
+- the register table stays one sorted array because tp_find_register binary-searches it and verify_register_table asserts the ordering at boot
+- tp_chunks.h still compiles standalone with no include path and reaches nothing under src/lib, so native_tpcp needed no change and passes 15 of 15
+
+FLASH: 99512 bytes (75.92% of 131072 bytes): +0 bytes
+RAM: 10816 bytes (33.01% of 32768 bytes): +0 bytes
+
+
+## 2026-09-06 - HFI: probe amplitude linearity within each stage
+**Changes:**
+- Split each stage's measurement window in two - the first half at the frozen amplitude, the second at half of it - capturing the full-amplitude demodulation before the step and logging CAL Znl hi,lo with the impedance magnitude from each
+- R and L still come from the full-amplitude half
+
+**Reasoning:**
+- The |Z| ratio across the two frequencies exceeds the 1.5 bound a series R-L allows, and the excess tracks the injection amplitude: 1.6 percent at I = 0.06 A rising to 5.5 percent at I = 0.34 A, reproduced across runs (1.576 and 1.586 on the two axes at I = 0.3 A). Frequency and amplitude are confounded in the four main stages because the higher-frequency measurement always runs at higher amplitude, so this measures the two amplitudes at one frequency, on the same winding seconds apart, where a linear system must return identical |Z|
+
+**Notes:**
+- Implemented inside the existing stages rather than as a new MotorStatus, which would change the protocol stage codes. The step lands mid-window and accumulation restarts at that period boundary, discarding the settling transient - the electrical time constant is under a millisecond against a window over a hundred milliseconds. Halves the averaging time for the primary measurement
+
+FLASH: 99752 bytes (76.10% of 131072 bytes): +240 bytes
+RAM: 10832 bytes (33.06% of 32768 bytes): +16 bytes
+
+
+## 2026-09-06 - HFI: switch frequency mid-window to separate frequency dependence from drift
+**Changes:**
+- Repurpose the in-stage probe: the second half of each measurement window now runs the other injection frequency at the same amplitude instead of half amplitude, logging CAL Zf 1k,1k5 with the pair ordered by frequency regardless of which the stage ran first
+
+**Reasoning:**
+- The amplitude probe answered its question - the Q axis returned |Z| within 0.9 and 1.5 percent between full and half injection, and the frequency ratio held at 1.548 versus 1.538, so |Z| does not depend on amplitude and the earlier cross-run correlation with current was confounded. That leaves one untested confound: all four stages measure f1 before f2, so any drift over a run - winding heating, holding current settling, adaptation state carried in - aliases exactly into an apparent frequency dependence
+
+**Notes:**
+- A ratio that persists when both frequencies are measured about a hundred milliseconds apart inside one stage is genuinely frequency related
+- one that collapses was drift. D2 read a 23.8 percent amplitude difference but its half-amplitude window ran at about 0.085 A against the DC bias, which is SNR rather than physics
+
+FLASH: 99808 bytes (76.15% of 131072 bytes): +56 bytes
+RAM: 10832 bytes (33.06% of 32768 bytes): +0 bytes
+
+

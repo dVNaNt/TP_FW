@@ -31,7 +31,7 @@
 
 #include "tunepulse.h"          // Board bring-up (also pulls in the CAN driver)
 
-#include "../../api/tp_can.h"   // TunePulse CAN Protocol bound to FDCAN1
+#include "../../api/transport/tp_can.h"   // TunePulse CAN Protocol bound to FDCAN1
 
 /** Max time run_setup() waits for the USB host to open the CDC port [ms]. */
 static constexpr uint32_t USB_ATTACH_TIMEOUT_MS = 5000;

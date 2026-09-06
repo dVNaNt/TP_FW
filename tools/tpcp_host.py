@@ -529,7 +529,7 @@ class SerialFrame:
 class SerialLink:
     """Framed protocol transport over the board's USB CDC console.
 
-    Speaks the framing in src/api/tp_serial.h:
+    Speaks the framing in src/api/transport/tp_serial.h:
 
         A5 5A | id_lo id_hi | d0..d7 | xor
 
@@ -713,7 +713,7 @@ def find_hid_path(preferred=None):
 class HidLink:
     """Protocol transport over the drive's vendor HID interface.
 
-    Speaks the report layout in src/api/tp_hid.h:
+    Speaks the report layout in src/api/transport/tp_hid.h:
 
         byte 0   record count, 0..6
         byte 1+  records of ten bytes: id_lo, id_hi | len<<4, then eight of payload

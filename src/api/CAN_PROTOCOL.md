@@ -3,7 +3,7 @@
 Application protocol for TunePulse drives on CAN 2.0A and CAN-FD.
 
 Reference implementation: `src/api/` (header-only, hardware-independent except
-for `tp_can.h`). The wire format lives entirely in `tp_wire.h` + `tp_chunks.h`;
+for `transport/`). The wire format lives entirely in `tp_wire.h` + `tp_chunks.h`;
 a host tool can include those two files and be bit-compatible with the drive
 without pulling in anything else.
 
@@ -604,23 +604,44 @@ Bring a drive up on a fresh bus and jog it:
 
 ## 13. Implementation map
 
-| File                                    | Contents                                     |
-| :-------------------------------------- | :------------------------------------------- |
-| `src/api/tp_wire.h`                     | Identifier map, opcodes, error codes, codecs  |
-| `src/api/tp_chunks.h`                   | The 8-byte frame layouts                      |
-| `src/api/tp_registers.h`                | Register map, accessors, config → hardware    |
-| `src/api/tp_node.h`                     | UID, configuration record, store, discovery   |
-| `src/api/tp_engine.h`                   | Dispatch, telemetry, safety, persistence      |
-| `src/api/tp_can.h`                      | FDCAN1 binding, transport mux and bring-up    |
-| `src/api/tp_serial.h`                   | Framed transport over the USB CDC console     |
-| `src/api/tp_hid.h`                      | Report transport over the vendor HID endpoints |
-| `src/target/cln17_v3/usb_hid_setup.h`   | Composite USB device: CDC console + HID pipe  |
-| `src/lib/motor_control/drive_control.h` | Mode machine, command mailbox, trajectory     |
-| `src/target/cln17_v3/can_setup.h`       | FDCAN1 driver, filtering, bus-off recovery    |
-| `test/test_tpcp/test_wire.cpp`          | Host-side wire-format conformance tests       |
+Each umbrella header aggregates a subfolder; include the umbrella, not the parts.
+
+| File                                      | Contents                                       |
+| :---------------------------------------- | :--------------------------------------------- |
+| `src/api/tp_wire.h`                       | Umbrella: everything that appears on the bus    |
+| `src/api/wire/tp_ids.h`                   | Protocol identity, identifier map, predicates   |
+| `src/api/wire/tp_opcodes.h`               | The opcode space and its guard keys             |
+| `src/api/wire/tp_enums.h`                 | Error, state, warning and selector enums        |
+| `src/api/wire/tp_codecs.h`                | Fixed-point and mini-float codecs               |
+| `src/api/tp_chunks.h`                     | Umbrella + `union TpFrame`                      |
+| `src/api/chunks/tp_chunk_status.h`        | `0x01–0x0F` status and telemetry layouts        |
+| `src/api/chunks/tp_chunk_motion.h`        | `0x10–0x1F` control, targets, trajectory        |
+| `src/api/chunks/tp_chunk_config.h`        | `0x20–0x2F` register access and persistence     |
+| `src/api/chunks/tp_chunk_system.h`        | `0x30–0x3F` calibration, system, replies        |
+| `src/api/tp_registers.h`                  | Umbrella: the register layer                    |
+| `src/api/registers/tp_register_desc.h`    | Descriptor model, context, value helpers        |
+| `src/api/registers/tp_register_ids.h`     | The `TpRegId` identifier space                  |
+| `src/api/registers/tp_register_table.h`   | `TP_REGISTERS` + lookup + normalization         |
+| `src/api/registers/tp_config_apply.h`     | `tp_apply_config`: shadow → hardware            |
+| `src/api/tp_node.h`                       | Umbrella: the node layer                        |
+| `src/api/node/tp_node_config.h`           | Persisted record and build-time defaults        |
+| `src/api/node/tp_node_identity.h`         | The 56-bit UID folded from the die id           |
+| `src/api/node/tp_node_store.h`            | Flash-backed load / save engine                 |
+| `src/api/node/tp_discovery.h`             | Byte-by-byte UID search participant             |
+| `src/api/tp_engine.h`                     | `TpProtocol` declaration and state              |
+| `src/api/engine/*_impl.h`                 | Its method bodies, nine files by concern        |
+| `src/api/transport/tp_can.h`              | FDCAN1 binding, transport mux and bring-up      |
+| `src/api/transport/tp_serial.h`           | Framed transport over the USB CDC console       |
+| `src/api/transport/tp_hid.h`              | Report transport over the vendor HID endpoints  |
+| `src/target/cln17_v3/usb_hid_setup.h`     | Composite USB device: CDC console + HID pipe    |
+| `src/lib/motor_control/drive_control.h`   | Mode machine, command mailbox, trajectory       |
+| `src/target/cln17_v3/can_setup.h`         | FDCAN1 driver, filtering, bus-off recovery      |
+| `test/test_tpcp/test_wire.cpp`            | Host-side wire-format conformance tests         |
 
 A host tool needs only `tp_wire.h` and `tp_chunks.h`; both are free of any
-firmware dependency. Run the conformance suite with `pio test -e native_tpcp`.
+firmware dependency, and nothing either of them reaches may include `src/lib/` —
+that invariant is what keeps the host suite compiling. Run it with
+`pio test -e native_tpcp`.
 
 ### Transports
 
@@ -628,8 +649,8 @@ The engine names no peripheral: it moves frames through four function pointers,
 so the same protocol runs over anything that can carry an identifier and eight
 bytes. Three bindings ship:
 
-- **CAN** (`tp_can.h`) — the deployment transport.
-- **HID** (`tp_hid.h`) — the control transport, over the vendor HID interrupt
+- **CAN** (`transport/tp_can.h`) — the deployment transport.
+- **HID** (`transport/tp_hid.h`) — the control transport, over the vendor HID interrupt
   endpoints of the composite USB device. Each 64-byte report carries a count
   byte and up to six ten-byte records:
 
@@ -638,7 +659,7 @@ bytes. Three bindings ship:
   | `0`    | record count, `0..6`                                   |
   | `1+`   | per record: `id_lo`, `id_hi(2:0) \| len(7:4)`, `d0..d7` |
 
-- **Serial** (`tp_serial.h`) — the same protocol over the board's USB CDC
+- **Serial** (`transport/tp_serial.h`) — the same protocol over the board's USB CDC
   console, framed as `A5 5A | id_lo id_hi | d0..d7 | xor`. Because the sync
   byte has bit 7 set and the log output is ASCII, protocol frames and console
   text share one endpoint with no mode switch.

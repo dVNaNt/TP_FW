@@ -41,8 +41,8 @@
 
 #include <Arduino.h>
 
-#include "tp_chunks.h"
-#include "tp_wire.h"
+#include "../tp_chunks.h"
+#include "../tp_wire.h"
 
 /** First byte of the frame delimiter (bit 7 set: never appears in ASCII logs). */
 #define TP_SERIAL_SYNC0 0xA5u
