@@ -1799,3 +1799,67 @@ FLASH: 68460 bytes (52.23% of 131072 bytes): -1480 bytes
 RAM: 7832 bytes (23.90% of 32768 bytes): -144 bytes
 
 
+## 2026-09-05 - CLN234: DRV8353S register configuration in the gate-driver enable callback
+**Changes:**
+- Added DRV8353_WriteReg() primitive to spi_setup.h (bus is no longer strictly read-only)
+- Added DRV_Enable_Callback() in tunepulse.h: DRV_EN=1, wake delay, shared SPI1 bus parking/restoration, register writes + readback verification over SerialUSB
+- Registered the callback via TP.driver_phy.get_enable().setCallback() and replaced the direct LL_GPIO pin enable
+
+**Reasoning:**
+- Program the requested DRV8353S OC/IDRIVE/SEN configuration at gate-driver enable
+- OCP_ACT=1, OTW_REP=1, IDRIVEP/N_HS=0100b, CBC=0, IDRIVEP/N_LS=0110b, TRETRY=1, OCP_DEG=01b, VDS_LVL=0100b, SEN_LVL=00b
+- other registers and fields keep power-on defaults (DRV8353S::RESET base)
+
+**Notes:**
+- Expected register images: CTRL=0x480, GATE_HS=0x144, GATE_LS=0x166, OCP=0x414, CSA=0x000
+- fault registers (0x00/0x01) never written (a write clears latched faults), CONFIG (0x07) untouched
+- each register is read back after write and compared, PASS/FAIL verdict printed
+- cln234_release build SUCCESS (Flash 70792 / RAM 7976 bytes)
+
+FLASH: 70792 bytes (54.01% of 131072 bytes): +2332 bytes
+RAM: 7976 bytes (24.34% of 32768 bytes): +144 bytes
+
+
+## 2026-09-05 - CLN234: DRV8353S SPI diagnostics - pre-write defaults dump, raw frames, write retries
+**Changes:**
+- Pre-write dump of ALL registers (0x00..0x07) with double reads (rd1/rd2) and expected values from DRV8353S::RESET
+- Raw 16-bit frame logging for defaults dump, write SDO responses and readbacks (padded hex)
+- Write verified by two readback frames with up to 3 retries
+- Wake delay after EN 10ms -> 30ms
+- DRV8353_WriteReg now returns the raw SDO response
+
+**Reasoning:**
+- COM16 bring-up shows readback mismatches: written values returned with bits cleared (0x144->0x100, 0x366->0x122) - raw frames + defaults dump needed to discriminate bus bit-slip vs SDO pipeline latency vs write corruption
+
+**Notes:**
+- Verdict is taken from the second readback frame (rd2) to be robust to one-frame SDO latency
+- defaults expected: 0000/0000/0000/01FF/03FF/0024/0001/0000
+- cln234_release build SUCCESS (Flash 71364 / RAM 7976 bytes)
+
+FLASH: 71364 bytes (54.45% of 131072 bytes): +572 bytes
+RAM: 7976 bytes (24.34% of 32768 bytes): +0 bytes
+
+
+## 2026-09-06 - CLN234: DRV8353S config finally verified - real factory defaults found, bit-banged SPI fixed
+**Changes:**
+- Fixed RESET[] table: true factory defaults are GATE_HS=0x3FF (LOCK=011b unlocked + IDRIVE 1111/1111), GATE_LS=0x7FF (CBC=1, TDRIVE=11b), OCP=0x16D, CSA=0x283 (bidirectional, 20V/V); the old {0x1FF, 0x3FF, 0x024, 0x001} were early-captured reads (response >> 1)
+- Corrected GATE_HS field map: bits [10:8] = LOCK (011b=unlocked, 110b=locked), not TDRIVE
+- Bit-bang MISO capture moved to the datasheet falling-edge point (after the rising edge) - before-rising sampling read response >> 1
+- Added forced EN low 1.1 s reset before configuration (registers are retained across short sleep periods)
+- Removed the speed scan and pattern probe debug code
+
+**Reasoning:**
+- The previous verification was self-deceiving: commit=written>>1 and the late capture cancelled out in the readback
+- The 3-phase debug read + 0x155 pattern probe separated write integrity from read integrity and exposed the real factory defaults
+- TI SDK/DRV8353S sources confirm LOCK[10:8] in GATE_DRIVE_HS
+
+**Notes:**
+- Requested fields now verified exact: CTRL=0x480 (OCP_ACT=1, OTW_REP=1), GATE_HS=0x344 (IDRIVEP/N_HS=0100b), GATE_LS=0x366 (CBC=0, IDRIVEP/N_LS=0110b), OCP=0x554 (TRETRY=1, OCP_DEG=01b, VDS_LVL=0100b, DEAD/OCP_MODE factory), CSA=0x280 (SEN_LVL=00b, gain/VREF_DIV factory)
+- CSA_GAIN stays at the factory 20 V/V - current-sense scaling assumptions may need review
+- EN low 1.1 s at every enable adds boot time; GATE_HS LOCK field left unlocked
+- cln234_release build SUCCESS (Flash 71860 / RAM 7976 bytes)
+
+FLASH: 71860 bytes (54.83% of 131072 bytes): +496 bytes
+RAM: 7976 bytes (24.34% of 32768 bytes): +0 bytes
+
+

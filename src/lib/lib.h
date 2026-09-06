@@ -230,9 +230,9 @@ public:
             counter++;
             led.set().led1().r(driver_phy.get_fault() ? 255 : 0);  // LED1 = fault indicator (red channel)
             uint32_t faulte = driver_phy.get_fault();
-            if (faulte) {
-                SerialUSB.println(faulte);
-            }
+            // if (faulte) {
+            //     SerialUSB.println(faulte);
+            // }
 
             uint32_t real_raw_ang = encoder.get_angle();           // Raw mechanical angle (no sign fix)
             int32_t real_pos = encoder.get_position() * err_sign;  // Corrected mechanical position

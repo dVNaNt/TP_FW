@@ -424,7 +424,7 @@ should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 1000.000000
+value_to_write = 50.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -441,7 +441,7 @@ should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 1000.000000
+value_to_write = 50.000000
 secondary_value_to_write = 0.000000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
@@ -679,8 +679,8 @@ should_update_from_elf = true
 shift = 0
 mask = 4294967295
 high_level_type = 0
-value_to_write = 3.000000
-secondary_value_to_write = 0.250000
+value_to_write = 6.000000
+secondary_value_to_write = 0.500000
 do_not_interpret_as_enum = false
 write_limits_enabled = false
 write_limit_min = -1.000000
@@ -1281,7 +1281,7 @@ secondary_write_enabled = true
 [group0-plot1]
 name = DQ
 type = 0
-visibility = true
+visibility = false
 secondary_write_enabled = true
 
 [group0-plot1-series0]
@@ -1317,22 +1317,22 @@ format = DEC
 
 [group0-plot2-series1]
 name = TP.current_driver.current_dq.d
-visibility = false
+visibility = true
 format = DEC
 
 [group0-plot2-series2]
 name = TP.current_driver.current_dq.q
-visibility = false
+visibility = true
 format = DEC
 
 [group0-plot2-series3]
 name = TP.current_driver.foc_current_.integrator_d
-visibility = true
+visibility = false
 format = DEC
 
 [group0-plot2-series4]
 name = TP.current_driver.foc_current_.integrator_q
-visibility = true
+visibility = false
 format = DEC
 
 [group0-plot3]
@@ -1580,7 +1580,7 @@ secondary_write_enabled = true
 [group0-plot10]
 name = speed
 type = 0
-visibility = true
+visibility = false
 secondary_write_enabled = true
 
 [group0-plot10-series0]

@@ -1,31 +1,47 @@
 /**
  * @file spi_setup.h
  * @brief Shared SPI1 bus manager for the DRV8353 gate driver and the MT6835
- *        absolute encoder (CLN234) - READ-ONLY register access.
+ *        absolute encoder (CLN234).
  *
  * The CLN234 routes BOTH SPI devices onto the SPI1 bus (PA5=SCK / PA6=MISO /
  * PA7=MOSI) with separate chip selects: PA4 = ENC_CS (MT6835), PC15 = DRV_CS
  * (DRV8353). The two chips need different bus modes, so the bus is
  * reconfigured on the fly around every device switch:
  *
- * - DRV8353 : 16-bit frames, SPI mode 1 (CPOL=0, CPHA=1), polled transfers.
+ * - DRV8353 : 16-bit frames, SPI mode 1 (CPOL=0, CPHA=1) EQUIVALENT, but
+ *             bit-banged through GPIO (see below), separate chip select.
  * - MT6835  : 8-bit frames,  SPI mode 3 (CPOL=1, CPHA=1), DMA polling for
  *             the continuous angle burst + polled single-register reads.
  *
  * Bus speed: PCLK2 = 170 MHz is the only SPI1 kernel clock on STM32G4 (no
  * RCC mux for SPI1), and the prescaler only divides by 2^n, so exact 8 MHz
  * is not reachable. The MT6835 runs at BR = PCLK2/32 = 5.3125 MHz
- * (CRC-validated). The DRV8353 runs at BR = PCLK2/128 = 1.328 MHz - the
- * conservative speed from the moteus reference ("2 MHz unreliable, 1 MHz
- * seemed OK"); the shared MISO REQUIRES a pull-up (PA6) because both SDO
- * outputs are tri-stated while both chip selects are idle-high.
+ * (CRC-validated).
  *
- * IMPORTANT - this build performs READS ONLY. No register is ever written:
- * - DRV8353 frames always set R/W = 1 (bit 15), so writing is impossible.
- * - MT6835 frames always use the OP_READ opcode (0b0011) or the read-only
- *   OP_ANGLE burst command (0b1010).
- * A read transaction has no side effects on either device (the DRV8353
- * fault registers are cleared only by writes; none are performed here).
+ * DRV8353 access is BIT-BANGED (DRV8353_BB_Transfer16) at ~167 kHz
+ * equivalent (3 us half-bits) instead of using the hardware SPI: the live
+ * bring-up logs proved that hardware-SPI register WRITES commit with
+ * deterministic value-dependent bit loss at EVERY prescaler setting
+ * (/256: 0x3FF -> 0x1FF, /16: 0x3FF -> 0x000; isolated 1-bits are always
+ * lost), while READS are bit-perfect. The signature matches an SDI path
+ * that needs ~1.1-1.2 us of settled high level per '1' bit - impossible
+ * with any SPI1 prescaler (0.5 bit = 0.75 us max setup in mode 1). The
+ * bit-bang gives every level 3-6 us of settling, which the write path
+ * accepts reliably. Bit-banging is acceptable here because DRV8353 access
+ * is a one-shot boot-time operation on an already slow diagnostic path.
+ *
+ * Bus access policy:
+ * - MT6835: reads only (OP_READ / OP_ANGLE burst, never written).
+ * - DRV8353: the gate-driver ENABLE callback (DRV_Enable_Callback in
+ *   tunepulse.h) WRITES the configuration registers 0x02..0x06 once at
+ *   boot (OC / IDRIVE / SEN_LVL tuning) and reads them back for
+ *   verification. Fault registers (0x00/0x01) are never written: a write
+ *   clears the latched faults, hiding real errors. CONFIG (0x07) stays at
+ *   its power-on default.
+ * A read transaction has no side effects on either device. Per SLVSDY6A the
+ * SDO output is OPEN-DRAIN: the MISO pull-up (PA6) is REQUIRED both while
+ * both chip selects are idle-high (both SDOs Hi-Z) and to pull the line
+ * high for SDO '1' bits during frames.
  *
  * Boot-time order:
  * 1. SPI1_Init()        - GPIO/DMA/SPI bring-up, bus left in MT6835 mode.
@@ -211,11 +227,11 @@ static inline void SPI_Bus_ConfigureEncoderPolled() {
  * @brief Configure SPI1 for the DRV8353 gate driver (16-bit, SPI mode 1).
  *
  * CR1 (mode 1): CPHA=1 only (CPOL=0). CR2: 16-bit frames (DS=15), no FRXTH
- * and no DMA requests - register reads are fully polled. BR=7: PCLK2/128 ->
- * 1.328 MHz. Conservative on purpose: the moteus reference driver runs the
- * DRV832x/835x family at 0.5-1 MHz ("2 MHz being unreliable, 1 MHz seemed
- * OK") because MISO quality is marginal on shared-bus boards. The dump is
- * slow anyway.
+ * and no DMA requests. BR=7: PCLK2/256 = 664 kHz - the slowest SPI1 rate.
+ * NOTE: actual register access happens through DRV8353_BB_Transfer16()
+ * (GPIO bit-bang, see the file header); this hardware-SPI configuration is
+ * kept so the bus idle levels and the RX FIFO state stay deterministic
+ * around the bit-banged frames (SCK idle low, RX queue empty).
  *
  * Disabling RXDMAEN/TXDMAEN detaches the encoder DMA channels while the
  * bus is owned by the gate driver, so a stale DMA request can never steal
@@ -245,7 +261,7 @@ static inline void SPI_Bus_ConfigureDRV() {
 }
 
 // ==============================================================================
-// BLOCKING READ PRIMITIVES (read-only register access)
+// BLOCKING TRANSFER PRIMITIVES (polled register access)
 // ==============================================================================
 
 /**
@@ -271,7 +287,113 @@ static inline uint8_t SPI1_Transfer8(uint8_t val) {
 static inline uint16_t SPI1_Transfer16(uint16_t val) {
     *(volatile uint16_t *)&SPI1->DR = val;        // Queue one 16-bit frame
     while (!(SPI1->SR & SPI_SR_RXNE)) {}          // Wait for the matching RX frame
-    return *(volatile uint16_t *)&SPI1->DR;       // Pop the 16-bit response
+    const uint16_t rx = *(volatile uint16_t *)&SPI1->DR;  // Pop the 16-bit response
+    while (SPI1->SR & SPI_SR_BSY) {}              // Wait for the LAST SCLK edge to complete
+    return rx;                                    // Response captured during the frame
+}
+
+/**
+ * @brief Bit-bang one 16-bit frame to the DRV8353 (SPI mode 1 equivalent).
+ * @param val Full 16-bit frame to clock out (R/W + ADDR + DATA)
+ * @return The 16-bit word captured on MISO during the same frame
+ *
+ * WHY BIT-BANG: live bring-up logs proved the hardware-SPI write path on
+ * this board loses '1' bits deterministically at EVERY SPI1 prescaler
+ * (see the file header). The bit-bang drives SCK/MOSI as plain GPIO with
+ * 3 us half-bits, so every level is settled for 3-6 us before the device
+ * samples it - far above the ~1.1 us the write path requires.
+ *
+ * Timing per bit (SLVSDY6A 8.5.1.1: data is CAPTURED on the FALLING edge
+ * of SCLK and PROPAGATED on the RISING edge; SDO starts driving bit15 as
+ * soon as nSCS falls):
+ *   MOSI set -> 3 us settle -> SCK rising (SDO propagates the next bit)
+ *   -> 3 us -> MISO SAMPLED (capture point, just before the falling edge)
+ *   -> SCK falling (device latches SDI) -> 3 us gap before the next MOSI
+ *   change. SDI is thus stable for 6 us before each falling-edge latch and
+ *   SDO has 3 us to propagate before the capture - both far above the open-
+ *   drain pull-up settling requirement (hardware SPI worked with only
+ *   0.75 us). Sampling at any other point shifts the whole response by one
+ *   slot (verified live: before-rising capture returned response >> 1).
+ *
+ * SCK (PA5) and MOSI (PA7) are switched from AF5 to plain push-pull GPIO
+ * output for the duration of the frame and restored afterwards; MISO
+ * (PA6) is left in AF mode - IDR reflects the pin state in any mode. The
+ * SPI1 peripheral must be idle (SPE may stay set: with no queued frames
+ * it generates no clock, and its pins are overridden by MODER).
+ */
+static inline uint16_t DRV8353_BB_Transfer16(uint16_t val) {
+    const uint32_t moder = GPIOA->MODER;  // Save pin-mode register
+    // PA5 (SCK) and PA7 (MOSI): mode 10 (AF) -> 01 (general purpose output)
+    GPIOA->MODER = (moder & ~((3U << (5U * 2U)) | (3U << (7U * 2U)))) |
+                   ((1U << (5U * 2U)) | (1U << (7U * 2U)));
+
+    uint16_t rx = 0;  // Captured MISO word (MSB first)
+    for (int8_t i = 15; i >= 0; i--) {
+        if (val & (1U << i)) {
+            GPIOA->BSRR = GPIO_PIN_7;          // MOSI = 1
+        } else {
+            GPIOA->BSRR = GPIO_PIN_7 << 16;    // MOSI = 0
+        }
+        delayMicroseconds(3);                  // Settle MOSI before the clock edge
+        GPIOA->BSRR = GPIO_PIN_5;              // SCK rising edge: SDO propagates the next bit
+        delayMicroseconds(3);                  // SDO propagation settles (open-drain pull-up)
+        rx = (uint16_t)((rx << 1) | ((GPIOA->IDR >> 6) & 1U));  // CAPTURE on the falling edge
+        GPIOA->BSRR = GPIO_PIN_5 << 16;        // SCK falling edge: device latches SDI
+        delayMicroseconds(3);                  // Hold gap before the next bit
+    }
+
+    GPIOA->MODER = moder;                      // Restore AF5 (SPI1) pin modes
+    return rx;
+}
+
+/**
+ * @brief DEBUG: one read frame with THREE MISO samples per bit.
+ * @param addr Register address to read
+ * @param pre  Word sampled just BEFORE each SCK rising edge
+ * @param cap  Word sampled just BEFORE each SCK falling edge (datasheet
+ *             capture point - identical to DRV8353_BB_Transfer16)
+ * @param post Word sampled ~1.5 us AFTER each SCK falling edge
+ *
+ * The live bring-up showed contradictory SDO phases between registers
+ * (GATE_HS/GATE_LS matched content<<1|1, OCP/CSA matched nothing sane).
+ * Capturing the whole bit period at three points reveals which slot the
+ * device actually propagates each response bit in: the phase where the
+ * known power-on defaults appear is the real capture point, and any value
+ * present in ALL three phases is the true register content.
+ */
+static inline void DRV8353_BB_TripleRead(uint8_t addr, uint16_t* pre,
+                                         uint16_t* cap, uint16_t* post) {
+    const uint16_t frame = DRV8353S::CmdRead(addr);
+    const uint32_t moder = GPIOA->MODER;
+    GPIOA->MODER = (moder & ~((3U << (5U * 2U)) | (3U << (7U * 2U)))) |
+                   ((1U << (5U * 2U)) | (1U << (7U * 2U)));
+
+    SPI1_DrvChipSelect(true);   // Assert DRV_CS (PC15): SDO drives only while selected
+    delayMicroseconds(1);       // t_SCS_SU setup time
+    uint16_t a = 0, b = 0, c = 0;
+    for (int8_t i = 15; i >= 0; i--) {
+        if (frame & (1U << i)) {
+            GPIOA->BSRR = GPIO_PIN_7;
+        } else {
+            GPIOA->BSRR = GPIO_PIN_7 << 16;
+        }
+        delayMicroseconds(3);
+        a = (uint16_t)((a << 1) | ((GPIOA->IDR >> 6) & 1U));  // before rising
+        GPIOA->BSRR = GPIO_PIN_5;                             // rising
+        delayMicroseconds(3);
+        b = (uint16_t)((b << 1) | ((GPIOA->IDR >> 6) & 1U));  // before falling
+        GPIOA->BSRR = GPIO_PIN_5 << 16;                       // falling
+        delayMicroseconds(1);
+        c = (uint16_t)((c << 1) | ((GPIOA->IDR >> 6) & 1U));  // after falling
+        delayMicroseconds(2);
+    }
+    delayMicroseconds(2);       // hold margin before releasing CS
+    SPI1_DrvChipSelect(false);  // Release DRV_CS
+
+    GPIOA->MODER = moder;
+    *pre = a;
+    *cap = b;
+    *post = c;
 }
 
 /**
@@ -286,13 +408,48 @@ static inline uint16_t SPI1_Transfer16(uint16_t val) {
  * bus-integrity debugging; mask with 0x07FF to extract the DATA field.
  */
 static inline uint16_t DRV8353_ReadReg(uint8_t addr) {
-    const uint16_t frame = DRV8353S::CmdRead(addr);  // R/W=1 (read) + ADDR (hardware/drv8353s.h)
-    SPI1_DrvChipSelect(true);                     // Assert DRV_CS (PC15) - LOW for the whole frame
-    delayMicroseconds(1);                         // t_SCS_SU setup time (moteus-style 1 us)
-    const uint16_t rx = SPI1_Transfer16(frame);   // Clock the full 16-bit read frame
-    SPI1_DrvChipSelect(false);                    // Release DRV_CS (HIGH = bus released)
-    delayMicroseconds(1);                         // t_SCS_HOLD + inter-frame gap
-    return rx;                                    // Raw 16-bit response frame
+    const uint16_t frame = DRV8353S::CmdRead(addr);   // R/W=1 (read) + ADDR (hardware/drv8353s.h)
+    SPI1_DrvChipSelect(true);                      // Assert DRV_CS (PC15) - LOW for the whole frame
+    delayMicroseconds(1);                          // t_SCS_SU setup time (moteus-style 1 us)
+    const uint16_t rx = DRV8353_BB_Transfer16(frame);  // Clock the full 16-bit read frame
+    delayMicroseconds(2);                          // Symmetric hold margin (reads do not commit)
+    SPI1_DrvChipSelect(false);                     // Release DRV_CS (HIGH = bus released)
+    delayMicroseconds(2);                          // t_SCS_HOLD + inter-frame gap
+    return rx;                                     // Raw 16-bit response frame
+}
+
+/**
+ * @brief Write one DRV8353 register (16-bit SPI mode 1 frame).
+ * @param addr Register address (0x00-0x07)
+ * @param data 11-bit DATA payload to store into the register
+ * @return FULL 16-bit response frame captured on SDO during the write
+ *
+ * Frame format: bit15 = R/W (0 = write), bits[14:11] = ADDR,
+ * bits[10:0] = data. The response frame is returned RAW so the caller can
+ * log/inspect it for bus-integrity debugging (the SDO content during a
+ * write frame is device-implementation specific - dumping it helps to
+ * diagnose corrupted frames). Called ONLY from the gate-driver enable
+ * callback (tunepulse.h); fault registers are never written because a
+ * write to them clears the latched fault flags.
+ *
+ * COMMIT TIMING (critical): the DRV835x commits a register write on the
+ * RISING edge of nSCS. CS must not rise before the last SCLK falling edge
+ * has fully completed and the internal shift register has settled into the
+ * write-decode logic - otherwise the commit races with the final bits and
+ * the stored value loses bits (observed live: deterministic value-dependent
+ * bit loss when CS rose immediately after RXNE). The bit-bang transfer
+ * finishes with the clock already idle low; an extra 2 us hold margin
+ * before releasing CS makes the commit unambiguous.
+ */
+static inline uint16_t DRV8353_WriteReg(uint8_t addr, uint16_t data) {
+    const uint16_t frame = DRV8353S::CmdWrite(addr, data);  // R/W=0 (write) + ADDR + DATA
+    SPI1_DrvChipSelect(true);                      // Assert DRV_CS (PC15) - LOW for the whole frame
+    delayMicroseconds(1);                          // t_SCS_SU setup time (moteus-style 1 us)
+    const uint16_t rx = DRV8353_BB_Transfer16(frame);  // Clock the full 16-bit write frame
+    delayMicroseconds(2);                          // Write-commit hold: CS rise well after last SCLK edge
+    SPI1_DrvChipSelect(false);                     // Release DRV_CS (HIGH = frame commit on this edge)
+    delayMicroseconds(2);                          // t_SCS_HOLD + inter-frame gap
+    return rx;                                     // Raw SDO response frame
 }
 
 /**

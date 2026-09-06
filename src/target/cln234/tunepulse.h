@@ -112,6 +112,231 @@ void end_curnt_cal() {
 }
 
 /**
+ * @brief Print a 16-bit word as 4 padded hex digits (0x0000..0xFFFF).
+ *
+ * SerialUSB::print(v, HEX) drops leading zeros, which makes raw SPI frame
+ * logs hard to read; this helper always prints exactly 4 hex digits.
+ * @param v Word to print.
+ */
+static void DRV_PrintHex16(uint16_t v) {
+    if (v < 0x1000) SerialUSB.print('0');  // Pad thousands
+    if (v < 0x0100) SerialUSB.print('0');  // Pad hundreds
+    if (v < 0x0010) SerialUSB.print('0');  // Pad tens
+    SerialUSB.print(v, HEX);               // Hex digits (no prefix)
+}
+
+/** Short register names indexed by DRV8353S::Reg for console dumps. */
+static const char* const DRV_REG_NAMES[8] = {
+    "FAULT1", "VGS", "CTRL", "GATE_HS", "GATE_LS", "OCP", "CSA", "CONFIG",
+};
+
+/**
+ * @brief Gate-driver enable callback: DRV_EN (PB12) + DRV8353S configuration.
+ *
+ * Registered in TunePulseHeart (TP.driver_phy.get_enable()). On enable:
+ * 1. DRV_EN (PB12) is held LOW for 1.1 s: per TI (SLVSDY6A) the DRV835x
+ *    SPI registers keep their values across ordinary sleep periods and are
+ *    only guaranteed to reset after the EN pin has been low for ~1 s. The
+ *    forced reset gives the configuration pass a deterministic all-defaults
+ *    starting state (leftover values from earlier sessions were observed
+ *    live: OCP=0x0B6 / CSA=0x141 retained across reboots).
+ * 2. DRV_EN is driven HIGH, taking the DRV8353S out of sleep (the SPI
+ *    bus needs VM power, which the DRV_EN line gates). A 30 ms wake delay
+ *    covers the nSLEEP wake-up time before the first SPI frame.
+ * 3. The shared SPI1 bus is parked: the MT6835 DMA angle polling loop is
+ *    paused and the in-flight frame is drained, then the bus is switched
+ *    to the DRV8353 (16-bit frames, SPI mode 1 levels, GPIO bit-banged).
+ * 4. PRE-WRITE DEFAULT DUMP: every register (0x00..0x07) is read TWICE and
+ *    the RAW 16-bit frames are logged with the expected power-on values
+ *    (DRV8353S::RESET). After the forced reset above every register must
+ *    match; double reads expose SDO pipeline latency and the raw frames
+ *    expose bit-slip / frame corruption on the bus.
+ * 5. The configuration registers 0x02..0x06 are written. The register
+ *    images start from the observed power-on values (DRV8353S::RESET) and
+ *    change ONLY the requested fields - every other field stays at its
+ *    default:
+ *      - CTRL   : OCP_ACT=1 (fault shuts down all half-bridges),
+ *                 OTW_REP=1 (overtemperature warning is report-only)
+ *      - GATE_HS: IDRIVEP_HS=0100b, IDRIVEN_HS=0100b (LOCK[10:8] stays
+ *                 011b = unlocked)
+ *      - GATE_LS: CBC=0, IDRIVEP_LS=0110b, IDRIVEN_LS=0110b
+ *      - OCP    : TRETRY=1 (50 us retry), OCP_DEG=01b, VDS_LVL=0100b
+ *      - CSA    : SEN_LVL=00b (everything else default)
+ *    Fault registers (0x00/0x01) are never written (a write clears latched
+ *    faults) and CONFIG (0x07) keeps its power-on default. Each write is
+ *    verified by TWO readback frames and retried up to 3 times; the raw
+ *    SDO response of the write frame is logged for diagnostics.
+ * 6. A diagnostic single-bit write scan on GATE_LS proves that every DATA
+ *    bit position survives a write both ways, then restores the intended
+ *    value.
+ * 7. The shared bus is handed back to the MT6835 DMA polling loop.
+ *
+ * On disable: DRV_EN (PB12) is driven LOW only (hardware sleep), the SPI
+ * bus is not touched.
+ *
+ * @param state Requested gate-driver state (true = enable + configure).
+ */
+void DRV_Enable_Callback(bool state) {
+    if (state == false) {
+        LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_12);  // DRV_EN = 0: DRV8353S sleep
+        return;
+    }
+
+    // Forced register reset: DRV_EN (PB12) LOW for >1 s. The DRV835x keeps
+    // SPI register values across short sleep periods; only a sustained EN
+    // low guarantees the power-on defaults restored before the dump.
+    LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_12);  // DRV_EN = 0
+    delay(1100);                                    // >1 s: guaranteed register reset
+    SerialUSB.println("DRV8353S registers reset (EN low 1.1 s)");
+
+    LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_12);  // DRV_EN = 1: wake the gate driver
+    delay(30);  // nSLEEP wake-up time + internal LDO/charge pump before the first SPI frame
+    // Park the shared SPI1 bus: stop arming new MT6835 DMA transfers, wait
+    // for the in-flight frame to complete, then switch to DRV8353 mode
+    // (16-bit, mode 1, polled - DMA requests are detached by the mode switch).
+    SPI1_ENCODER_POLLING = false;
+    while (SPI1_TRANSFER_ACTIVE) {}  // Drain the last encoder frame
+    SPI_Bus_ConfigureDRV();
+
+    // ---- Step 1: pre-write dump of the power-on defaults (read-only) ----
+    // Every register is read twice: rd1 == rd2 rules out SDO pipeline
+    // latency, matching DRV8353S::RESET[] (the factory defaults, restored
+    // by the forced EN-low reset above) rules out bus corruption.
+    SerialUSB.println("DRV8353S power-on defaults (raw frames):");
+    bool def_ok = true;  // Overall defaults verdict
+    for (uint8_t a = DRV8353S::REG_FAULT1; a <= DRV8353S::REG_CONFIG; a++) {
+        const uint16_t r1 = DRV8353_ReadReg(a);  // First read frame
+        const uint16_t r2 = DRV8353_ReadReg(a);  // Second read frame
+        const bool ok = (DRV8353S::Data(r2) == DRV8353S::RESET[a]);
+        def_ok = def_ok && ok;
+        SerialUSB.print("  ");
+        SerialUSB.print(DRV_REG_NAMES[a]);
+        SerialUSB.print(": rd1=0x");
+        DRV_PrintHex16(r1);
+        SerialUSB.print(" rd2=0x");
+        DRV_PrintHex16(r2);
+        SerialUSB.print(" exp=0x");
+        DRV_PrintHex16(DRV8353S::RESET[a]);
+        SerialUSB.println(ok ? " [OK]" : " [MISMATCH]");
+    }
+    SerialUSB.println(def_ok ? "DRV8353S defaults verified"
+                             : "DRV8353S defaults MISMATCH (check SPI bus / device variant)");
+
+    // Register images: power-on defaults with only the requested fields
+    // modified (all computed at compile time where possible).
+    const uint16_t cfg_ctrl =  // 0x02 DRIVER_CTRL
+        DRV8353S::Put(DRV8353S::Put(DRV8353S::RESET[DRV8353S::REG_CTRL],
+                                    DRV8353S::F::OCP_ACT, 1),
+                      DRV8353S::F::OTW_REP, 1);
+    const uint16_t cfg_gate_hs =  // 0x03 GATE_DRIVE_HS
+        DRV8353S::Put(DRV8353S::Put(DRV8353S::RESET[DRV8353S::REG_GATE_HS],
+                                    DRV8353S::F::IDRIVEP_HS, 0x4),
+                      DRV8353S::F::IDRIVEN_HS, 0x4);
+    const uint16_t cfg_gate_ls =  // 0x04 GATE_DRIVE_LS
+        DRV8353S::Put(DRV8353S::Put(DRV8353S::Put(
+                                        DRV8353S::RESET[DRV8353S::REG_GATE_LS],
+                                        DRV8353S::F::CBC, 0),
+                                   DRV8353S::F::IDRIVEP_LS, 0x6),
+                      DRV8353S::F::IDRIVEN_LS, 0x6);
+    const uint16_t cfg_ocp =  // 0x05 OCP_CTRL
+        DRV8353S::Put(DRV8353S::Put(DRV8353S::Put(
+                                        DRV8353S::RESET[DRV8353S::REG_OCP],
+                                        DRV8353S::F::TRETRY, 1),
+                                   DRV8353S::F::DEGLITCH, 1),
+                      DRV8353S::F::VDS_LVL, 0x4);
+    const uint16_t cfg_csa =  // 0x06 CSA_CTRL
+        DRV8353S::Put(DRV8353S::RESET[DRV8353S::REG_CSA],
+                      DRV8353S::F::SEN_LVL, 0);
+
+    // ---- Step 2: program the configuration registers (write + readback) ----
+    // Write + readback verification table (address, expected data).
+    struct DrvReg {
+        uint8_t addr;      // Register address (0x00-0x07)
+        uint16_t val;      // Expected 11-bit DATA payload
+    };
+    const DrvReg cfg[5] = {
+        {DRV8353S::REG_CTRL, cfg_ctrl},
+        {DRV8353S::REG_GATE_HS, cfg_gate_hs},
+        {DRV8353S::REG_GATE_LS, cfg_gate_ls},
+        {DRV8353S::REG_OCP, cfg_ocp},
+        {DRV8353S::REG_CSA, cfg_csa},
+    };
+
+    SerialUSB.println("DRV8353S configuration:");
+    bool ok_all = true;  // Overall configuration verdict
+    for (const DrvReg& r : cfg) {
+        bool reg_ok = false;  // Per-register verdict (after retries)
+        for (uint8_t attempt = 1; attempt <= 3 && !reg_ok; attempt++) {
+            const uint16_t wr_sdo = DRV8353_WriteReg(r.addr, r.val);  // Write + raw SDO response
+            delayMicroseconds(50);                         // Settle time: let the commit propagate before readback
+            const uint16_t rd1 = DRV8353_ReadReg(r.addr);  // First readback frame
+            const uint16_t rd2 = DRV8353_ReadReg(r.addr);  // Second readback frame
+            reg_ok = (DRV8353S::Data(rd2) == r.val);       // Verdict on the settled frame
+            ok_all = ok_all && reg_ok;
+            SerialUSB.print("  ");
+            SerialUSB.print(DRV_REG_NAMES[r.addr]);
+            SerialUSB.print(" try");
+            SerialUSB.print(attempt);
+            SerialUSB.print(": wr=0x");
+            DRV_PrintHex16(r.val);
+            SerialUSB.print(" sdo=0x");
+            DRV_PrintHex16(wr_sdo);
+            SerialUSB.print(" rd1=0x");
+            DRV_PrintHex16(rd1);
+            SerialUSB.print(" rd2=0x");
+            DRV_PrintHex16(rd2);
+            SerialUSB.println(reg_ok ? " [OK]" : " [MISMATCH]");
+        }
+    }
+    SerialUSB.println(ok_all ? "DRV8353S configuration verified"
+                             : "DRV8353S configuration FAILED");
+
+    // ---- Step 3: DIAGNOSTIC single-bit write scan on GATE_LS ----
+    // Purpose: map exactly which DATA bit positions survive a write when ALL
+    // other bits are zero. Evidence so far: SPI reads are bit-perfect (the
+    // defaults dump above) and the write-frame SDO echoes the CORRECT
+    // register with its OLD content (header decode is fine), but the stored
+    // value equals the written value ANDed with a fixed mask (lost bits
+    // {2,4,6,7,9,10}, kept {1,5,8} across ALL registers). The scan decides
+    // between:
+    //   - fixed-position loss  -> single bits at {2,4,6,7,9,10} never stick
+    //     (device write-path / input-buffer issue), and
+    //   - neighbour-dependent loss -> all single bits stick (signal
+    //     integrity: bit loss only with specific 0->1->0 patterns).
+    // Safe on GATE_LS: the outputs are static at this point (no switching),
+    // so IDRIVE/TDRIVE/CBC values cannot cause dynamic gate events. The
+    // intended configuration value is restored afterwards.
+    SerialUSB.println("DRV8353S GATE_LS write scan:");
+    const uint16_t probes[13] = {
+        0x3FF,                        // Power-on default rewrite (expect [OK])
+        0x000,                        // All zeros (expect [OK])
+        0x001, 0x002, 0x004, 0x008,   // Single bits 0..3
+        0x010, 0x020, 0x040, 0x080,   // Single bits 4..7
+        0x100, 0x200, 0x400,          // Single bits 8..10
+    };
+    for (uint8_t i = 0; i < 13; i++) {
+        (void)DRV8353_WriteReg(DRV8353S::REG_GATE_LS, probes[i]);  // Probe write
+        const uint16_t rd = DRV8353S::Data(DRV8353_ReadReg(DRV8353S::REG_GATE_LS));
+        SerialUSB.print("  wr=0x");
+        DRV_PrintHex16(probes[i]);
+        SerialUSB.print(" rd=0x");
+        DRV_PrintHex16(rd);
+        SerialUSB.println(rd == probes[i] ? " [OK]" : " [LOST]");
+    }
+    (void)DRV8353_WriteReg(DRV8353S::REG_GATE_LS, cfg_gate_ls);  // Restore intended value
+    SerialUSB.print("  restore rd=0x");
+    DRV_PrintHex16(DRV8353S::Data(DRV8353_ReadReg(DRV8353S::REG_GATE_LS)));
+    SerialUSB.println("");
+
+    // Hand the shared bus back to the MT6835 DMA angle polling loop: switch
+    // SPI1 to encoder mode (8-bit, mode 3, DMA requests enabled), resume the
+    // polling loop and request a fresh frame immediately.
+    SPI_Bus_ConfigureEncoder();
+    SPI1_ENCODER_POLLING = true;
+    Encoder_StartTransfer();
+}
+
+/**
  * @brief Full sequential bring-up of the motor-control stack (CLN234).
  *
  * Initialization order (each step logs progress over SerialUSB):
@@ -141,7 +366,11 @@ void end_curnt_cal() {
  *                                Encoder_Init(), EXTI by DRV_ERR_Init().
  * 11. DRV_ERR_Init()           - PB1 nFAULT (EXTI1, both edges): falling edge
  *                                sets the external fault, rising edge clears it.
- * 12. DRV_EN (PB12) = HIGH     - gate driver enabled (wake + CSA outputs).
+ * 12. DRV_Enable_Callback(true) - DRV_EN (PB12) = HIGH, the DRV8353S
+ *                                configuration registers (0x02..0x06) are
+ *                                programmed and read back for verification
+ *                                (shared SPI1 bus parked/restored around
+ *                                the transaction).
  * 13. Protection limits        - software-only thresholds (hardware OC/UVLO/
  *                                OTSD is delegated to the DRV8353, there are
  *                                no MCU comparators/DACs on this board).
@@ -249,11 +478,19 @@ inline void tunepulse_init() {
 
     DRV_ERR_Init();  // PB1 nFAULT (EXTI1): falling edge = fault, rising = clear
 
-    // Gate-driver enable: DRV_EN (PB12) was driven LOW by IO_Init(); take the
-    // DRV8353 out of sleep so the CSA outputs drive I_A/I_B/I_C. This is a
-    // GPIO enable line, NOT a register write - the gate driver keeps its
-    // hardware defaults (read-only SPI policy, see run.h).
-    LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_12);  // DRV_EN = 1
+    // Gate-driver enable through the TunePulseHeart callback: the registered
+    // callback drives DRV_EN (PB12) HIGH, programs the DRV8353S configuration
+    // registers (OCP_ACT/OTW_REP, IDRIVEP/N_HS, CBC + IDRIVEP/N_LS, TRETRY,
+    // OCP_DEG, VDS_LVL, SEN_LVL) and reads every written register back for
+    // verification. The callback also parks and restores the shared SPI1 bus
+    // (MT6835 DMA angle polling) around the transaction.
+    //
+    // DEBUG: 3 s pause so the USB CDC host can re-enumerate after a reset
+    // before the one-shot DRV8353 diagnostics are printed (prints made while
+    // the port is closed are lost).
+    delay(3000);
+    TP.driver_phy.get_enable().setCallback(&DRV_Enable_Callback);
+    TP.driver_phy.get_enable().set(true);  // DRV_EN = 1 + DRV8353S register config
 
     delay(100);
 

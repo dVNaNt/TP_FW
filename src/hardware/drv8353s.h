@@ -35,23 +35,26 @@ enum Reg : uint8_t {
     REG_FAULT1  = 0x0,  ///< Fault status 1: FAULT, VDS_OCP, GDF, UVLO, OTSD, VDS_x
     REG_VGS     = 0x1,  ///< Fault status 2: SA/SB/SC_OC, OTW, CPUV, VGS_x
     REG_CTRL    = 0x2,  ///< Driver control (OCP_ACT, PWM_MODE, 1x options)
-    REG_GATE_HS = 0x3,  ///< High-side gate drive (TDRIVE, IDRIVEP_HS, IDRIVEN_HS)
+    REG_GATE_HS = 0x3,  ///< High-side gate drive (LOCK, IDRIVEP_HS, IDRIVEN_HS)
     REG_GATE_LS = 0x4,  ///< Low-side gate drive (CBC, TDRIVE, IDRIVEP_LS, IDRIVEN_LS)
     REG_OCP     = 0x5,  ///< OCP control (TRETRY, DEAD_TIME, OCP_MODE, DEGLITCH, VDS_LVL)
     REG_CSA     = 0x6,  ///< Current-shunt amplifier (CSA_GAIN, CSA_CAL, SEN_LVL)
-    REG_CONFIG  = 0x7,  ///< Driver configuration (CAL_MODE must be 1 on DRV8353)
+    REG_CONFIG  = 0x7,  ///< Reserved on the DRV8353S
 };
 
-/** Power-on register values (observed and stable on the CLN234 board). */
+/** Power-on register values (factory defaults, verified live: hold EN low
+ *  for >1 s, then dump - reproducible across boots on the CLN234 board).
+ *  NOTE: the earlier table {0x1FF, 0x3FF, 0x024, 0x001} was an artefact of
+ *  the hardware-SPI reads sampling one SDO slot early (response >> 1). */
 inline constexpr uint16_t RESET[8] = {
     0x000,  // FAULT1 : no faults
     0x000,  // VGS    : no faults
     0x000,  // CTRL   : 6x PWM mode
-    0x1FF,  // GATE_HS: TDRIVE=01b, IDRIVEP/N_HS=1111b
-    0x3FF,  // GATE_LS: CBC=1, TDRIVE=01b, IDRIVEP/N_LS=1111b
-    0x024,  // OCP    : DEGLITCH=10b (4us), VDS_LVL=0100b (0.4V)
-    0x001,  // CSA    : gain 5V/V, SEN_LVL=01b (500mV)
-    0x000,  // CONFIG : CAL_MODE=0 (host must set 1 before CSA use)
+    0x3FF,  // GATE_HS: LOCK=011b (unlocked), IDRIVEP/N_HS=1111b
+    0x7FF,  // GATE_LS: CBC=1, TDRIVE=11b, IDRIVEP/N_LS=1111b
+    0x16D,  // OCP    : DEAD=01b, OCP_MODE=01b, OCP_DEG=10b, VDS_LVL=1101b
+    0x283,  // CSA    : VREF_DIV=1 (bidirectional), CSA_GAIN=10b, SEN_LVL=11b
+    0x000,  // CONFIG : reserved on the DRV8353S
 };
 
 // ------------------------------------------------------------------ frames
@@ -107,9 +110,9 @@ namespace F {
     constexpr uint16_t PWM_1X_DIR   = 1U << 3;   ///< 1x PWM direction
 
     // 0x03 GATE_DRIVE_HS
-    constexpr uint16_t TDRIVE     = 3U << 8;  ///< HS gate-drive time
-    constexpr uint16_t IDRIVEP_HS = 0xFU << 4;  ///< HS peak source current
-    constexpr uint16_t IDRIVEN_HS = 0xFU;       ///< HS peak sink current
+    constexpr uint16_t LOCK        = 7U << 8;  ///< Register lock [10:8] (VAL::LOCK_*)
+    constexpr uint16_t IDRIVEP_HS  = 0xFU << 4;  ///< HS peak source current
+    constexpr uint16_t IDRIVEN_HS  = 0xFU;       ///< HS peak sink current
 
     // 0x04 GATE_DRIVE_LS
     constexpr uint16_t CBC        = 1U << 10;  ///< LS current-limit chopping
@@ -133,8 +136,8 @@ namespace F {
     constexpr uint16_t CSA_CAL  = 7U << 2;   ///< Per-amplifier calibration trigger
     constexpr uint16_t SEN_LVL  = 3U;        ///< Sense OCP level (250/500/750/1000mV)
 
-    // 0x07 DRIVER_CONFIG
-    constexpr uint16_t CAL_MODE = 1U;        ///< Must be 1 on the DRV8353
+    // 0x07 RESERVED (no CSA_CAL/CAL_MODE on the DRV8353S package)
+    constexpr uint16_t CAL_MODE = 1U;        ///< Reserved (reads 0x000)
 }
 
 /** Encoded field values (feed into Put() with the matching mask). */
@@ -144,6 +147,10 @@ namespace VAL {
     constexpr uint16_t PWM_3X = 1U;           ///< 3x PWM (three high-side inputs)
     constexpr uint16_t PWM_1X = 2U;           ///< 1x PWM (one PWM + direction)
     constexpr uint16_t PWM_INDEPENDENT = 3U;  ///< Independent half-bridge control
+
+    // GATE_DRIVE_HS LOCK (bits [10:8])
+    constexpr uint16_t LOCK_UNLOCK = 3U << 8;  ///< 011b: registers writable
+    constexpr uint16_t LOCK_LOCKED = 6U << 8;  ///< 110b: only LOCK/CLR_FLT writable
 
     // OCP_MODE (OCP_CTRL [7:6])
     constexpr uint16_t OCP_LATCHED = 0U;      ///< Latched shutdown on VDS OCP
