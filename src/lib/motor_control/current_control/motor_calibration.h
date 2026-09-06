@@ -62,9 +62,29 @@ static constexpr uint32_t CALIB_PAUSE_CYCLES = 1800;  // 100ms pause @ 18kHz
 static constexpr uint32_t INDUCTANCE_MEASURE_CYCLES_F1 = 9000;  // 0.5 sec at 18kHz
 static constexpr uint32_t INDUCTANCE_MEASURE_CYCLES_F2 = 9000;  // 0.5 sec at 18kHz
 
+// Upper bound on the two-point resistance-correction factor I1 / (2 * dI).
+// With a series offset drop Voff in the bridge the factor evaluates to
+// (V1 - Voff) / V1, so it is <= 1 by construction: the correction can only pull
+// R DOWN from the raw V/I estimate. A factor above this bound means dI collapsed
+// into the noise floor (the second operating point did not settle, or the
+// voltage was not actually halved) and the "correction" would inflate R instead.
+static constexpr float RES_CORRECTION_MAX_FACTOR = 1.0f;
+
 // Frequencies for dual inductance validation
 static constexpr uint16_t HFI_FREQ_1 = 1000;  // 1000 Hz
 static constexpr uint16_t HFI_FREQ_2 = 1500;  // 1500 Hz
+
+// Smallest inductance accepted from an HFI stage [uH]. Both HFI warning paths
+// store exactly 0 when they cannot extract an estimate, so anything at or
+// below this floor means "no measurement", not "a very small inductance".
+static constexpr float HFI_MIN_VALID_INDUCTANCE_UH = 1.0f;
+
+// Largest permissible relative spread between the HFI_FREQ_1 and HFI_FREQ_2
+// estimates of the same axis. Both probe the same winding, so a healthy motor
+// agrees to within a few percent; a wide spread means the series-RL model
+// broke down (saturation, eddy-current losses, or an over-estimated R) and the
+// averaged result is not trustworthy enough to tune the current loop with.
+static constexpr float HFI_MAX_SPREAD_RATIO = 0.30f;
 
 // Motor calibration structure with all calibration-related variables and states
 struct MotorCalibration {
@@ -441,6 +461,26 @@ private:
         hfi_gen_.reset();
     }
 
+    /**
+     * @brief Relative spread between the two probe frequencies of one axis.
+     *
+     * Both estimates describe the same winding, so a valid measurement puts
+     * them within a few percent of each other. A stage that bailed out through
+     * either HFI warning path stores exactly 0, which is the ABSENCE of a
+     * measurement rather than perfect agreement - such an axis is reported as
+     * 1.0 (100% disagreement) so the caller rejects it instead of averaging a
+     * zero into the committed result.
+     *
+     * @param l_f1 Inductance measured at HFI_FREQ_1 [uH].
+     * @param l_f2 Inductance measured at HFI_FREQ_2 [uH].
+     * @return |l_f1 - l_f2| / l_f1, or 1.0 when either estimate is missing.
+     */
+    static float hfi_axis_spread(float l_f1, float l_f2) {
+        // Either stage missing => no usable pair => full disagreement.
+        if (l_f1 <= HFI_MIN_VALID_INDUCTANCE_UH || l_f2 <= HFI_MIN_VALID_INDUCTANCE_UH) return 1.0f;
+        return fabsf(l_f1 - l_f2) / l_f1;  // Normalised against the 1 kHz reference
+    }
+
     void process_hfi_axis(float measured_current_amps,
                           bool is_d_axis,
                           bool is_final_step,
@@ -570,16 +610,32 @@ private:
             // [OPT] Use the cached Z instead of dividing v_peak / i_peak again
 
             if (is_final_step) {
-                // Final validation logic
-                float diff_d = (Ld_f1_ > 0.0f) ? fabsf(Ld_f1_ - Ld_f2_) / Ld_f1_ : 0.0f;
-
-                float diff_q = (Lq_f1_ > 0.0f) ? fabsf(Lq_f1_ - Lq_f2_) / Lq_f1_ : 0.0f;
+                // Final validation: every stage must have produced a usable
+                // estimate AND the two probe frequencies must agree per axis.
+                // A missing stage reads as 1.0 here (see hfi_axis_spread).
+                const float diff_d = hfi_axis_spread(Ld_f1_, Ld_f2_);
+                const float diff_q = hfi_axis_spread(Lq_f1_, Lq_f2_);
 
                 // Log the dual-frequency measurement results: a large spread
                 // between the 1 kHz and 1.5 kHz estimates means the HFI model
-                // assumptions broke down (results are still committed).
+                // assumptions broke down.
                 TP_LOG_VALS("ELEC CAL: HFI results uH: Ld_f1,Ld_f2,Lq_f1,Lq_f2", Ld_f1_, Ld_f2_, Lq_f1_, Lq_f2_);
                 TP_LOG_VALS("ELEC CAL: HFI spread: diff_d,diff_q", diff_d, diff_q);
+
+                // Abort instead of committing a doubtful identification. The
+                // current-loop gains are derived from L (kp = L * omega_c in
+                // FocCurrentController::tick), while ki depends only on R, so
+                // an under-estimated inductance destroys the pole-zero
+                // cancellation the PI relies on and leaves an
+                // integral-dominated loop that limit-cycles with the motor
+                // energized. The anti-windup gain (k_aw = R / L) is inflated
+                // by the same error. Refusing to arm is the safe outcome:
+                // tick() drives zero current target in CalibError, and
+                // tunepulse_init() exits its wait loop on that status.
+                if (diff_d > HFI_MAX_SPREAD_RATIO || diff_q > HFI_MAX_SPREAD_RATIO) {
+                    set_error(status_tracker, motor, setup_status, "HFI inductance missing or inconsistent");
+                    return;
+                }
 
                 // Average the 1kHz and 1.5kHz results
                 float final_Ld = (Ld_f1_ + Ld_f2_) * 0.5f;
@@ -814,8 +870,28 @@ private:
                 // Formula: R_corrected = R_uncorrected * I1 / (2 * delta_i)
                 // Voltage cancels out completely for exact V2 = V1/2
                 if (delta_i_amps > 0.0f && abs_first_i_amps > MIN_MEASUREMENT_CURRENT_AMPS) {
-                    corrected_total_resistance_ohms = corrected_total_resistance_ohms * abs_first_i_amps / (2.0f * delta_i_amps);
+                    const float correction_factor = abs_first_i_amps / (2.0f * delta_i_amps);
+
+                    if (correction_factor <= RES_CORRECTION_MAX_FACTOR) {
+                        corrected_total_resistance_ohms *= correction_factor;
+                    } else {
+                        // dI is noise, not signal: halving the drive barely moved
+                        // the current. Keep the raw V/I estimate, which always
+                        // over-states R slightly but stays physically sane. An
+                        // inflated R makes every later HFI stage compute
+                        // Z^2 - R^2 < 0 and report "no inductive part", so
+                        // committing it would fail the whole identification.
+                        TP_LOG_VALS("ELEC CAL WARNING: R correction rejected: factor,I1[A],I2[A],dI[A],R_unc[Ohm]",
+                                    correction_factor, abs_first_i_amps, abs_second_i_amps, delta_i_amps,
+                                    corrected_total_resistance_ohms);
+                    }
                 }
+
+                // Diagnostic snapshot of the two-point fit that sets R for every
+                // subsequent stage (the HFI inductance maths divides by it).
+                TP_LOG_VALS("ELEC CAL: R two-point fit: I1[A],I2[A],dI[A],R_unc[Ohm],R_final[Ohm]", abs_first_i_amps,
+                            abs_second_i_amps, delta_i_amps, uncorrected_total_resistance_ohms_,
+                            corrected_total_resistance_ohms);
 
                 // Legacy Motor API boundary: pass milliohms.
                 motor.set_total_resistance(corrected_total_resistance_ohms);
