@@ -77,7 +77,7 @@
 #include "stm32g4xx.h"   // CMSIS device header: SPI1, DMA1, GPIO registers
 #include "lib/dev_log.h" // TP_LOG* macros: USB CDC diagnostics over SerialUSB
 #include "hardware/drv8353s.h"  // DRV8353S register map + SPI command builders
-#include "hardware/mt6835.h"    // MT6835 register map + SPI command builders + CRC-8
+#include "hardware/encoders/mt6835.h"  // MT6835 register map + SPI command builders + CRC-8
 
 extern void POSITION_Callback(); // Motor-control hook, called after each new angle
 
@@ -461,7 +461,7 @@ static inline uint16_t DRV8353_WriteReg(uint8_t addr, uint16_t data) {
  * shifts out the register data while the dummy byte is clocked.
  */
 static inline uint8_t MT6835_ReadReg(uint16_t reg) {
-    const uint32_t cmd = MT6835::CmdRead(reg);    // OP_READ | addr (hardware/mt6835.h)
+    const uint32_t cmd = MT6835::CmdRead(reg);    // OP_READ | addr (hardware/encoders/mt6835.h)
     SPI1_EncChipSelect(true);                     // Assert ENC_CS (PA4) - LOW for the whole message
     (void)SPI1_Transfer8(MT6835::BYTE0(cmd));        // Command + address high (RX discarded)
     (void)SPI1_Transfer8(MT6835::BYTE1(cmd));        // Address low (RX discarded)
@@ -490,7 +490,7 @@ struct MT6835_Burst {
  */
 static inline MT6835_Burst MT6835_ReadAngleBurst() {
     MT6835_Burst r;                               // Result accumulator
-    const uint32_t cmd = MT6835::CmdAngleBurst(); // OP_ANGLE | REG_ANGLE1 (hardware/mt6835.h)
+    const uint32_t cmd = MT6835::CmdAngleBurst(); // OP_ANGLE | REG_ANGLE1 (hardware/encoders/mt6835.h)
     SPI1_EncChipSelect(true);                     // Assert ENC_CS (PA4)
     const uint8_t s0 = SPI1_Transfer8(MT6835::BYTE0(cmd));  // OP_ANGLE opcode (read-only)
     const uint8_t s1 = SPI1_Transfer8(MT6835::BYTE1(cmd));  // Burst start address low byte
@@ -506,7 +506,7 @@ static inline MT6835_Burst MT6835_ReadAngleBurst() {
     r.raw[3] = b1;
     r.raw[4] = b2;
     r.raw[5] = r.crc;
-    r.angle_raw = MT6835::Angle(b0, b1, b2);      // 21-bit raw angle (hardware/mt6835.h)
+    r.angle_raw = MT6835::Angle(b0, b1, b2);      // 21-bit raw angle (hardware/encoders/mt6835.h)
     r.status = MT6835::Status(b2);                // STATUS[2:0]
     r.crc_ok = true;             // Integrity verdict
     return r;

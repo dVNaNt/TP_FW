@@ -68,8 +68,12 @@ TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
  * per LED element). The CLN17-v3 board has a SINGLE tricolor element built
  * from discrete active-LOW pins (PB1 = red, PC4 = green, PB2 = blue), so the
  * first word is decoded channel-by-channel onto the pins and the second word
- * is ignored. A channel value of 0 drives its pin HIGH (OFF); any non-zero
- * value drives it LOW (ON).
+ * is ignored. The decoding format is simple: if a channel BYTE is non-zero,
+ * that LED is ON (full brightness); a zero byte is OFF.
+ *
+ * The pins are written through the GPIO BSRR registers DIRECTLY (no HAL/LL
+ * calls): one atomic store per port toggles any subset of pins, which is
+ * both faster and interrupt-safe by construction.
  *
  * @param led1 Packed RGB888 color for LED element 1 (the onboard LED).
  * @param led2 Packed RGB888 color for LED element 2 (unused on this board).
@@ -77,26 +81,16 @@ TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
 void LED_Apply(int32_t led1, int32_t led2) {
     (void)led2;  // Second element not populated on CLN17-v3
 
-    // Red channel -> PB1 (active LOW: non-zero channel = pin LOW = ON)
-    if (led1 & 0xFF0000) {
-        LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_1);  // PB1 = LOW (RED ON)
-    } else {
-        LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_1);    // PB1 = HIGH (RED OFF)
-    }
+    // Channel bytes of the first packed word (non-zero = LED ON)
+    const uint32_t r = (uint32_t)led1 & 0x0000FFU;  // Red byte   (bits [7:0])
+    const uint32_t g = (uint32_t)led1 & 0x00FF00U;  // Green byte (bits [15:8])
+    const uint32_t b = (uint32_t)led1 & 0xFF0000U;  // Blue byte  (bits [23:16])
 
-    // Green channel -> PC4 (active LOW: non-zero channel = pin LOW = ON)
-    if (led1 & 0x00FF00) {
-        LL_GPIO_ResetOutputPin(GPIOC, LL_GPIO_PIN_4);  // PC4 = LOW (GREEN ON)
-    } else {
-        LL_GPIO_SetOutputPin(GPIOC, LL_GPIO_PIN_4);    // PC4 = HIGH (GREEN OFF)
-    }
-
-    // Blue channel -> PB2 (active LOW: non-zero channel = pin LOW = ON)
-    if (led1 & 0x0000FF) {
-        LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_2);  // PB2 = LOW (BLUE ON)
-    } else {
-        LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_2);    // PB2 = HIGH (BLUE OFF)
-    }
+    // Active-LOW pins: ON = pin LOW = BSRR reset (bit 16), OFF = pin HIGH =
+    // BSRR set (bit 0). One atomic store per port.
+    GPIOB->BSRR = (r ? GPIO_BSRR_BR1 : GPIO_BSRR_BS1)    // PB1 = RED (active LOW)
+                | (b ? GPIO_BSRR_BR2 : GPIO_BSRR_BS2);   // PB2 = BLUE (active LOW)
+    GPIOC->BSRR = (g ? GPIO_BSRR_BR4 : GPIO_BSRR_BS4);   // PC4 = GREEN (active LOW)
 }
 
 /**

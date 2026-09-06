@@ -72,18 +72,17 @@ TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
  *
  * The library LED driver hands over TWO packed RGB888 words (0x00RRGGBB, one
  * per LED element), which map 1:1 onto the two daisy-chained WS2812B pixels.
- * Colors are only written to the WS2812 shadow buffer - LED_Update() streams
- * the frame out non-blocking (pumped from the 20 kHz control ISR, see
- * interrupt_setup.h).
+ * The WS2812 driver accepts exactly this int32-pair format, so the words are
+ * forwarded unchanged. Colors are only written to the WS2812 shadow buffer -
+ * LED_Update() streams the frame out non-blocking (pumped from the 20 kHz
+ * control ISR, see interrupt_setup.h).
  *
  * @param led1 Packed RGB888 color for LED element 1 (WS2812 pixel 1).
  * @param led2 Packed RGB888 color for LED element 2 (WS2812 pixel 2).
  */
 void LED_Apply(int32_t led1, int32_t led2) {
-    // Unpack both words into the WS2812 shadow buffer (IRQ-safe, ~cycles)
-    LED_SetRGB2((led1 >> 16) & 0xFF, (led1 >> 8) & 0xFF, led1 & 0xFF,
-                (led2 >> 16) & 0xFF, (led2 >> 8) & 0xFF, led2 & 0xFF);
-    LED_Update();  // Arm the non-blocking frame transfer
+    LED_SetRGB2(led1, led2);  // Forward the packed pair into the shadow buffer (IRQ-safe, ~cycles)
+    LED_Update();             // Arm the non-blocking frame transfer
 }
 
 /**

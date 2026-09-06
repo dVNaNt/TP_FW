@@ -16,9 +16,11 @@
  *   inverted low-first bits - it breaks every WS2812 latch.)
  *
  * IRQ-friendly data path (designed for LED_Update() called at up to 20 kHz):
- * 1. LED_SetRGB/LED_SetRGB2/LED_Off only write the shadow colors, set the
- *    pending flag and invalidate the packed buffer - a couple of cycles,
- *    callable from any context.
+ * 1. LED_SetRGB/LED_SetRGB2/LED_Off only write the shadow colors (TWO packed
+ *    RGB888 int32 words, one per LED - the same format the LedDriver apply
+ *    callback hands over, so the board callback forwards them unchanged),
+ *    set the pending flag and invalidate the packed buffer - a couple of
+ *    cycles, callable from any context.
  * 2. LED_Update() is a flat state machine with no spin loops:
  *    (DMA1_Channel3; see the resource map in the LED_Init() notes below)
  *    - hot path (nothing pending): one flag read + return, ~5 cycles;
@@ -83,7 +85,7 @@ constexpr uint32_t WS2812_BUF_SIZE     = WS2812_FRAME_BITS + 1U;          // 48 
 // ==============================================================================
 // STATE (all in SRAM; the DMA buffer IS the waveform)
 // ==============================================================================
-inline volatile uint8_t ws2812_rgb[WS2812_LED_COUNT][3] = {{0, 0, 0}, {0, 0, 0}};  // Shadow colors (RGB order, per LED)
+inline volatile int32_t ws2812_color[WS2812_LED_COUNT] = {0, 0};  // Shadow colors: packed RGB888 words (0x00RRGGBB), one per LED
 inline volatile uint8_t ws2812_pending = 0;               // New colors waiting for the next frame
 inline volatile uint8_t ws2812_packed = 0;                // Buffer holds the current pending colors
 inline volatile uint32_t ws2812_low_us = 0;               // Stamp of the last observed line-LOW moment (0 = none)
@@ -200,8 +202,11 @@ inline void ws2812_pack() {
         (uint16_t)ws2812_tck_t0h, (uint16_t)ws2812_tck_t1h};  // "0" and "1" high times
     uint32_t idx = 0;                                         // Buffer write cursor
     for (uint8_t led = 0; led < WS2812_LED_COUNT; led++) {    // Two pixels per frame
-        const uint8_t grb[3] = {ws2812_rgb[led][1], ws2812_rgb[led][0],
-                                ws2812_rgb[led][2]};          // RGB -> GRB byte order
+        const int32_t color = ws2812_color[led];              // Packed RGB888 shadow word (0x00RRGGBB)
+        const uint8_t grb[3] = {                              // WS2812 wire order is GRB, MSB first
+            (uint8_t)(color >> 8),                            //   Green channel: bits [15:8]
+            (uint8_t)(color >> 16),                           //   Red channel:   bits [23:16]
+            (uint8_t)(color)};                                //   Blue channel:  bits [7:0]
         for (uint8_t byte = 0; byte < 3; byte++) {            // Three bytes per LED
             for (uint8_t mask = 0x80U; mask != 0U; mask >>= 1) {  // MSB first
                 ws2812_dma_buf[idx++] = ccr_lut[(grb[byte] & mask) != 0U];  // One CCR entry per bit
@@ -277,40 +282,35 @@ inline bool LED_Update() {
 }
 
 /**
- * @brief Set the shadow color of BOTH LEDs (RGB order, 0-255 each). The
- *        colors go out on the next LED_Update() tick (see the notes about
- *        torn frames in case of a preemption during packing).
+ * @brief Set the shadow color of BOTH LEDs. @p color is ONE packed RGB888
+ *        word (0x00RRGGBB) applied to both pixels. The colors go out on the
+ *        next LED_Update() tick (see the notes about torn frames in case of
+ *        a preemption during packing).
  */
-inline void LED_SetRGB(uint8_t r, uint8_t g, uint8_t b) {
-    ws2812_rgb[0][0] = r;  // LED1: Red
-    ws2812_rgb[0][1] = g;  // LED1: Green
-    ws2812_rgb[0][2] = b;  // LED1: Blue
-    ws2812_rgb[1][0] = r;  // LED2: Red
-    ws2812_rgb[1][1] = g;  // LED2: Green
-    ws2812_rgb[1][2] = b;  // LED2: Blue
-    ws2812_pending = 1;    // Request a frame (non-blocking, IRQ-safe)
-    ws2812_packed = 0;     // The packed buffer is now stale
+inline void LED_SetRGB(int32_t color) {
+    ws2812_color[0] = color;  // LED1: packed RGB888
+    ws2812_color[1] = color;  // LED2: packed RGB888 (same color)
+    ws2812_pending = 1;       // Request a frame (non-blocking, IRQ-safe)
+    ws2812_packed = 0;        // The packed buffer is now stale
 }
 
 /**
- * @brief Set the shadow colors of the two LEDs independently (RGB order,
- *        0-255 each). The colors go out on the next LED_Update() tick.
+ * @brief Set the shadow colors of the two LEDs independently. Each argument
+ *        is ONE packed RGB888 word (0x00RRGGBB) - exactly the format the
+ *        LedDriver apply callback (LedApplyCallback) hands over, so the
+ *        board callback can forward both words unchanged. The colors go
+ *        out on the next LED_Update() tick.
  */
-inline void LED_SetRGB2(uint8_t r1, uint8_t g1, uint8_t b1, uint8_t r2,
-                        uint8_t g2, uint8_t b2) {
-    ws2812_rgb[0][0] = r1;  // LED1: Red
-    ws2812_rgb[0][1] = g1;  // LED1: Green
-    ws2812_rgb[0][2] = b1;  // LED1: Blue
-    ws2812_rgb[1][0] = r2;  // LED2: Red
-    ws2812_rgb[1][1] = g2;  // LED2: Green
-    ws2812_rgb[1][2] = b2;  // LED2: Blue
-    ws2812_pending = 1;     // Request a frame (non-blocking, IRQ-safe)
-    ws2812_packed = 0;      // The packed buffer is now stale
+inline void LED_SetRGB2(int32_t led1, int32_t led2) {
+    ws2812_color[0] = led1;   // LED1: packed RGB888
+    ws2812_color[1] = led2;   // LED2: packed RGB888
+    ws2812_pending = 1;       // Request a frame (non-blocking, IRQ-safe)
+    ws2812_packed = 0;        // The packed buffer is now stale
 }
 
 /** @brief Turn both LEDs off (applied on the next LED_Update() tick). */
 inline void LED_Off() {
-    LED_SetRGB(0, 0, 0);
+    LED_SetRGB(0);            // Packed zero word = all channels dark
 }
 
 #endif  // WS2812_CLN234_H
