@@ -5,18 +5,15 @@
  * @file tunepulse.h
  * @brief Board-level integration layer for the TunePulse CLN17-v3 controller.
  *
- * This header wires together all firmware subsystems into a single global
- * application object (@c TP of type TunePulseHeart):
- *
  * - Instantiates the core @c TunePulseHeart object with board-specific
  *   hardware parameters (PWM frequency/resolution, supply voltage full-scale,
  *   per-phase current-sense full scales).
  * - Registers hardware interrupt handlers (interrupt_setup.h).
- * - Provides LED control callbacks (active-LOW GPIO on PB1/PB2/PC4).
+ * - Provides the LED apply callback for the onboard tricolor element
+ *   (active-LOW GPIO on PB1/PB2/PC4).
  * - Implements tunepulse_init(): the sequential bring-up routine that
  *   configures clocks, peripherals, protection limits and runs both the
  *   current-sense offset calibration and the motor angle calibration.
- *
  * The macros SupplyVoltage / Motor / MotorType / PhasePattern / ControlMode /
  * DriverStatus are #undef'd after including target.h so that their names can
  * be reused freely by the library without colliding with target-layer
@@ -55,50 +52,45 @@ TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
                   SYS_PARAMS::IB_MAX_CURRENT_FS,
                   SYS_PARAMS::IC_MAX_CURRENT_FS);
 
-#include "target/cln17_v3/bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
-#include "target/cln17_v3/interrupt_setup.h"
+#include "bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
+#include "interrupt_setup.h"  // ISR glue: ADC / encoder / comparators -> TP
 
-#include "target/cln17_v3/can_setup.h"  // Include CAN-FD driver setup
-#include "target/cln17_v3/comp_setup.h"
-#include "target/cln17_v3/cordic_setup.h"  // Include CORDIC hardware accelerator setup
-#include "target/cln17_v3/interrupt_setup.h"
-#include "target/cln17_v3/nvm_flash.h"
-#include "target/cln17_v3/timer_pwm_setup.h"
-
-/**
- * @brief Red LED control callback (active LOW: true = ON, false = OFF).
- * @param state true switches the LED on (pin driven LOW), false switches it off.
- */
-void LED_Red_Control(bool state) {
-    if (state) {
-        LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_1);  // PB1 = LOW (LED ON)
-    } else {
-        LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_1);  // PB1 = HIGH (LED OFF)
-    }
-}
+#include "can_setup.h"        // CAN-FD driver + chunk API (CAN_BUS)
+#include "comp_setup.h"       // Comparator (hardware OC/OV) protection
+#include "cordic_setup.h"     // CORDIC hardware trigonometry accelerator
+#include "nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
+#include "timer_pwm_setup.h"  // TIM1 complementary PWM backend
 
 /**
- * @brief Green LED control callback (active LOW: true = ON, false = OFF).
- * @param state true switches the LED on (pin driven LOW), false switches it off.
+ * @brief LED apply callback for the CLN17-v3 tricolor element.
+ *
+ * The library LED driver hands over TWO packed RGB888 words (0x00RRGGBB, one
+ * per LED element). The CLN17-v3 board has a SINGLE tricolor element built
+ * from discrete active-LOW pins (PB1 = red, PC4 = green, PB2 = blue), so the
+ * first word is decoded channel-by-channel onto the pins and the second word
+ * is ignored. The decoding format is simple: if a channel BYTE is non-zero,
+ * that LED is ON (full brightness); a zero byte is OFF.
+ *
+ * The pins are written through the GPIO BSRR registers DIRECTLY (no HAL/LL
+ * calls): one atomic store per port toggles any subset of pins, which is
+ * both faster and interrupt-safe by construction.
+ *
+ * @param led1 Packed RGB888 color for LED element 1 (the onboard LED).
+ * @param led2 Packed RGB888 color for LED element 2 (unused on this board).
  */
-void LED_Green_Control(bool state) {
-    if (state) {
-        LL_GPIO_ResetOutputPin(GPIOC, LL_GPIO_PIN_4);  // PC4 = LOW (LED ON)
-    } else {
-        LL_GPIO_SetOutputPin(GPIOC, LL_GPIO_PIN_4);  // PC4 = HIGH (LED OFF)
-    }
-}
+void LED_Apply(int32_t led1, int32_t led2) {
+    (void)led2;  // Second element not populated on CLN17-v3
 
-/**
- * @brief Blue LED control callback (active LOW: true = ON, false = OFF).
- * @param state true switches the LED on (pin driven LOW), false switches it off.
- */
-void LED_Blue_Control(bool state) {
-    if (state) {
-        LL_GPIO_ResetOutputPin(GPIOB, LL_GPIO_PIN_2);  // PB2 = LOW (LED ON)
-    } else {
-        LL_GPIO_SetOutputPin(GPIOB, LL_GPIO_PIN_2);  // PB2 = HIGH (LED OFF)
-    }
+    // Channel bytes of the first packed word (non-zero = LED ON)
+    const uint32_t r = (uint32_t)led1 & 0x0000FFU;  // Red byte   (bits [7:0])
+    const uint32_t g = (uint32_t)led1 & 0x00FF00U;  // Green byte (bits [15:8])
+    const uint32_t b = (uint32_t)led1 & 0xFF0000U;  // Blue byte  (bits [23:16])
+
+    // Active-LOW pins: ON = pin LOW = BSRR reset (bit 16), OFF = pin HIGH =
+    // BSRR set (bit 0). One atomic store per port.
+    GPIOB->BSRR = (r ? GPIO_BSRR_BR1 : GPIO_BSRR_BS1)    // PB1 = RED (active LOW)
+                | (b ? GPIO_BSRR_BR2 : GPIO_BSRR_BS2);   // PB2 = BLUE (active LOW)
+    GPIOC->BSRR = (g ? GPIO_BSRR_BR4 : GPIO_BSRR_BS4);   // PC4 = GREEN (active LOW)
 }
 
 /**
@@ -136,7 +128,8 @@ void end_curnt_cal() {
  *                                reserves 4096 entries for the calibration
  *                                table persistence layer.
  * 4. IO_Init()                 - GPIO pins.
- * 5. LED callbacks registered  - red/green/blue mapped to indices 0/1/2.
+ * 5. LED apply callback registered - TP.led (single apply callback, two
+ *    packed RGB888 words; see LED_Apply).
  * 6. ADC_Init()                - ADC channels for currents and supply voltage.
  * 7. PWM_Init()                - TIM1 complementary PWM.
  * 8. Encoder_Init()            - SPI1 for the magnetic encoder (type set by
@@ -210,15 +203,12 @@ inline void tunepulse_init() {
 
     delay(100);
 
-    // Register LED control callbacks in TunePulseHeart
-    TP.set_led_callback(0, LED_Red_Control);    // Register red LED callback (index 0)
-    TP.set_led_callback(1, LED_Green_Control);  // Register green LED callback (index 1)
-    TP.set_led_callback(2, LED_Blue_Control);   // Register blue LED callback (index 2)
+    // Register the single LED apply callback in TunePulseHeart: two packed
+    // RGB888 words, one per LED element (LED2 unused on this board).
+    TP.led.set_callback().apply_cb(&LED_Apply);
 
-    // Turn off all LEDs initially
-    LED_Red_Control(false);    // Red LED OFF
-    LED_Green_Control(false);  // Green LED OFF
-    LED_Blue_Control(false);   // Blue LED OFF
+    // Turn the tricolor element off initially
+    TP.led.off();  // All channels dark (applies immediately)
 
     delay(100);
 

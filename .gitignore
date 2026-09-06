@@ -17,3 +17,8 @@ private/
 .kiro/
 compile_commands.json
 *.txt
+
+# Python logging output
+*.log
+logs/
+__pycache__/

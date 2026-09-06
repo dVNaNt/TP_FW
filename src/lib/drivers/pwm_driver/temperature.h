@@ -105,7 +105,6 @@ private:
     // Bits 0-15: raw_adc value (16-bit left-aligned word)
     std::atomic<uint32_t> temp_state_{FLAG_READ};
     static constexpr uint32_t FLAG_READ = 0x80000000;  ///< "data consumed" marker bit
-    static constexpr uint32_t MASK_DATA = 0x0000FFFF;  ///< Raw sample field mask
 
     int32_t ema_acc_ = 0;     ///< EMA accumulator: pending error incl. carried u4 remainder
     uint16_t temp_raw_ = 0;   ///< Latest filtered raw ADC word (u16, left-aligned)
@@ -219,7 +218,7 @@ public:
         if (state & FLAG_READ)
             return false;  // No new sample since last tick
 
-        uint16_t raw_adc = (uint16_t)(state & MASK_DATA);  // Extract the fresh sample
+        uint16_t raw_adc = state;  // Extract the fresh sample
 
         if (!primed_) {
             // First sample seeds the filter directly, skipping the convergence transient
@@ -268,7 +267,7 @@ public:
      *
      * @param raw_adc Raw 16-bit left-aligned ADC value
      */
-    inline void set_temperature_irq(uint32_t raw_adc) { temp_state_.store(raw_adc & MASK_DATA, std::memory_order_relaxed); }
+    inline void set_temperature_irq(uint16_t raw_adc) { temp_state_.store(raw_adc, std::memory_order_relaxed); }
 
     /**
      * @brief Install the raw ADC -> degC conversion callback.

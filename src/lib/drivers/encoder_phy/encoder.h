@@ -1,6 +1,7 @@
 /**
  * @file encoder.h
- * @brief Position integrator with ISR-safe ingestion and HW callbacks.
+ * @brief Position integrator with ISR-safe ingestion, HW callbacks, and an
+ *        atomic encoder-fault flag with a fault-action callback.
  *
  * @copyright Copyright 2026, creapunk
  * @license Apache-2.0
@@ -14,9 +15,13 @@
 /** Signature of a parameterless encoder lifecycle callback (start/stop). */
 typedef void (*EncoderCallback)();
 
+/** Signature of the encoder fault action callback (executed when the fault is raised). */
+typedef void (*EncoderFaultCallback)();
+
 /**
  * @struct Encoder
- * @brief Encoder position tracking with ISR-safe ingestion and lock-free reading.
+ * @brief Encoder position tracking with ISR-safe ingestion, lock-free reading,
+ *        and an atomic fault flag driving a registered fault-action callback.
  */
 struct Encoder {
 private:
@@ -24,6 +29,9 @@ private:
 
     EncoderCallback start_callback_ = &empty_callback;  ///< Invoked by start() (typically enables the SPI polling ISR).
     EncoderCallback stop_callback_  = &empty_callback;  ///< Invoked by stop() (typically disables the polling ISR).
+    EncoderFaultCallback fault_cb_  = nullptr;          ///< Invoked on the false->true fault transition (fault action).
+
+    std::atomic<bool> encoder_fault_{false};  ///< Fault flag (atomic setter/getter, ISR-safe)
 
     // Union to access the 64-bit position as two 32-bit halves.
     // Note: Assumes Little-Endian architecture (standard for ARM Cortex-M, ESP32, etc.).
@@ -145,10 +153,39 @@ public:
 
 
     // =======================================================================
+    // ATOMIC FAULT FLAG (encoder_fault)
+    // =======================================================================
+
+    /**
+     * @brief Set or clear the encoder fault flag (atomic, ISR-safe).
+     *
+     * Uses an atomic exchange so the flag is always consistent regardless of
+     * the calling context (ISR or main thread). On a false->true transition
+     * the registered fault-action callback fires exactly once — clearing the
+     * fault never invokes it.
+     *
+     * @param state true to raise the fault (fires fault_cb_ on rising edge),
+     *              false to clear it
+     */
+    inline void set_fault(bool state) {
+        // exchange returns the previous value; fire only on an actual rising edge
+        if (encoder_fault_.exchange(state, std::memory_order_relaxed) != state) {
+            if (state && fault_cb_)
+                fault_cb_();  // Execute the registered fault action (single fire)
+        }
+    }
+
+    /**
+     * @brief Check the encoder fault flag (atomic, ISR-safe).
+     * @return true if the fault flag is currently set
+     */
+    inline bool is_fault() const { return encoder_fault_.load(std::memory_order_relaxed); }
+
+    // =======================================================================
     // FLUENT CONFIGURATION API
     // =======================================================================
 
-    /** Fluent proxy for registering start/stop callbacks. */
+    /** Fluent proxy for registering start/stop/fault callbacks. */
     struct CallbackSetter {
     private:
         Encoder& parent;  ///< Owning encoder instance.
@@ -163,6 +200,11 @@ public:
         /// Register the stop callback (nullptr restores the empty no-op). Chainable.
         inline CallbackSetter& stop_cb(EncoderCallback cb) {
             parent.stop_callback_ = cb ? cb : &Encoder::empty_callback;
+            return *this;
+        }
+        /// Register the fault action callback (nullptr = no action on fault). Chainable.
+        inline CallbackSetter& fault_cb(EncoderFaultCallback cb) {
+            parent.fault_cb_ = cb;  // Null is allowed: fault raising simply performs no action
             return *this;
         }
     };

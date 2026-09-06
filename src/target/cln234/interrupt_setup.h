@@ -21,6 +21,8 @@
 
 #include "spi_setup.h"        // Include the shared SPI bus (DRV8353 + MT6835)
 #include "timer_pwm_setup.h"  // Include PWM timer hardware definitions and functions
+#include "temperature.h"      // External NTC model: Temperature_NTC_Feed() raw domain
+#include "ws2812.h"           // WS2812 status LED: LED_Update() pumped from the 20 kHz tick
 
 // OPTIMIZATION (P2.5): cache &TP.driver_phy once instead of walking
 // the global object member chain on every sample. The address is fixed at
@@ -46,21 +48,41 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
     constexpr uint32_t valid_range =
         upper_th - lower_th;  // Calculate the allowed ADC range at compile time to avoid runtime math
 
-    if ((uint32_t)(current_values[0] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase A
-        current_values[0] = UINT16_MAX;  // Mark Phase A reading as invalid if it falls outside the valid range
+    if ((uint32_t)(current_values[0] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for I_A (PA3)
+        current_values[0] = UINT16_MAX;  // Mark the I_A reading as invalid if it falls outside the valid range
 
-    if ((uint32_t)(current_values[1] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase B
-        current_values[1] = UINT16_MAX;  // Mark Phase B reading as invalid if it falls outside the valid range
+    if ((uint32_t)(current_values[1] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for I_B (PA1)
+        current_values[1] = UINT16_MAX;  // Mark the I_B reading as invalid if it falls outside the valid range
 
-    if ((uint32_t)(current_values[2] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for Phase C
-        current_values[2] = UINT16_MAX;  // Mark Phase C reading as invalid if it falls outside the valid range
+    if ((uint32_t)(current_values[2] - lower_th) > valid_range)  // Ultra-fast single-branch bounds check for I_C (PB0)
+        current_values[2] = UINT16_MAX;  // Mark the I_C reading as invalid if it falls outside the valid range
 
-    phy->current.set_currents_irq(current_values);
+    // CLN234 hardware channel order fix:
+    // The driver hard-pairs its current-sense channel N with PWM half-bridge N
+    // (FOC phase k duty -> CCRk, channel k current, channel k DAC threshold).
+    // On this board the phase current of pwm_ch1 (TIM1_CH1) is I_B (PA1) and
+    // the phase current of pwm_ch2 (TIM1_CH2) is I_A (PA3), while I_C (PB0)
+    // already matches pwm_ch3. ADC_get_values() returns the physical labels
+    // [I_A, I_B, I_C], so the first two slots are swapped here to feed the
+    // driver with [pwm_ch1 = I_B, pwm_ch2 = I_A, pwm_ch3 = I_C]. Without this
+    // reorder the FOC current loop reads the current of one bridge while
+    // driving the other, which trips the OC protection constantly. The same
+    // pairing is applied to the comparator DAC wiring in tunepulse.h
+    // (CH1 -> COMP1/I_B, CH2 -> COMP2/I_A, CH3 -> COMP4/I_C).
+    const uint16_t driver_channels[3] = {current_values[1], current_values[0],
+                                         current_values[2]};  // Reorder raw readings into driver CH1/CH2/CH3 order
+
+    phy->current.set_currents_irq(driver_channels);  // Publish phase currents paired with their own PWM channels
     phy->supply.set_voltage_irq(voltage_supply);
-    // Feed the thermal protection pipeline (raw 12-bit left-aligned). A zero
-    // word means "no injected conversion completed yet" (the sensor reads
-    // ~1.4 V, never 0), so it is skipped to keep the filter unprimed.
-    phy->temperature.set_temperature_irq(temperature_adc);
+    // Feed the thermal protection pipeline. The low-side NTC divider is
+    // ANTI-monotonic with temperature (hotter = smaller code), so the raw
+    // word is inverted ONCE at ingestion into the internal monotonic domain
+    // (0 = coldest, 65535 = hottest) expected by filter/thresholds (see
+    // temperature.h). A zero word means "no injected conversion completed
+    // yet" and is skipped to keep the filter unprimed.
+    if (temperature_adc != 0U) {
+        Temperature_NTC_Feed(phy->temperature, temperature_adc);
+    }
 
 }  // End of ADC_READY_Callback function
 
@@ -69,6 +91,14 @@ inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA
     // Self-test: the angle is already published in POSITION_ENCODER_MT_RAW
     // and polled by the test loop; do NOT run the FOC machinery here.
 #else
+    // Same wiring as CLN17 v3: the encoder DMA ISR owns the whole control
+    // pass. TP.tick() is the ONLY driver of the calibration state machines
+    // (the angle calibrator executes its motion inside tick()), so gating
+    // this call until boot completes would deadlock the motor calibration.
+    // Early-boot safety comes from inside the stack instead: tick() returns
+    // immediately while no fresh ADC sample has arrived, and the
+    // NotCalibrated state holds the phases shorted (INFINITY) until the
+    // current-sense offset calibration completes.
     TP.encoder.set_raw_position(Encoder_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
     TP.tick();
 #endif
@@ -89,6 +119,8 @@ inline void NVIC_Init() {  // Define the initialization function for the Nested 
  * This function bypasses HAL entirely. It must be called directly from TIM1_CC_IRQHandler.
  */
 inline void FOC_TimTrig_Callback() {  // Define custom inline callback for the timer trigger event
+    LED_Update();                     // Pump the WS2812 non-blocking frame stream (IRQ-safe, ~5 cycles hot path)
+
     ADC1_StartDMAConversion();        // Trigger hardware dual ADC conversion (ADC1 and ADC2 start synchronously)
 
     Encoder_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading

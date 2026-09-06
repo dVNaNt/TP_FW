@@ -79,7 +79,9 @@ private:
     /// Full-scale current amplitude in mA for each channel (0 => sensor missing).
     /// Negative values indicate an inverted sensor.
     /// @note Kept as integer mA internally for Q15 scaling precision.
-    const Vec3D_i32 full_scale_ma_;
+    /// @note Mutable at runtime via set_gain(); call it ONLY from a safe context
+    ///       (no concurrent tick()/set_currents_irq() execution is possible).
+    Vec3D_i32 full_scale_ma_;
     int32_t full_scale_max_ma;  ///< Cached maximum absolute full-scale range among channels (mA)
     int16_t n_samples = 90;     ///< Number of samples for zero-current calibration (1..1000)
 
@@ -87,7 +89,6 @@ private:
     CalibrationCallback cal_complete_cb_ = nullptr;  ///< Callback invoked when calibration completes
 
     // --- State ---
-    Vec3D_i32 cal_val_ = {0, 0, 0};                       ///< Per-channel calibration accumulator / zero-current offset
     Vec3D cal_n_ = {-1, -1, -1};                          ///< Per-channel calibration sample counter
     Vec3D scale_ = {0, 0, 0};                             ///< Precomputed per-channel ratio in Q15
     Vec3D out_norm_ = {INT16_MIN, INT16_MIN, INT16_MIN};  ///< Normalized current outputs in Q15
@@ -98,6 +99,7 @@ private:
     std::atomic<bool> is_changed_{false};                ///< Flag indicating new currents were written since last tick
 
 public:
+    Vec3D_i32 cal_val_ = {0, 0, 0};  ///< Per-channel calibration accumulator / zero-current offset
     /**
      * @brief Construct a CurrentSense instance.
      * @param ch1_fs_amps Full-scale current for Phase A in amps (0.0f = sensor missing)
@@ -109,21 +111,35 @@ public:
         : full_scale_ma_((int32_t)(ch1_fs_amps * 1000.0f), (int32_t)(ch2_fs_amps * 1000.0f), (int32_t)(ch3_fs_amps * 1000.0f)),
           overcurrent{*this},
           motor_ctrl_(motor_ctrl) {
-        if (!(ch1_fs_amps == 0.0f && ch2_fs_amps == 0.0f && ch3_fs_amps == 0.0f)) {
-            int32_t max_scale = 0;
-            // Find maximum absolute full-scale to use as denominator for Q15 scaling
-            for (uint8_t ch = 0u; ch < 3u; ++ch) {
-                const int32_t abs_fs = (full_scale_ma_[ch] >= 0) ? full_scale_ma_[ch] : -full_scale_ma_[ch];
-                if (abs_fs > max_scale)
-                    max_scale = abs_fs;
-            }
-            full_scale_max_ma = max_scale;
+        recompute_scales_();  // Precompute max full-scale and per-channel Q15 ratios
+    }
 
-            // Q15 ratio: (abs(full_scale_ma) << 14) / max_scale
-            // Shift by 14 (not 15) to prevent overflow when dividing.
-            for (uint8_t ch = 0u; ch < 3u; ++ch) {
-                scale_[ch] = (full_scale_ma_[ch] << 14) / max_scale;
-            }
+private:
+    /**
+     * @brief Precompute the cached maximum full-scale and per-channel Q15 ratios.
+     *
+     * Called by the constructor and by set_gain() whenever the full-scale
+     * currents change. The normalization convention is preserved: each channel
+     * is scaled relative to the maximum absolute full-scale among all channels,
+     * so a normalized INT16_MAX always corresponds to the range of the
+     * highest-current sensor. Runs on the configuration path only — the tick()
+     * hot path uses the precomputed scale_[ch] directly with zero overhead.
+     */
+    void recompute_scales_() {
+        int32_t max_scale = 0;
+        // Find maximum absolute full-scale to use as denominator for Q15 scaling
+        for (uint8_t ch = 0u; ch < 3u; ++ch) {
+            const int32_t abs_fs = (full_scale_ma_[ch] >= 0) ? full_scale_ma_[ch] : -full_scale_ma_[ch];
+            if (abs_fs > max_scale)
+                max_scale = abs_fs;
+        }
+        full_scale_max_ma = max_scale;
+
+        // Q15 ratio: (full_scale_ma << 14) / max_scale.
+        // Shift by 14 (not 15) to prevent overflow when dividing.
+        // If max_scale == 0 (no sensors attached) keep all ratios at 0.
+        for (uint8_t ch = 0u; ch < 3u; ++ch) {
+            scale_[ch] = (max_scale != 0) ? (int16_t)((full_scale_ma_[ch] << 14) / max_scale) : 0;
         }
     }
 
@@ -266,6 +282,36 @@ public:
     inline void set_calibration_samples(int32_t n) { n_samples = (n < 1) ? 1 : ((n > 1000) ? 1000 : n); }
 
     /**
+     * @brief Set the full-scale current (sensor gain) of all three channels at once.
+     *
+     * Re-precomputes the cached maximum full-scale and every per-channel Q15
+     * ratio, then re-normalizes the overcurrent limits (kept in amperes) and
+     * re-programs the hardware comparator DAC thresholds. Normalization
+     * semantics are preserved: Q15 outputs stay relative to the full scale of
+     * the highest-current sensor, so 0..INT16_MAX always spans that sensor's
+     * range.
+     *
+     * @param ch1_fs_amps Full-scale current for Phase A in amps (0.0f = sensor missing)
+     * @param ch2_fs_amps Full-scale current for Phase B in amps (0.0f = sensor missing)
+     * @param ch3_fs_amps Full-scale current for Phase C in amps (0.0f = sensor missing)
+     * @note Call ONLY from a safe context where tick()/set_currents_irq() cannot
+     *       run concurrently (e.g., motor stopped, driver disabled) — no locking
+     *       is performed, the precomputed variables are simply rewritten.
+     * @note Re-run zero-current calibration if the analog front-end gain
+     *       (not just the software interpretation) has changed.
+     */
+    void set_gain(float ch1_fs_amps, float ch2_fs_amps, float ch3_fs_amps) {
+        // Store the new full-scale set as integer mA (same encoding as the constructor)
+        full_scale_ma_[0] = (int32_t)(ch1_fs_amps * 1000.0f);
+        full_scale_ma_[1] = (int32_t)(ch2_fs_amps * 1000.0f);
+        full_scale_ma_[2] = (int32_t)(ch3_fs_amps * 1000.0f);
+
+        recompute_scales_();           // Refresh cached max full-scale and Q15 ratios
+        overcurrent.refresh_limits();  // Re-normalize OC limits and re-program DAC thresholds
+    }
+
+
+    /**
      * @brief Set the callback to be invoked when calibration starts.
      * @param cb Function pointer to call
      */
@@ -398,9 +444,10 @@ public:
 
         CompThresholdCallback comp_oc_callback_[3] = {&empty_comp_oc_callback, &empty_comp_oc_callback, &empty_comp_oc_callback};
 
-        std::atomic<int32_t> oc_error_cycles_{0};                          ///< Active recovery timer (0 = no error)
-        std::atomic<int32_t> oc_error_timeout_cycles_{kDefaultRecoveryCycles};              ///< Configured timeout loaded on trigger()
-        Vec3D overcurrent_hard_norm_ = {INT16_MAX, INT16_MAX, INT16_MAX};  ///< Hard limit in Q15
+        std::atomic<int32_t> oc_error_cycles_{0};                               ///< Active recovery timer (0 = no error)
+        std::atomic<int32_t> oc_error_timeout_cycles_{kDefaultRecoveryCycles};  ///< Configured timeout loaded on trigger()
+        Vec3D overcurrent_hard_norm_ = {INT16_MAX, INT16_MAX, INT16_MAX};       ///< Hard limit in Q15
+        float oc_limit_amps_[3] = {0.0f, 0.0f, 0.0f};  ///< Hard limits in amperes (0 = unset, INT16_MAX default)
 
         /**
          * @brief Decrement the recovery timer atomically.
@@ -480,6 +527,26 @@ public:
          */
         inline void reset() { oc_error_cycles_.store(0, std::memory_order_relaxed); }
 
+        /**
+         * @brief Re-derive all Q15 hard limits from the stored ampere limits and
+         *        re-program the hardware comparator DAC thresholds.
+         *
+         * Invoked by CurrentSense::set_gain() after a gain change: the
+         * normalization denominator (max full-scale) has changed, so previously
+         * configured ampere limits must be mapped to the new Q15 scale.
+         * Channels without an explicit ampere limit keep the INT16_MAX default
+         * (which always tracks the highest-current sensor automatically).
+         *
+         * @note Called on the configuration path only — not from the control ISR.
+         */
+        void refresh_limits() {
+            for (uint8_t ch = 0u; ch < 3u; ++ch) {
+                if (oc_limit_amps_[ch] != 0.0f)  // 0 = user never set a limit for this channel
+                    overcurrent_hard_norm_[ch] = self.amps2norm(oc_limit_amps_[ch]);
+                update_dac_threshold(ch);  // Re-program DAC for the new scale
+            }
+        }
+
     public:
         /**
          * @brief Construct an OvercurrentProxy bound to a parent CurrentSense.
@@ -504,6 +571,7 @@ public:
          * @note Triggers update_dac_threshold() automatically.
          */
         void set_limit_amps(Channel ch, float limit_amps) {
+            oc_limit_amps_[ch] = limit_amps;  // Remember the user intent in amperes
             overcurrent_hard_norm_[ch] = self.amps2norm(limit_amps);
             update_dac_threshold(ch);
         }
