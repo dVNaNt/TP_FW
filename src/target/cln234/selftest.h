@@ -121,8 +121,9 @@ inline void led_test() {
     // LEDs always show different primary colors
     const uint8_t c1 = phase;                  // LED1 color index
     const uint8_t c2 = (phase + 1U) % 3U;      // LED2 color index (always != c1)
-    LED_SetRGB2(palette[c1][0], palette[c1][1], palette[c1][2],
-                palette[c2][0], palette[c2][1], palette[c2][2]);
+    const int32_t p1 = ((int32_t)palette[c1][0] << 16) | ((int32_t)palette[c1][1] << 8) | (int32_t)palette[c1][2];  // LED1 packed RGB888
+    const int32_t p2 = ((int32_t)palette[c2][0] << 16) | ((int32_t)palette[c2][1] << 8) | (int32_t)palette[c2][2];  // LED2 packed RGB888
+    LED_SetRGB2(p1, p2);                       // One packed word per pixel
 }
 
 /** @brief Run one state-machine iteration; call from loop(). */

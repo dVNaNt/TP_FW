@@ -23,14 +23,16 @@
  * Integration notes:
  * - FlashEEPROM (@c calibration_dump) is declared BEFORE AngleCalibrator so
  *   its address can be injected into the calibrator at construction time.
- * - LED handling is platform-independent through function-pointer callbacks
- *   registered by the board layer (see tunepulse.h).
+ * - LED handling is platform-independent through the LedDriver (drivers/led_driver.h):
+ *   a single apply callback registered by the board layer receives two packed
+ *   RGB888 words, one per LED element (see tunepulse.h).
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
 
 #include "common.h"
 #include "drivers/encoder_phy/encoder.h"
+#include "drivers/led_driver.h"
 #include "drivers/pwm_driver/driver_pwm.h"
 #include "foc_vector_synthesis.h"  // Position-velocity cascaded controller
 #include "math/helpers/frequency_generator.h"
@@ -44,16 +46,9 @@
 #include "motor_control/types.h"
 
 #include "drivers/tunepulse_interlayer.h"
-
+#define DEV_LOG_ENABLE
 // Forward declaration of the board integration type (defined by target layer)
 struct TunePulseHeart;
-
-/**
- * @brief Platform-independent LED control callback signature.
- * @param state true = turn LED on, false = turn LED off (polarity handled by
- *              the board-specific implementation).
- */
-typedef void (*LED_Control_Callback)(bool state);
 
 /** Default PWM carrier frequency in Hz if the board does not define one. */
 #ifndef PWM_TIMER_FREQ_HZ
@@ -143,7 +138,6 @@ public:
     uint16_t angle_el_ = 0;                 ///< Last computed electrical rotor angle [0..65535] mapped to 0..360 deg.
     Vec2D_f32 pwm_voltage_ab = {0.0, 0.0};  ///< Last commanded alpha-beta voltage vector [V].
     float current_target_a = 0.5;           ///< Target q-axis current for the FOC loop [A].
-    LED_Control_Callback led_callbacks_[3] = {nullptr, nullptr, nullptr};  ///< Registered LED callbacks (index 0..2).
     // FIX (P1.4): re-entrancy guard. Atomic exchange makes the test-and-set
     // indivisible, so an ISR racing with a running tick() can no longer skip
     // or duplicate a control pass; the late sample is intentionally dropped
@@ -153,6 +147,7 @@ public:
 public:
     DriverPWM driver_phy;  ///< Physical driver layer: PWM output, phase-current ADCs, supply-voltage ADC.
     Encoder encoder;       ///< Magnetic encoder interface (SPI).
+    LedDriver led;         ///< Two-element RGB status LED (single apply callback, board-implemented).
 
     /**
      * @brief Construct the application heart.
@@ -179,34 +174,6 @@ public:
           drive(freq_hz),                                              // Control front end shares the loop rate
           driver_phy(iA_fs, iB_fs, iC_fs, 128, max_sup),
           motor_status(MotorStatus::NotCalibrated) {}
-
-    /**
-     * @brief Register a platform LED callback.
-     * @param led_index LED slot index (0..2); out-of-range values are ignored.
-     * @param callback  Function invoked with true=ON / false=OFF.
-     */
-    void set_led_callback(uint8_t led_index, LED_Control_Callback callback) {
-        if (led_index < 3) {
-            led_callbacks_[led_index] = callback;
-        }
-    }
-
-    /**
-     * @brief Invoke a registered LED callback.
-     * @param led_index LED slot index (0..2); ignored if unset or out of range.
-     * @param state true = LED on, false = LED off.
-     */
-    void led_control(uint8_t led_index, bool state) {
-        if (led_index < 3 && led_callbacks_[led_index] != nullptr) {
-            led_callbacks_[led_index](state);
-        }
-    }
-
-    /**
-     * @brief Direct access to the raw LED callback table (3 entries).
-     * @return Pointer to the first element of the callback array.
-     */
-    LED_Control_Callback* get_led_callbacks() { return led_callbacks_; }
 
     /**
      * @brief "calibrate" command: starts a full angle calibration cycle
@@ -302,7 +269,11 @@ public:
         if (driver_phy.current.is_changed() & driver_phy.supply.is_changed()) {
             driver_phy.tick();
             counter++;
-            led_control(0, driver_phy.get_fault());
+            led.set().led1().r(driver_phy.get_fault() ? 255 : 0);  // LED1 = fault indicator (red channel)
+            uint32_t faulte = driver_phy.get_fault();
+            // if (faulte) {
+            //     SerialUSB.println(faulte);
+            // }
 
             uint32_t real_raw_ang = encoder.get_angle();           // Raw mechanical angle (no sign fix)
             int32_t real_pos = encoder.get_position() * err_sign;  // Corrected mechanical position

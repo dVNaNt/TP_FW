@@ -12,7 +12,9 @@
 
 #pragma once
 
+#ifndef TARGET_CLN17V3  // Also passed on the command line (-D) - avoid redefinition warnings
 #define TARGET_CLN17V3
+#endif
 
 #include "Arduino.h"
 

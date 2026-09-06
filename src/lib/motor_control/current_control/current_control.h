@@ -41,7 +41,7 @@
 #include "hfi_sense.h"                               // HFI sense for inductance measurement
 #include "motor_calibration.h"
 
-static constexpr float test_pwr = 5.0;
+static constexpr float test_pwr = 10.0;
 struct CurrentControl {
 public:
     Motor& motor;

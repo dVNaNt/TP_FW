@@ -31,7 +31,7 @@
 #include "../../common.h"
 #include "power.h"
 #include "voltage.h"
-#include "pwm_wrapper.h"
+#include "pwm_control.h"
 
 struct DriverPWM;
 struct CurrentSense;
@@ -41,7 +41,7 @@ private:
     friend struct DriverPWM;
     friend struct CurrentSense;
     // --- Collaborators (injected once via attach()) ---
-    PwmWrapper* pwm_ = nullptr;        ///< PWM output backend receiving computed duties
+    PwmControl* pwm_ = nullptr;        ///< PWM output backend receiving computed duties
     Power* power_ = nullptr;           ///< Power estimator fed with commanded vectors
     SupplyVoltage* supply_ = nullptr;  ///< Bus-voltage scaler used by the voltage path
 
@@ -284,7 +284,7 @@ public:
      * @param power  Power estimator fed with every commanded vector
      * @param supply Bus-voltage scaler used by the voltage path
      */
-    void attach(PwmWrapper& pwm, Power& power, SupplyVoltage& supply) {
+    void attach(PwmControl& pwm, Power& power, SupplyVoltage& supply) {
         pwm_ = &pwm;
         power_ = &power;
         supply_ = &supply;
