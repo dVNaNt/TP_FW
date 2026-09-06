@@ -62,14 +62,6 @@ static constexpr uint32_t CALIB_PAUSE_CYCLES = 1800;  // 100ms pause @ 18kHz
 static constexpr uint32_t INDUCTANCE_MEASURE_CYCLES_F1 = 9000;  // 0.5 sec at 18kHz
 static constexpr uint32_t INDUCTANCE_MEASURE_CYCLES_F2 = 9000;  // 0.5 sec at 18kHz
 
-// Upper bound on the two-point resistance-correction factor I1 / (2 * dI).
-// With a series offset drop Voff in the bridge the factor evaluates to
-// (V1 - Voff) / V1, so it is <= 1 by construction: the correction can only pull
-// R DOWN from the raw V/I estimate. A factor above this bound means dI collapsed
-// into the noise floor (the second operating point did not settle, or the
-// voltage was not actually halved) and the "correction" would inflate R instead.
-static constexpr float RES_CORRECTION_MAX_FACTOR = 1.0f;
-
 // Frequencies for dual inductance validation
 static constexpr uint16_t HFI_FREQ_1 = 1000;  // 1000 Hz
 static constexpr uint16_t HFI_FREQ_2 = 1500;  // 1500 Hz
@@ -870,28 +862,8 @@ private:
                 // Formula: R_corrected = R_uncorrected * I1 / (2 * delta_i)
                 // Voltage cancels out completely for exact V2 = V1/2
                 if (delta_i_amps > 0.0f && abs_first_i_amps > MIN_MEASUREMENT_CURRENT_AMPS) {
-                    const float correction_factor = abs_first_i_amps / (2.0f * delta_i_amps);
-
-                    if (correction_factor <= RES_CORRECTION_MAX_FACTOR) {
-                        corrected_total_resistance_ohms *= correction_factor;
-                    } else {
-                        // dI is noise, not signal: halving the drive barely moved
-                        // the current. Keep the raw V/I estimate, which always
-                        // over-states R slightly but stays physically sane. An
-                        // inflated R makes every later HFI stage compute
-                        // Z^2 - R^2 < 0 and report "no inductive part", so
-                        // committing it would fail the whole identification.
-                        TP_LOG_VALS("ELEC CAL WARNING: R correction rejected: factor,I1[A],I2[A],dI[A],R_unc[Ohm]",
-                                    correction_factor, abs_first_i_amps, abs_second_i_amps, delta_i_amps,
-                                    corrected_total_resistance_ohms);
-                    }
+                    corrected_total_resistance_ohms = corrected_total_resistance_ohms * abs_first_i_amps / (2.0f * delta_i_amps);
                 }
-
-                // Diagnostic snapshot of the two-point fit that sets R for every
-                // subsequent stage (the HFI inductance maths divides by it).
-                TP_LOG_VALS("ELEC CAL: R two-point fit: I1[A],I2[A],dI[A],R_unc[Ohm],R_final[Ohm]", abs_first_i_amps,
-                            abs_second_i_amps, delta_i_amps, uncorrected_total_resistance_ohms_,
-                            corrected_total_resistance_ohms);
 
                 // Legacy Motor API boundary: pass milliohms.
                 motor.set_total_resistance(corrected_total_resistance_ohms);

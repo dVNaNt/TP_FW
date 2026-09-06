@@ -564,3 +564,75 @@ FLASH: 99400 bytes (75.84% of 131072 bytes): +0 bytes
 RAM: 11248 bytes (34.33% of 32768 bytes): +0 bytes
 
 
+## 2026-09-06 - Build cln17_v3_release with optimisation (build_type = release)
+**Changes:**
+- build_type switched from debug to release for cln17_v3_release
+- removed the dead -O0 from that environment's build_flags and documented why no -O belongs there
+
+**Reasoning:**
+- PlatformIO appends build_type's flags AFTER build_flags, so the -O0 that had been sitting in build_flags was silently overridden and the compiler was actually receiving -Og -g2 -ggdb2
+- the firmware had grown to 86.7% of the 114688 B budget with only 15 KiB of headroom, which the TPCP stack on top of the FOC stack made tight
+
+**Notes:**
+- Flash 99432 -> 81652 B (-17780, 86.7% -> 71.2%), RAM 11664 -> 11652 B. Verified from the real compiler invocation that -Os now reaches the translation units and no -g flags remain. Debug stepping via pio debug is correspondingly reduced for this environment
+- cln17_v3_bench remains available as a debug-flavoured environment. Optimisation level changes ISR code generation, so the control loop should be re-verified on hardware. A further 7748 B is available by compiling logging out, but dev_log.h cannot currently be switched off - print_heartbeat() calls tp_log_room() which lives inside the DEV_LOG_ENABLE guard.
+
+FLASH: 81652 bytes (62.30% of 131072 bytes): -17748 bytes
+RAM: 11652 bytes (35.56% of 32768 bytes): +404 bytes
+
+
+## 2026-09-06 - Log residual current-sense offset after zero-current calibration
+**Changes:**
+- tunepulse_init() samples the phase currents for 200 ms immediately after the current-sense offset calibration reports complete, while the NotCalibrated state still holds the INFINITY sentinel (all phases tied to the bus, zero differential across the winding)
+- prints mean/min/max for both phases as ISENSE ZERO CHECK
+
+**Reasoning:**
+- The two-point resistance fit divides by dI = |I1| - |I2|, which cancels any constant sensor offset, while taking I1 at face value - so a residual offset inflates R without disturbing dI
+- the HFI impedance is ripple-based and immune to the same offset, which is exactly the disagreement observed on this board (DC ~15 Ohm vs HFI ~2 Ohm for one winding, suggestions.md S16)
+- the measurement decides whether the offset calibration or the ripple measurement is the root cause
+
+**Notes:**
+- Diagnostic only - no control behaviour changes. Runs in thread mode during bring-up before the motor is energized, so the direct SerialUSB prints cannot stall the control ISR. A mean near zero exonerates the offset
+- a mean of order an amp identifies it as the root cause of S16.
+
+FLASH: 82068 bytes (62.61% of 131072 bytes): +416 bytes
+RAM: 11652 bytes (35.56% of 32768 bytes): +0 bytes
+
+
+## 2026-09-06 - Decouple the HFI ripple target from the DC holding current
+**Changes:**
+- Replaced the 20-25%-of-target_current_amps_ ripple band with absolute constants HFI_TARGET_RIPPLE_MIN_A / MAX_A (0.90 / 1.20 A p-p)
+- added HFI_MIN_AMPLITUDE_RATIO so the adaptation can never drive the injection amplitude to zero
+- added a decimated per-period convergence trace logging ripple against the band, the amplitude and the remaining voltage headroom
+
+**Reasoning:**
+- The band was pegged to the DC holding current captured at the end of SoftWarmup, which has no physical relation to the injected ripple
+- at a ~2 A holding current it sat at 0.41-0.52 A against a measurement noise floor of ~0.66 A p-p observed with the injection off, making the adaptation bistable - one boot ramped the amplitude forever (ripple 0.18 A) and the next walked it down to zero (ripple 0.66 A, v_peak 0.00, Z 0.00), both reported as 'HFI Z has no inductive part'
+- an absolute band set above the usual voltage budget biases the failure toward amplitude saturation, which still yields a real v_peak and a computable impedance
+
+**Notes:**
+- Diagnosed after the ISENSE ZERO CHECK ruled out a current-sense offset (Ia mean -0.0013 A, Ib -0.0010 A against a +/-0.018 A noise band). target_current_amps_ is now written but never read - left in place deliberately rather than removed mid-investigation. Band values are first estimates from one board and are expected to need tuning against the convergence trace.
+
+FLASH: 82256 bytes (62.76% of 131072 bytes): +188 bytes
+RAM: 11652 bytes (35.56% of 32768 bytes): +0 bytes
+
+
+## 2026-09-06 - Let a failed electrical identification still run an angle sweep; drop the S16 attempts
+**Changes:**
+- tick() gains an explicit MotorStatus::CalibError case that steps the angle calibrator instead of falling through to the default branch
+- a running sweep is driven as in the Success branch, a flash-I/O window de-energizes for the transfer, and an idle CalibError still holds the safe state
+- removed RES_CORRECTION_MAX_FACTOR and the two-point resistance-correction guard
+- removed the ISENSE zero-current readback and the HFI ripple-band/amplitude-floor/convergence-trace work
+
+**Reasoning:**
+- CalibError fell into the default branch, which releases the bridge and returns BEFORE the calibrator is stepped, so an angle sweep armed over TP_CALIB_ANGLE (with or without TP_CALIB_FLAG_FORCE) was accepted, answered TP_ERR_NONE and then never advanced - the drive could not be angle-calibrated at all once electrical identification failed, and with no angle table tp_engine refuses to arm any control mode
+- the angle sweep needs neither R nor L, and used to run because a failed HFI stage committed L=0 and reported success
+- the S16 resistance and HFI-amplitude work is being moved to its own PR rather than carried here
+
+**Notes:**
+- The HFI validation guard that rejects an invalid inductance is KEPT - this changes what CalibError can still do, not what gets committed as valid. Nothing here re-enables ordinary control: motor_status stays CalibError and arming is still refused until an identification succeeds. Verified: cln17_v3_release and cln234_release both build clean. Not yet exercised on hardware - the sweep now energizes through a current loop tuned from the 3 mH default inductance against a true ~1.6 mH, so watch the motor on the first run.
+
+FLASH: 81400 bytes (62.10% of 131072 bytes): -856 bytes
+RAM: 11652 bytes (35.56% of 32768 bytes): +0 bytes
+
+

@@ -452,6 +452,51 @@ public:
                         }
                     }
                     break;
+                case MotorStatus::CalibError: {
+                    // A failed ELECTRICAL identification must not disable ANGLE
+                    // calibration. The sweep is a physical procedure that needs
+                    // neither R nor L to be known - it ran perfectly well back
+                    // when a failed HFI stage committed L as zero and reported
+                    // success anyway.
+                    //
+                    // Previously CalibError fell through to the default branch,
+                    // which releases the bridge and returns BEFORE the
+                    // calibrator is stepped. A sweep armed over the protocol
+                    // (TP_CALIB_ANGLE, with or without TP_CALIB_FLAG_FORCE) was
+                    // therefore accepted, answered TP_ERR_NONE, and then never
+                    // advanced a single stage - indistinguishable from a seized
+                    // rotor.
+                    //
+                    // This re-enables nothing else: with no valid angle table
+                    // tp_engine still refuses to arm any control mode
+                    // (TP_ERR_NOT_CALIBRATED), and motor_status stays
+                    // CalibError until an identification actually succeeds.
+                    if (angle_calibrator.is_settling() || angle_calibrator.is_persisting() ||
+                        motor_params.is_flash_busy()) {
+                        // Flash I/O window: step the calibrator but keep the
+                        // phases de-energized for the transfer, exactly as the
+                        // Success branch does.
+                        angle_calibrator.tick(real_raw_pos, (int16_t)current_driver.motor.get_motor_type());
+                        targt = 0.0f;
+                        flash_window = true;  // Zero-current vector latched: NVM programming allowed
+                        break;
+                    }
+
+                    if (!angle_calibrator.is_calibrated() && !angle_calibrator.is_idle()) {
+                        // A sweep is genuinely running (not parked in Reset):
+                        // drive it the way the Success branch would.
+                        angle_el_ = angle_calibrator.tick(real_raw_pos, (int16_t)current_driver.motor.get_motor_type());
+                        break;
+                    }
+
+                    // Idle in CalibError: hold the safe state and command nothing.
+                    pwm_voltage_ab.a = pwm_voltage_ab.b = NAN;
+                    driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+                    last_current_a_ = 0.0f;               // Nothing commanded through FOC
+                    tp_flash_programming_window = true;   // Bridge released: NVM programming safe
+                    is_running.store(false, std::memory_order_release);
+                    return;
+                }
                 default: {
                     // Any other transient state: apply a small negative voltage
                     // (active brake / idle) and skip FOC this cycle.
