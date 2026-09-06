@@ -11,7 +11,7 @@
  *   overpower (OP) protection from dual symmetric power/current limits
  * - **Temperature** — heavily-filtered temperature sensing with a single
  *   overtemperature (OT) threshold released by hysteresis
- * - **PwmWrapper** — hardware PWM output with chainable setup and SeqLock-protected duty cycle
+ * - **PwmControl** — hardware PWM output with chainable setup and SeqLock-protected duty cycle
  * - **OutputWrapper** — gate driver enable/disable
  * - **InputWrapper** — external hardware fault pin
  *
@@ -35,7 +35,7 @@
  *
  * ## Thread Safety
  *
- * - PWM duty cycle updates use a SeqLock pattern inside PwmWrapper (ISR-safe writer, lock-free reader)
+ * - PWM duty cycle updates use a SeqLock pattern inside PwmControl (ISR-safe writer, lock-free reader)
  * - Fault flags are atomic bitwise operations
  * - Active priority tracking uses compare_exchange to prevent race conditions
  *   between tick() and ISR-triggered fault changes
@@ -81,7 +81,7 @@
 #include "current_sense.h"
 #include "motor_control.h"
 #include "power.h"
-#include "pwm_wrapper.h"
+#include "pwm_control.h"
 #include "temperature.h"
 #include "voltage.h"
 
@@ -254,7 +254,7 @@ private:
 
 public:
     MotorControl motor_ctrl;
-    PwmWrapper pwm;           ///< PWM output wrapper with chainable setup and SeqLock-protected duty cycle
+    PwmControl pwm;           ///< PWM output stage with chainable setup and SeqLock-protected duty cycle
     OutputWrapper enable_;    ///< Digital output to enable/disable the gate driver
     InputWrapper error_;      ///< Digital input reading the hardware fault pin
     CurrentSense current;     ///< Public instance for current ADC input and configuration
@@ -355,7 +355,7 @@ public:
      * 2. Read external hardware fault pin
      * 3. Evaluate priority — fire callback if priority changed
      * 5. If any fault is active, skip PWM application (hardware stays in safe state)
-     * 6. Otherwise, read duty cycle via SeqLock (PwmWrapper::read_ticks) and apply to hardware
+     * 6. Otherwise, read duty cycle via SeqLock (PwmControl::read_ticks) and apply to hardware
      *
      * @note Call tick() before tick_icr() in each cycle.
      * @warning PWM outputs are NOT updated when any fault bit is set.
@@ -404,7 +404,7 @@ public:
         if (flags != 0)
             return;
 
-        // 5. Read duty cycle via SeqLock (now delegated to PwmWrapper)
+        // 5. Read duty cycle via SeqLock (now delegated to PwmControl)
         if (pwm.read_ticks(pwm_apply_)) {
             pwm.set_phases(pwm_apply_);
         }

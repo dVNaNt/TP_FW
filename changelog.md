@@ -88,3 +88,46 @@ FLASH: 71856 bytes (54.82% of 131072 bytes): +28 bytes
 RAM: 7976 bytes (24.34% of 32768 bytes): +0 bytes
 
 
+## 2026-09-06 - Runtime current-sensor gain + encoder fault + PWM rename
+**Changes:**
+- CurrentSense: runtime set_i_fs()/i_fs() per-channel full-scale with dedicated SeqLock (fs_seq_) snapshot in tick()
+- recompute_scales_() helper
+- OC limits kept in amps and re-normalized via OvercurrentProxy::refresh_limits() with DAC threshold reprogramming
+- Encoder: atomic encoder_fault flag, set_fault(bool)/is_fault() with rising-edge fault action callback and fluent fault_cb()
+- PwmWrapper renamed to PwmControl (file pwm_control.h, includes/types/docs updated in driver_pwm.h and motor_control.h)
+
+**Reasoning:**
+- Allow realtime sensor gain adjustment while preserving int16 normalization relative to the highest-current sensor full-scale
+- keep ISR hot path lock-free and single-pass
+- add encoder fault handling hooks
+- finish the incomplete pwm_wrapper rename
+
+**Notes:**
+- Hot-path overhead: one relaxed load+compare in common case
+- set_i_fs is single-writer (config context)
+- re-calibrate zero-current offsets if analog front-end gain physically changes
+
+FLASH: 67852 bytes (51.77% of 131072 bytes): -4004 bytes
+RAM: 7856 bytes (23.97% of 32768 bytes): -120 bytes
+
+
+## 2026-09-06 - CurrentSense: simplified runtime gain API (set_gain)
+**Changes:**
+- Replaced SeqLock-based set_i_fs with single set_gain(ch1, ch2, ch3) for all channels
+- constructor scale math extracted into recompute_scales_() precompute helper
+- OC limits stored in amps and re-normalized via refresh_limits() on gain change
+- tick()/process_channel() hot path left byte-identical to the original
+
+**Reasoning:**
+- Gain changes are rare and performed from a safe context, so locking is unnecessary
+- zero-cycle overhead in the control ISR
+- keep int16 normalization relative to the highest-current sensor full-scale
+
+**Notes:**
+- set_gain must be called only when tick()/set_currents_irq() cannot run (motor stopped)
+- re-calibrate zero offsets if analog front-end gain physically changes
+
+FLASH: 67792 bytes (51.72% of 131072 bytes): -60 bytes
+RAM: 7856 bytes (23.97% of 32768 bytes): +0 bytes
+
+

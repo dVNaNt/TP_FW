@@ -1,6 +1,6 @@
 /**
- * @file pwm_wrapper.h
- * @brief Zero-overhead PWM wrapper with chainable callback setup and thread-safe duty-cycle API.
+ * @file pwm_control.h
+ * @brief Zero-overhead PWM control stage with chainable callback setup and thread-safe duty-cycle API.
  *
  * @details
  * Fluent interface consuming zero extra memory:
@@ -35,7 +35,7 @@ typedef void (*PwmPhasesCallback)(const int16_t phases[3]);
 typedef void (*SamplePointCallback)(void);
 
 /**
- * @class PwmWrapper
+ * @class PwmControl
  * @brief PWM output stage with chainable configuration and thread-safe duty-cycle updates.
  *
  * Owns the PWM timer period, hardware output callbacks, current-sampling-point callback,
@@ -56,9 +56,9 @@ typedef void (*SamplePointCallback)(void);
  *   pwm.set_duty(duty_q15);
  * @endcode
  */
-class PwmWrapper {
+class PwmControl {
 public:
-    PwmWrapper() : set_phases_cb_(nullptr), sample_point_cb_(nullptr), period_(0), seq_(0) {}
+    PwmControl() : set_phases_cb_(nullptr), sample_point_cb_(nullptr), period_(0), seq_(0) {}
 
     // =======================================================================
     // SETUP API
@@ -74,15 +74,15 @@ public:
      * @struct CallbackProxy
      * @brief Zero-overhead proxy returned by set_callback() for chaining.
      *
-     * Holds a single reference to the owning PwmWrapper. All methods are inline
+     * Holds a single reference to the owning PwmControl. All methods are inline
      * and return *this — the compiler collapses the chain into direct assignments.
      */
     struct CallbackProxy {
     private:
-        PwmWrapper& pwm_;
+        PwmControl& pwm_;
 
     public:
-        inline CallbackProxy(PwmWrapper& pwm) : pwm_(pwm) {}
+        inline CallbackProxy(PwmControl& pwm) : pwm_(pwm) {}
 
         /**
          * @brief Set the 3-phase hardware update callback.
@@ -113,7 +113,7 @@ public:
     /**
      * @brief Begin the callback configuration chain.
      *
-     * @return CallbackProxy bound to this PwmWrapper
+     * @return CallbackProxy bound to this PwmControl
      *
      * @par Example
      * @code
