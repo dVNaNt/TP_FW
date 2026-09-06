@@ -6,6 +6,20 @@
  * transceiver-enable PC14, bit timing calculation, TDC, IRQ) and a
  * chunk-oriented command API on top.
  *
+ * ## Node addressing and filtering
+ * The four standard filter slots are bound to one node address by
+ * set_node_filters(): network management (0x100-0x10F) is always accepted,
+ * the setpoint (0x200+n / 0x2FF) and request (0x300+n / 0x3FF) channels are
+ * accepted only once an address has been assigned, and a fourth slot can be
+ * opened for promiscuous bus monitoring. Everything else is rejected in
+ * hardware, so traffic addressed to other drives costs this node no
+ * interrupts at all. See src/api/CAN_PROTOCOL.md for the identifier map.
+ *
+ * ## Bus health
+ * update() also drives bus-off recovery: a bus-off event latches CCCR.INIT in
+ * hardware and the node stays off the bus until software clears it, so
+ * without this call a single wiring fault would be permanent until reboot.
+ *
  * ## Protocol
  * One chunk == one command == exactly 8 bytes; there are no START/END
  * markers and no service bytes on the wire. write(id, msg, len) splits the
@@ -22,7 +36,7 @@
  * - Counters are volatile uint32_t (atomic single-writer on Cortex-M4).
  *
  * ## RAM budget
- * TX frame ring 8 x 67 B + RX chunk ring 32 x 9 B ~= 0.8 KiB total.
+ * TX frame ring 8 x 67 B + RX chunk ring 32 x 10 B ~= 0.9 KiB total.
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
@@ -71,8 +85,14 @@ public:
         return init();                      // GPIO + FDCAN + IRQ bring-up
     }
 
-    /** @brief Non-blocking pump: frame ring -> hardware TX FIFO. */
-    void update() { tx_pump(); }
+    /**
+     * @brief Non-blocking service call: bus-off recovery + TX ring pump.
+     *
+     * Must be called periodically from thread mode. It is the only place that
+     * restarts a node the bus knocked offline, so skipping it makes a wiring
+     * fault permanent.
+     */
+    void update() { service_bus(); }
 
     /**
      * @brief Transmit a whole message as 8-byte command chunks.
@@ -122,29 +142,83 @@ public:
     }
 
     /**
-     * @brief Queue exactly one 8-byte command chunk.
-     * @param id    11-bit CAN identifier of the command.
-     * @param chunk Pointer to exactly 8 command bytes.
-     * @return true when the chunk was accepted, false when the ring is full.
+     * @brief Queue exactly one 8-byte frame (the protocol fast path).
+     *
+     * Unlike write(), this never pads the 64-byte FD payload: a protocol frame
+     * is always one chunk, so only 8 bytes are copied and the DLC is fixed at
+     * 8. That matters because the telemetry scheduler can emit several frames
+     * per millisecond and write() would memset 56 unused bytes each time.
+     *
+     * @param id    11-bit CAN identifier of the frame.
+     * @param frame Pointer to exactly 8 payload bytes.
+     * @return true when the frame was accepted, false when the ring is full.
      */
-    bool send(uint32_t id, const uint8_t* chunk) {
-        return write(id, chunk, CHUNK_SIZE);     // One chunk = one write()
+    bool send(uint32_t id, const uint8_t* frame) {
+        if (tx_free() == 0U) {
+            return false;                            // Ring full: caller decides what to do
+        }
+        TxFrame& f = tx_ring[tx_w];                  // Next free ring slot
+        f.id = static_cast<uint16_t>(id & 0x7FFU);   // 11-bit identifier
+        std::memcpy(f.payload, frame, CHUNK_SIZE);   // Exactly one chunk of payload
+        f.n = 1U;                                    // One chunk -> DLC 8
+        __DMB();                                     // Payload visible before the index moves
+        tx_w = (tx_w + 1U) & TX_MASK;                // Publish the slot
+        return true;
+    }
+
+    /**
+     * @brief Queue a data-less frame whose identifier IS the message.
+     *
+     * Used by the UID discovery arbitration, where the winning node is decided
+     * by the CAN arbitration field itself and the payload carries nothing.
+     *
+     * @param id 11-bit CAN identifier to transmit with DLC 0.
+     * @return true when the frame was accepted.
+     */
+    bool send_empty(uint32_t id) {
+        if (tx_free() == 0U) {
+            return false;                            // Ring full
+        }
+        TxFrame& f = tx_ring[tx_w];                  // Next free ring slot
+        f.id = static_cast<uint16_t>(id & 0x7FFU);   // 11-bit identifier
+        f.n = 0U;                                    // DLC 0: identifier only
+        __DMB();                                     // Metadata visible before the index moves
+        tx_w = (tx_w + 1U) & TX_MASK;                // Publish the slot
+        return true;
     }
 
     /**
      * @brief Pop one received 8-byte chunk from the RX queue.
-     * @param[out] id    CAN identifier the chunk arrived with.
+     * @param[out] id    Full 11-bit CAN identifier the chunk arrived with.
      * @param[out] chunk Output buffer, 8 bytes are written.
      * @return true when a chunk was delivered.
      */
     bool read(uint32_t& id, uint8_t* chunk) {
+        uint8_t len = 0;                         // Length discarded by this overload
+        return read(id, chunk, len);
+    }
+
+    /**
+     * @brief Pop one received chunk together with its real payload length.
+     *
+     * The payload is always 8 bytes wide and zero-padded; len reports how many
+     * of them the sender actually transmitted, which is what network-management
+     * frames need in order to be told apart from a padded command.
+     *
+     * @param[out] id    Full 11-bit CAN identifier the chunk arrived with.
+     * @param[out] chunk Output buffer, 8 bytes are always written.
+     * @param[out] len   Real payload length of this chunk (1..8).
+     * @return true when a chunk was delivered.
+     */
+    bool read(uint32_t& id, uint8_t* chunk, uint8_t& len) {
         if (rx_w == rx_r) {
             return false;                        // Ring empty
         }
         const uint8_t i = rx_r;                  // Oldest slot
         id = rx_ids[i];                          // Chunk identifier
+        len = rx_lens[i];                        // Real payload length
         std::memcpy(chunk, &rx_data[static_cast<uint16_t>(i) * CHUNK_SIZE],
-                    CHUNK_SIZE);                 // Payload out
+                    CHUNK_SIZE);                 // Payload out (always 8 bytes)
         __DMB();                                 // Data read before index release
         rx_r = (rx_r + 1U) & RX_MASK;            // Release the slot
         return true;
@@ -171,6 +245,154 @@ public:
     /** @brief true when begin() completed successfully. */
     bool is_ready() const { return is_initialized; }
 
+    // ========================================================================
+    // Protocol support: hardware filtering, bus health, link reconfiguration
+    // ========================================================================
+
+    /**
+     * @brief Install the acceptance filters for one node address.
+     *
+     * Filtering is done in HARDWARE so a busy multi-drive bus costs this node
+     * nothing: frames addressed to other nodes never reach the RX FIFO, never
+     * raise an interrupt and can never overflow the chunk ring.
+     *
+     * Four standard filter slots are used:
+     *  0: range 0x100-0x10F - network management (always accepted).
+     *  1: dual  {0x200+node, 0x2FF} - real-time setpoints + their broadcast.
+     *  2: dual  {0x300+node, 0x3FF} - requests + their broadcast.
+     *  3: range 0x000-0x7FF - promiscuous monitoring, disabled by default.
+     *
+     * An unaddressed node (node_id == 0) leaves slots 1 and 2 disabled and so
+     * listens to network management only, which is exactly what the discovery
+     * protocol requires of a device that has not been given an address yet.
+     *
+     * @param node_id     Assigned node address (0 = unassigned).
+     * @param promiscuous true to additionally accept every standard identifier.
+     * @return true when every filter slot was accepted by the peripheral.
+     */
+    bool set_node_filters(uint8_t node_id, bool promiscuous = false) {
+        node_id_ = node_id;               // Remember for a later re-init
+        promiscuous_ = promiscuous;       // Remember for a later re-init
+        if (!is_initialized) {
+            return false;                 // Filters are installed by init() instead
+        }
+        return apply_filters();
+    }
+
+    /** @brief Node address the acceptance filters are currently bound to. */
+    uint8_t get_node_id() const { return node_id_; }
+
+    /** @brief Snapshot of the CAN error state used by the diagnostics chunk. */
+    struct BusStatus {
+        uint8_t tec;          // Transmit error counter (0-255)
+        uint8_t rec;          // Receive error counter (0-127)
+        bool    warning;      // At least one counter reached 96
+        bool    error_passive;// The node is error passive
+        bool    bus_off;      // The node was removed from the bus
+    };
+
+    /**
+     * @brief Read the protocol error state straight out of the peripheral.
+     *
+     * Register reads only (PSR is read-clear for some bits, so the latched
+     * fields are taken from ECR which is not) - safe to call at any rate.
+     */
+    BusStatus get_bus_status() const {
+        BusStatus st = {0, 0, false, false, false};
+        if (!is_initialized) {
+            return st;                                        // Nothing to report yet
+        }
+        const uint32_t ecr = hfdcan.Instance->ECR;            // Error counters
+        const uint32_t psr = hfdcan.Instance->PSR;            // Protocol status
+        st.tec = static_cast<uint8_t>(ecr & FDCAN_ECR_TEC_Msk);
+        st.rec = static_cast<uint8_t>((ecr & FDCAN_ECR_REC_Msk) >> FDCAN_ECR_REC_Pos);
+        st.warning = (psr & FDCAN_PSR_EW) != 0U;
+        st.error_passive = (psr & FDCAN_PSR_EP) != 0U;
+        st.bus_off = (psr & FDCAN_PSR_BO) != 0U;
+        return st;
+    }
+
+    /**
+     * @brief Recover from bus-off and pump the TX ring.
+     *
+     * A bus-off event sets CCCR.INIT in hardware and the node stops
+     * transmitting for good until software clears it. Clearing INIT starts the
+     * mandated recovery sequence (128 occurrences of 11 recessive bits), after
+     * which the node rejoins on its own. Without this the first serious wiring
+     * fault would silently take the drive off the bus until a power cycle.
+     */
+    void service_bus() {
+        if (is_initialized && ((hfdcan.Instance->PSR & FDCAN_PSR_BO) != 0U)) {
+            if ((hfdcan.Instance->CCCR & FDCAN_CCCR_INIT) != 0U) {
+                hfdcan.Instance->CCCR &= ~FDCAN_CCCR_INIT;    // Start bus-off recovery
+                bus_off_events++;                             // Count it for diagnostics
+            }
+        }
+        tx_pump();                                            // Ring -> hardware FIFO
+    }
+
+    /**
+     * @brief Drop everything queued for transmission, in software and hardware.
+     *
+     * The UID discovery arbitration needs this: a node that loses arbitration
+     * must not let the peripheral re-send its stale reply into the next search
+     * round, where it would answer a question that was never asked.
+     */
+    void abort_pending_tx() {
+        tx_r = tx_w;                                          // Discard the software ring
+        if (is_initialized) {
+            // Cancel every one of the three hardware TX FIFO buffers.
+            HAL_FDCAN_AbortTxRequest(&hfdcan, FDCAN_TX_BUFFER0 | FDCAN_TX_BUFFER1 | FDCAN_TX_BUFFER2);
+        }
+    }
+
+    /**
+     * @brief Reconfigure the link and restart the peripheral.
+     *
+     * Bit timing and the frame format can only change while the controller is
+     * in initialization mode, so the peripheral is torn down and rebuilt. The
+     * acceptance filters are reinstalled from the stored node address.
+     *
+     * @param arb_bps  Arbitration bit rate [bps].
+     * @param data_bps Data-phase bit rate [bps] (ignored in classic mode).
+     * @param fd       true for CAN-FD with bit-rate switching, false for classic CAN 2.0A.
+     * @param loopback true to bring the controller up in INTERNAL LOOPBACK: it
+     *                 receives everything it transmits and needs no second node
+     *                 to acknowledge it. Bench use only - on a real bus a single
+     *                 node gets no acknowledgement, drives its transmit error
+     *                 counter up and ends up bus-off, so loopback is the only
+     *                 way to exercise the stack with nothing else connected.
+     * @return true when the link came back up.
+     */
+    bool configure_link(uint32_t arb_bps, uint32_t data_bps, bool fd, bool loopback = false) {
+        baudrate_classic = arb_bps;   // New arbitration rate
+        baudrate_fd = data_bps;       // New data-phase rate
+        fd_mode = fd;                 // New frame format
+        mode = loopback ? CANMode::INTERNAL_LOOPBACK : CANMode::NORMAL;
+        // Automatic retransmission stays ON. Losing arbitration is the normal
+        // case on a shared bus, and with DAR set every such frame would be
+        // dropped instead of retried - command and response traffic would go
+        // missing whenever two nodes talked at once. The one place that needs
+        // no-retry semantics is the discovery arbitration, and that is handled
+        // exactly where it matters by aborting the pending frame before the
+        // next reply (see abort_pending_tx).
+        auto_retry_enabled = true;
+        delay_comp_enabled = true;    // Mandatory at the FD data rate
+        return init();                // Tear down and rebuild
+    }
+
+    /** @brief true when the link currently runs CAN-FD frames. */
+    bool is_fd_mode() const { return fd_mode; }
+
+    /** @brief Configured arbitration bit rate [bps]. */
+    uint32_t get_arb_bitrate() const { return baudrate_classic; }
+
+    /** @brief Configured data-phase bit rate [bps]. */
+    uint32_t get_data_bitrate() const { return baudrate_fd; }
+
+    /** @brief Number of bus-off recoveries started since boot. */
+    volatile uint32_t bus_off_events = 0;
+
 private:
     /** CAN operating modes (subset used by init()). */
     enum class CANMode : uint8_t {
@@ -196,6 +418,58 @@ private:
         return (n == 5U) ? 6U : ((n == 7U) ? 8U : n);  // 5->6, 7->8
     }
 
+    /**
+     * @brief (Re)install the four acceptance filter slots.
+     *
+     * Standard filters may be reconfigured while the controller is running
+     * (the HAL accepts state READY and BUSY), so a node address change does
+     * not require a link restart.
+     *
+     * @return true when every slot was accepted.
+     */
+    bool apply_filters() {
+        FDCAN_FilterTypeDef flt = {0};                     // Reused slot descriptor
+        flt.IdType = FDCAN_STANDARD_ID;                    // 11-bit identifiers only
+
+        // Slot 0: network management block, always accepted.
+        flt.FilterIndex = 0U;
+        flt.FilterType = FDCAN_FILTER_RANGE;
+        flt.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+        flt.FilterID1 = 0x100U;
+        flt.FilterID2 = 0x10FU;
+        if (HAL_FDCAN_ConfigFilter(&hfdcan, &flt) != HAL_OK) {
+            return false;
+        }
+
+        // Slot 1: real-time setpoints for this node plus the broadcast address.
+        flt.FilterIndex = 1U;
+        flt.FilterType = FDCAN_FILTER_DUAL;
+        flt.FilterConfig = (node_id_ != 0U) ? FDCAN_FILTER_TO_RXFIFO0 : FDCAN_FILTER_DISABLE;
+        flt.FilterID1 = 0x200U + node_id_;
+        flt.FilterID2 = 0x2FFU;
+        if (HAL_FDCAN_ConfigFilter(&hfdcan, &flt) != HAL_OK) {
+            return false;
+        }
+
+        // Slot 2: request channel for this node plus the broadcast address.
+        flt.FilterIndex = 2U;
+        flt.FilterType = FDCAN_FILTER_DUAL;
+        flt.FilterConfig = (node_id_ != 0U) ? FDCAN_FILTER_TO_RXFIFO0 : FDCAN_FILTER_DISABLE;
+        flt.FilterID1 = 0x300U + node_id_;
+        flt.FilterID2 = 0x3FFU;
+        if (HAL_FDCAN_ConfigFilter(&hfdcan, &flt) != HAL_OK) {
+            return false;
+        }
+
+        // Slot 3: promiscuous monitoring, only for bus analysis / debugging.
+        flt.FilterIndex = 3U;
+        flt.FilterType = FDCAN_FILTER_RANGE;
+        flt.FilterConfig = promiscuous_ ? FDCAN_FILTER_TO_RXFIFO0 : FDCAN_FILTER_DISABLE;
+        flt.FilterID1 = 0x000U;
+        flt.FilterID2 = 0x7FFU;
+        return HAL_FDCAN_ConfigFilter(&hfdcan, &flt) == HAL_OK;
+    }
+
     /** @brief Free slots in the TX frame ring. */
     uint8_t tx_free() const {
         return static_cast<uint8_t>(TX_FRAMES - 1U - ((tx_w - tx_r) & TX_MASK));
@@ -205,7 +479,7 @@ private:
     void tx_pump() {
         while (tx_r != tx_w) {                       // While frames queued
             const TxFrame& f = tx_ring[tx_r];        // Oldest queued frame
-            if (!send_frame(f.id, f.payload, f.n * CHUNK_SIZE)) {
+            if (!send_frame(f.id, f.payload, static_cast<uint8_t>(f.n * CHUNK_SIZE))) {
                 break;                               // FIFO full: retry next update()
             }
             tx_r = (tx_r + 1U) & TX_MASK;            // Release the frame slot
@@ -239,17 +513,32 @@ private:
             const uint32_t id = hdr.Identifier;  // Frame identifier
             const uint8_t len =
                 dlc_lut[hdr.DataLength & 0x0FU]; // Payload bytes (DLC table)
-            const uint8_t count = len / CHUNK_SIZE;  // Chunks in this frame
+            // A frame shorter than one chunk still carries a whole message
+            // (network management uses 1..7 byte frames); it becomes ONE
+            // zero-padded slot whose recorded length is the real DLC. Dropping
+            // such frames - which the plain len/8 chunk count did - made every
+            // short protocol frame invisible to the application.
+            const uint8_t count = (len < CHUNK_SIZE) ? 1U : (len / CHUNK_SIZE);
             for (uint8_t c = 0; c < count; c++) {    // Unpack every chunk
                 const uint8_t next = (rx_w + 1U) & RX_MASK;
                 if (next == rx_r) {              // Ring full: drop the burst
                     dropped += static_cast<uint32_t>(count - c);
                     return;
                 }
-                rx_ids[rx_w] = static_cast<uint8_t>(id & 0xFFU);  // ID byte
-                std::memcpy(&rx_data[static_cast<uint16_t>(rx_w) * CHUNK_SIZE],
-                            &fbuf[static_cast<uint16_t>(c) * CHUNK_SIZE],
-                            CHUNK_SIZE);         // Payload into the slot
+                // Store the WHOLE 11-bit identifier. Truncating it to a byte
+                // used to collapse every protocol channel onto the same value
+                // (0x300+n, 0x400+n and 0x600+n all alias to n), which made
+                // any identifier-addressed protocol impossible to decode.
+                rx_ids[rx_w] = static_cast<uint16_t>(id & 0x7FFU);
+                uint8_t* slot = &rx_data[static_cast<uint16_t>(rx_w) * CHUNK_SIZE];
+                if (len < CHUNK_SIZE) {          // Short frame: zero-pad the tail
+                    std::memset(slot, 0, CHUNK_SIZE);
+                    std::memcpy(slot, fbuf, len);
+                    rx_lens[rx_w] = len;         // Remember the real DLC
+                } else {                         // Full chunk out of the frame
+                    std::memcpy(slot, &fbuf[static_cast<uint16_t>(c) * CHUNK_SIZE], CHUNK_SIZE);
+                    rx_lens[rx_w] = CHUNK_SIZE;
+                }
                 __DMB();                         // Payload before index publish
                 rx_w = (rx_w + 1U) & RX_MASK;    // Commit the slot
                 rx_count++;
@@ -311,6 +600,11 @@ private:
     bool fd_mode = true;                  // Link format (FD-BRS vs classic)
     bool is_initialized = false;
     bool is_enabled = true;
+    uint8_t node_id_ = 0;                 // Node address the filters are bound to
+    bool promiscuous_ = false;            // Accept every identifier (bus monitoring)
+
+    /** Standard filter slots reserved in the FDCAN message RAM. */
+    static constexpr uint32_t FILTER_SLOTS = 4U;
 
     /** Bit timing parameters for one CAN bit (nominal or data phase). */
     struct CANTiming {
@@ -355,8 +649,9 @@ private:
     volatile uint8_t tx_r = 0;            // Consumer index (update)
 
     // ---- RX chunk ring (SPSC: producer = ISR, consumer = read) --------------
-    uint8_t rx_ids[RX_CHUNKS];            // Identifier per chunk slot
+    uint16_t rx_ids[RX_CHUNKS];           // Full 11-bit identifier per chunk slot
     uint8_t rx_data[RX_CHUNKS * CHUNK_SIZE];  // Payload slots (flat SoA)
+    uint8_t rx_lens[RX_CHUNKS];           // Real payload length per slot (1..8)
     volatile uint8_t rx_w = 0;            // Producer index (ISR)
     volatile uint8_t rx_r = 0;            // Consumer index (read)
 
@@ -402,7 +697,7 @@ private:
         hfdcan.Init.DataSyncJumpWidth = tf.sjw;
         hfdcan.Init.DataTimeSeg1 = tf.tseg1;
         hfdcan.Init.DataTimeSeg2 = tf.tseg2;
-        hfdcan.Init.StdFiltersNbr = 1U;         // Single accept-all filter
+        hfdcan.Init.StdFiltersNbr = FILTER_SLOTS;  // Node filtering needs four slots
         hfdcan.Init.ExtFiltersNbr = 0U;
         hfdcan.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
 
@@ -426,19 +721,17 @@ private:
             HAL_FDCAN_EnableTxDelayCompensation(&hfdcan);
         }
 
-        // Single accept-all standard filter routed to RX FIFO 0.
-        FDCAN_FilterTypeDef flt = {0};
-        flt.IdType = FDCAN_STANDARD_ID;
-        flt.FilterIndex = 0U;
-        flt.FilterType = FDCAN_FILTER_RANGE;
-        flt.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-        flt.FilterID1 = 0x000U;
-        flt.FilterID2 = 0x7FFU;
-        if (HAL_FDCAN_ConfigFilter(&hfdcan, &flt) != HAL_OK) {
+        // Acceptance filters for the currently bound node address. Anything
+        // that does not match a slot is dropped by hardware, so a busy bus
+        // costs this node no interrupts at all.
+        if (!apply_filters()) {
             error_count++;
             return false;
         }
-        if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan, FDCAN_ACCEPT_IN_RX_FIFO0,
+        // Non-matching standard frames are REJECTED (they used to be accepted,
+        // which defeated the filters entirely); extended and remote frames are
+        // rejected outright since the protocol uses neither.
+        if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan, FDCAN_REJECT,
                                          FDCAN_REJECT, FDCAN_FILTER_REMOTE,
                                          FDCAN_FILTER_REMOTE) != HAL_OK) {
             error_count++;

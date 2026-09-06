@@ -84,6 +84,15 @@ public:
     bool is_enabled() const { return enabled_; }
     bool is_paused() const { return paused_; }
 
+    /// @brief Segments queued ahead of the one currently executing.
+    size_t queued() const { return buf_.future_count(); }
+
+    /// @brief Free slots the queue can still accept without evicting history.
+    size_t free_slots() const { return buf_.free_count(); }
+
+    /// @brief Numeric MotionMode of the executing segment; 0xFF marks the HALT state.
+    uint8_t active_mode_code() const { return static_cast<uint8_t>(base_mode_); }
+
     void set_enable(bool en) { enabled_ = en; }
     bool set_pause(bool p) {
         paused_ = p;

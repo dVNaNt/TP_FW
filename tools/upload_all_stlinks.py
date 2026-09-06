@@ -13,8 +13,9 @@
  *    Python program with the firmware (.elf) path as an argument.
  * 2. As a standalone program it:
  *    - Detects all present ST-Link USB devices (VID 0x0483, known ST-LINK
- *      PIDs) through the Windows PnP subsystem and extracts their serial
- *      numbers.
+ *      PIDs) and extracts their serial numbers. Enumeration is per-platform:
+ *      the Windows PnP subsystem (PowerShell), the macOS I/O registry
+ *      (ioreg) or the Linux USB sysfs tree.
  *    - For every detected probe, launches OpenOCD from the PlatformIO
  *      tool-openocd package with "hla_serial <serial>" to bind the instance
  *      to that specific probe, then programs, verifies and resets the target.
@@ -27,6 +28,7 @@
  *   python tools/upload_all_stlinks.py --list
  *
  * Dependencies: OpenOCD (shipped with PlatformIO tool-openocd package).
+ * Supported hosts: Windows, macOS and Linux.
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
@@ -35,7 +37,7 @@
 import argparse                                     # Command line parsing (standalone mode)
 import os                                           # Path manipulation
 import re                                           # Serial number validation
-import subprocess                                   # Launch PowerShell and OpenOCD
+import subprocess                                   # Launch the USB enumerator and OpenOCD
 import sys                                          # Exit codes and interpreter path
 import threading                                    # Lock for interleaved console output
 from concurrent.futures import ThreadPoolExecutor   # Parallel flashing per probe
@@ -57,16 +59,69 @@ STLINK_PIDS = (
 
 _print_lock = threading.Lock()                      # Serializes console output of threads
 
+# Host-platform discriminators: every platform-specific branch keys off these.
+_IS_WINDOWS = sys.platform.startswith("win")        # Windows (PowerShell PnP enumeration)
+_IS_MACOS = sys.platform == "darwin"                # macOS (ioreg enumeration)
+_IS_LINUX = sys.platform.startswith("linux")        # Linux (USB sysfs enumeration)
+
+# Numeric form of the ST-LINK PIDs, used by the ioreg/sysfs backends which
+# report idProduct as a decimal (ioreg) or lowercase-hex (sysfs) value.
+_STLINK_PIDS_INT = frozenset(int(pid, 16) for pid in STLINK_PIDS)
+_STLINK_VID_INT = 0x0483                            # STMicroelectronics vendor ID
+
+
+# ---------------------------------------------------------------------------
+# Toolchain path resolution
+# ---------------------------------------------------------------------------
+def openocd_exe_name() -> str:
+    """OpenOCD executable file name for the running host.
+
+    @return "openocd.exe" on Windows, "openocd" everywhere else
+    """
+    return "openocd.exe" if _IS_WINDOWS else "openocd"
+
+
+def resolve_openocd(package_dir: str) -> str:
+    """Build the path to the OpenOCD binary inside a tool-openocd package.
+
+    @param package_dir Root of the PlatformIO tool-openocd package
+    @return Absolute path to the platform-appropriate OpenOCD executable
+    """
+    return os.path.join(package_dir, "bin", openocd_exe_name())
+
+
+def resolve_scripts_dir(openocd: str) -> str:
+    """Locate the OpenOCD scripts (.cfg search path) for this package layout.
+
+    The directory moved between packaging variants: Windows builds keep it
+    next to bin/ ("<pkg>/scripts"), the macOS/Linux PlatformIO builds nest it
+    one level deeper ("<pkg>/openocd/scripts") and distro builds install it
+    under share/. Probing beats hardcoding any single one of them.
+
+    @param openocd Path to the OpenOCD executable
+    @return First existing scripts directory, or the legacy guess as fallback
+    """
+    package_dir = os.path.dirname(os.path.dirname(os.path.abspath(openocd)))
+    candidates = (
+        os.path.join(package_dir, "openocd", "scripts"),        # PlatformIO macOS/Linux layout
+        os.path.join(package_dir, "scripts"),                   # PlatformIO Windows layout
+        os.path.join(package_dir, "share", "openocd", "scripts"),  # Distro/source install layout
+    )
+    for candidate in candidates:                        # First hit wins
+        if os.path.isdir(candidate):                    # Directory must actually exist
+            return os.path.normpath(candidate)
+    return os.path.normpath(candidates[0])              # Nothing found: report the expected one
+
 
 # ---------------------------------------------------------------------------
 # ST-Link enumeration
 # ---------------------------------------------------------------------------
-def list_stlink_serials() -> list:
-    """Enumerate all currently connected ST-Link probes.
+def _serials_windows() -> list:
+    """Enumerate ST-Link probes through the Windows PnP device tree.
 
-    Uses the Windows PnP device tree via PowerShell: queries present USB
-    devices with VID 0483 and one of the known ST-LINK PIDs, then extracts
-    the serial number (last segment of the InstanceId).
+    Queries present USB devices with VID 0483 and one of the known ST-LINK
+    PIDs via PowerShell, then extracts the serial number (last segment of
+    the InstanceId).
 
     @return List of serial number strings, one per detected probe
     """
@@ -94,11 +149,119 @@ def list_stlink_serials() -> list:
         if not line:                                    # Skip empty lines
             continue
         serial = line.rsplit("\\", 1)[-1]               # Serial = last DeviceID segment
-        if not re.match(r"^[0-9A-Za-z]+$", serial):     # Sanity check on serial format
-            continue
         if serial not in serials:                       # Skip duplicates
             serials.append(serial)
     return serials
+
+
+def _serials_macos() -> list:
+    """Enumerate ST-Link probes through the macOS I/O registry.
+
+    "ioreg -p IOUSB -l" prints the USB device tree; every device node starts
+    with a "+-o " line and is followed by its property block. Properties are
+    therefore accumulated per node and evaluated when the next node (or EOF)
+    is reached.
+
+    @return List of serial number strings, one per detected probe
+    """
+    try:
+        result = subprocess.run(
+            ["ioreg", "-p", "IOUSB", "-l", "-w", "0"],
+            capture_output=True, text=True, check=True, timeout=30)
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"[ERROR] Cannot enumerate USB devices: {exc}")
+        return []
+
+    serials = []                                        # Deduplicated serial list
+    node = {}                                           # Properties of the node being parsed
+
+    def commit(props: dict) -> None:
+        """Adopt the parsed node when it is an ST-Link with a usable serial."""
+        if props.get("vid") != _STLINK_VID_INT:         # Not STMicroelectronics
+            return
+        if props.get("pid") not in _STLINK_PIDS_INT:    # Not a known ST-LINK PID
+            return
+        serial = props.get("serial")                    # Probe serial as reported by ioreg
+        if serial and serial not in serials:            # Keep the first occurrence only
+            serials.append(serial)
+
+    for line in result.stdout.splitlines():             # Walk the flattened device tree
+        if "+-o " in line:                              # A new device node begins here
+            commit(node)                                # Evaluate the node that just ended
+            node = {}                                   # Start collecting the new one
+            continue
+        match = re.search(r'"idVendor"\s*=\s*(\d+)', line)
+        if match:                                       # Vendor ID (decimal in ioreg)
+            node["vid"] = int(match.group(1))
+            continue
+        match = re.search(r'"idProduct"\s*=\s*(\d+)', line)
+        if match:                                       # Product ID (decimal in ioreg)
+            node["pid"] = int(match.group(1))
+            continue
+        match = re.search(r'"USB Serial Number"\s*=\s*"([^"]+)"', line)
+        if match:                                       # Probe serial number string
+            node["serial"] = match.group(1)
+    commit(node)                                        # Evaluate the final node at EOF
+    return serials
+
+
+def _serials_linux() -> list:
+    """Enumerate ST-Link probes through the Linux USB sysfs tree.
+
+    Every USB device exposes idVendor/idProduct/serial as plain files under
+    /sys/bus/usb/devices/<dev>/, so no external tool is required.
+
+    @return List of serial number strings, one per detected probe
+    """
+    serials = []                                        # Deduplicated serial list
+    root = "/sys/bus/usb/devices"                       # Sysfs USB device root
+    try:
+        entries = sorted(os.listdir(root))              # One directory per USB device/interface
+    except OSError as exc:
+        print(f"[ERROR] Cannot enumerate USB devices: {exc}")
+        return []
+
+    def read_attr(device: str, name: str) -> str:
+        """Read one sysfs attribute, returning an empty string when absent."""
+        try:
+            with open(os.path.join(root, device, name), encoding="utf-8") as handle:
+                return handle.read().strip()
+        except OSError:
+            return ""                                   # Interface nodes lack these attributes
+
+    for entry in entries:                               # Probe every enumerated device
+        vid = read_attr(entry, "idVendor")              # Vendor ID (lowercase hex)
+        if not vid or int(vid, 16) != _STLINK_VID_INT:  # Not STMicroelectronics
+            continue
+        pid = read_attr(entry, "idProduct")             # Product ID (lowercase hex)
+        if not pid or int(pid, 16) not in _STLINK_PIDS_INT:  # Not a known ST-LINK PID
+            continue
+        serial = read_attr(entry, "serial")             # Probe serial number string
+        if serial and serial not in serials:            # Keep the first occurrence only
+            serials.append(serial)
+    return serials
+
+
+def list_stlink_serials() -> list:
+    """Enumerate all currently connected ST-Link probes on any supported host.
+
+    Dispatches to the platform-specific backend and filters the result to
+    serials OpenOCD can accept as an "hla_serial" argument.
+
+    @return List of serial number strings, one per detected probe
+    """
+    if _IS_WINDOWS:                                     # Windows: PowerShell PnP query
+        serials = _serials_windows()
+    elif _IS_MACOS:                                     # macOS: I/O registry dump
+        serials = _serials_macos()
+    elif _IS_LINUX:                                     # Linux: USB sysfs tree
+        serials = _serials_linux()
+    else:                                               # Unknown host: fail loudly, not silently
+        print(f"[ERROR] Unsupported host platform: {sys.platform}")
+        return []
+
+    # Sanity check on the serial format, applied uniformly to every backend.
+    return [s for s in serials if re.match(r"^[0-9A-Za-z]+$", s)]
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +322,7 @@ def run(openocd: str, target_cfg: str, firmware: str, jobs: int = 0) -> int:
         return 1
     if not os.path.isfile(openocd):                     # OpenOCD binary must exist
         print(f"[ERROR] OpenOCD not found: {openocd}")
+        print("        Install it with: pio pkg install --tool tool-openocd")
         return 1
 
     serials = list_stlink_serials()                     # Discover connected probes
@@ -168,8 +332,7 @@ def run(openocd: str, target_cfg: str, firmware: str, jobs: int = 0) -> int:
         return 1
 
     print(f"Detected {len(serials)} ST-Link probe(s): " + ", ".join(serials))
-    script_dir = os.path.normpath(                      # OpenOCD scripts search path
-        os.path.join(os.path.dirname(openocd), "..", "scripts"))
+    script_dir = resolve_scripts_dir(openocd)           # OpenOCD scripts search path (layout-dependent)
 
     # Flash every probe concurrently; each thread owns one OpenOCD process
     with ThreadPoolExecutor(max_workers=jobs or len(serials)) as pool:
@@ -193,7 +356,7 @@ def pio_post_hook(env) -> None:
     """
     platform = env.PioPlatform()                        # Access PlatformIO platform
     openocd_dir = platform.get_package_dir("tool-openocd")  # Locate tool-openocd package
-    openocd = os.path.join(openocd_dir, "bin", "openocd.exe")  # Windows binary path
+    openocd = resolve_openocd(openocd_dir)              # Platform-appropriate binary path
     # Target config from the board manifest (e.g. stm32g4x for G431)
     target = env.BoardConfig().get("debug.openocd_target", "stm32g4x")
     script = os.path.join(env.subst("$PROJECT_DIR"),    # Absolute path of this script
@@ -241,8 +404,8 @@ def main() -> int:
         base = os.environ.get(                          # PIO home dir or ~/.platformio
             "PLATFORMIO_HOME_DIR",
             os.path.join(os.path.expanduser("~"), ".platformio"))
-        args.openocd = os.path.join(
-            base, "packages", "tool-openocd", "bin", "openocd.exe")
+        args.openocd = resolve_openocd(
+            os.path.join(base, "packages", "tool-openocd"))
     return run(args.openocd, args.target, args.firmware, args.jobs)
 
 
