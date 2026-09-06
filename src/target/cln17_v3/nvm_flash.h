@@ -51,15 +51,31 @@
 #define NVM_USER_SECTION_SIZE 2048UL
 #endif
 
+/**
+ * Size of the node-configuration partition in bytes (default: one 2 KB page).
+ *
+ * Deliberately separate from the user-data partition: the motor-profile engine
+ * appends a record per save and ERASES THE WHOLE PARTITION when it runs out of
+ * slots. A node address, communication settings and protection limits sharing
+ * that partition would be wiped by an unrelated profile save - and a drive
+ * that forgets its own bus address after ~60 motor saves is a field failure,
+ * not an inconvenience. Its own partition makes that impossible.
+ */
+#ifndef NVM_CONFIG_SECTION_SIZE
+#define NVM_CONFIG_SECTION_SIZE 2048UL
+#endif
+
 /** Total EEPROM-emulation region: sum of all declared sections. */
-#define NVM_TOTAL_SIZE ((uint32_t)(NVM_CALIB_SECTION_SIZE + NVM_USER_SECTION_SIZE))
+#define NVM_TOTAL_SIZE \
+    ((uint32_t)(NVM_CALIB_SECTION_SIZE + NVM_USER_SECTION_SIZE + NVM_CONFIG_SECTION_SIZE))
 
 /** Base address of the whole EEPROM-emulation region (end of flash minus total). */
 #define EEPROM_BASE ((uint32_t)FLASH_BASE + (uint32_t)FLASH_SIZE - (uint32_t)NVM_TOTAL_SIZE)
 
 /** Offset of each section inside the EEPROM-emulation region. */
-#define NVM_CALIB_SECTION_OFFSET 0UL
-#define NVM_USER_SECTION_OFFSET  ((uint32_t)NVM_CALIB_SECTION_SIZE)
+#define NVM_CALIB_SECTION_OFFSET  0UL
+#define NVM_USER_SECTION_OFFSET   ((uint32_t)NVM_CALIB_SECTION_SIZE)
+#define NVM_CONFIG_SECTION_OFFSET ((uint32_t)(NVM_CALIB_SECTION_SIZE + NVM_USER_SECTION_SIZE))
 
 /**
  * @class FlashG4_LL
@@ -347,6 +363,8 @@ public:
     static constexpr uint32_t calib_section_size() { return NVM_CALIB_SECTION_SIZE; }
     /** Size in bytes of the user-data partition. */
     static constexpr uint32_t user_section_size()  { return NVM_USER_SECTION_SIZE; }
+    /** Size in bytes of the node-configuration partition. */
+    static constexpr uint32_t config_section_size() { return NVM_CONFIG_SECTION_SIZE; }
     /** Total size in bytes of the EEPROM-emulation region. */
     static constexpr uint32_t total_size()         { return NVM_TOTAL_SIZE; }
 
@@ -390,6 +408,29 @@ public:
     /** Reads one 32-bit word inside the user-data partition only. */
     static bool user_read(uint32_t addr, int32_t* value) {
         return read_section(NVM_USER_SECTION_OFFSET, NVM_USER_SECTION_SIZE, addr, value);
+    }
+
+    // ========================================================================
+    // Node-configuration partition callbacks (FlashEEPROM signature-compatible).
+    // Addresses are OFFSETS INSIDE the configuration section
+    // [0, NVM_CONFIG_SECTION_SIZE). Holds the node address, link settings,
+    // protection limits and telemetry configuration written by the CAN
+    // protocol layer - never touched by the motor-profile engine.
+    // ========================================================================
+
+    /** Erases only the flash pages belonging to the configuration partition. */
+    static bool config_erase() {
+        return erase_region(NVM_CONFIG_SECTION_OFFSET, NVM_CONFIG_SECTION_SIZE);
+    }
+
+    /** Programs one 32-byte row inside the configuration partition only. */
+    static bool config_write(uint32_t addr, const uint32_t data[8]) {
+        return write_section(NVM_CONFIG_SECTION_OFFSET, NVM_CONFIG_SECTION_SIZE, addr, data);
+    }
+
+    /** Reads one 32-bit word inside the configuration partition only. */
+    static bool config_read(uint32_t addr, int32_t* value) {
+        return read_section(NVM_CONFIG_SECTION_OFFSET, NVM_CONFIG_SECTION_SIZE, addr, value);
     }
 
     // ========================================================================

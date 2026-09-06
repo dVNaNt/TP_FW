@@ -66,6 +66,8 @@ static uint16_t line_len = 0;
  * @brief One-time initialization: bootloader button, motor stack, CAN-FD.
  */
 inline void run_setup() {
+    SerialUSB.begin();  // USB CDC console (baud ignored by CDC); main.cpp no
+                        // longer does this - see the note on setup() there.
     BOOT::init_button();  // SW1 (PC14) -> 3 s hold enters the USB DFU bootloader
 
     // Power-rail / USB stack stabilization; SW1 is polled meanwhile, so

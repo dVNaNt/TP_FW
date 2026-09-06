@@ -420,7 +420,19 @@ public:
      * automatically: appended into free flash space, or written from offset
      * zero after erasing the full region when no space remains.
      */
-    void calibrate() {
+    /**
+     * @brief "calibrate" command: acquire a usable angle table.
+     *
+     * @param force Skip the stored-table fast path and run the physical cycle.
+     *
+     * Without @p force a drive whose profile is already loaded reuses its saved
+     * table and never turns the shaft, which is the right default: re-sweeping
+     * a known motor on every boot would be slow and would move machinery for no
+     * reason. It is the wrong behaviour when the mechanics have changed - a new
+     * coupling, a moved magnet - because there is otherwise no way to ask for a
+     * fresh measurement short of erasing the profile.
+     */
+    void calibrate(bool force = false) {
         if (!is_motor_connected()) {
             // No motor identified -> nothing to calibrate.
             TP_LOG("CALIBRATION: motor not connected - skipped");
@@ -435,7 +447,10 @@ public:
         // commits (CheckMemory sets it back), so no profile record with
         // stale/dummy mech data can be written while the cycle is running.
         motor.set_mech_calibrated(false);
-        if (motor.is_loaded()) {
+        if (force) {
+            TP_LOG("CALIBRATION: forced - ignoring the stored table");
+        }
+        if (!force && motor.is_loaded()) {
             TP_LOG_VAL("CALIBRATION: trying stored table, id = ", (long)motor.get_cal_id());
             ptab->begin_load(motor.get_cal_id());
             loaded_from_flash = false;

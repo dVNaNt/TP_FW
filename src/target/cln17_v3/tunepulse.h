@@ -119,6 +119,24 @@ void end_curnt_cal() {
 }
 
 /**
+ * Longest the bring-up will wait for the current-sense offset calibration [ms].
+ *
+ * The wait used to be unbounded. It is advanced only from interrupt context, so
+ * anything that stops those interrupts - no motor, a dead ADC trigger, a
+ * mis-set timer - hung the firmware here forever: no console command, no CAN,
+ * no protocol, nothing to diagnose with. A bounded wait fails loudly and lets
+ * the communication stack come up so the drive can be interrogated.
+ */
+#ifndef TP_CURRENT_CAL_TIMEOUT_MS
+#define TP_CURRENT_CAL_TIMEOUT_MS 10000U
+#endif
+
+/** Longest the bring-up will wait for the motor angle calibration [ms]. */
+#ifndef TP_MOTOR_CAL_TIMEOUT_MS
+#define TP_MOTOR_CAL_TIMEOUT_MS 60000U
+#endif
+
+/**
  * @brief Full sequential bring-up of the motor-control stack.
  *
  * Initialization order (each step logs progress over SerialUSB):
@@ -143,13 +161,15 @@ void end_curnt_cal() {
  * 13. Protection limits        - DAC threshold callbacks registered, then
  *     software limit values applied (see note below about log text mismatch).
  * 14. Fault callbacks          - OC/ext/UV faults force Hi-Z, OV forces all-low.
- * 15. Current-sense offset calibration - blocking wait until complete.
- * 16. Motor angle calibration  - blocking wait until MotorStatus::Success or
- *     MotorStatus::CalibError.
+ * 15. Current-sense offset calibration - bounded wait (TP_CURRENT_CAL_TIMEOUT_MS).
+ * 16. Motor angle calibration  - bounded wait until MotorStatus::Success,
+ *     MotorStatus::CalibError or TP_MOTOR_CAL_TIMEOUT_MS.
  *
- * @note This function blocks until both calibrations finish; it must not be
- *       called before the scheduler/interrupts required by those calibrations
- *       are active.
+ * @note This function blocks while the calibrations run, so it must not be
+ *       called before the interrupts that advance them are active. Both waits
+ *       are BOUNDED: on timeout the drive continues de-energized rather than
+ *       hanging, so the console and the CAN protocol still come up and can
+ *       report what failed.
  */
 inline void tunepulse_init() {
     delay(100);
@@ -293,15 +313,23 @@ inline void tunepulse_init() {
     TP.driver_phy.current.calibrate();
     SerialUSB.println("Start current calibration");
 
-    // Blocking wait for completion. Completion is expected to be signalled
-    // from the ADC/interrupt context; the periodic tick() call is disabled
-    // here, so if no interrupt advances the calibration state machine this
-    // loop will spin forever (see CODE_ISSUES.md).
+    // Bounded wait for completion. Completion is signalled from the ADC
+    // interrupt; if no interrupt ever advances the state machine the drive is
+    // broken, and hanging here forever would hide that behind a dead board.
+    // Timing out instead leaves the phases de-energized and lets setup()
+    // finish, so the console and the CAN protocol come up and can report why.
+    const uint32_t isense_t0 = millis();
     while (TP.driver_phy.current.is_calibrated() == false) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
+        if ((millis() - isense_t0) > TP_CURRENT_CAL_TIMEOUT_MS) {
+            SerialUSB.println("Current sensing calibration TIMED OUT - continuing de-energized");
+            break;
+        }
     }
 
-    SerialUSB.println("Current sensing setup complete");
+    if (TP.driver_phy.current.is_calibrated()) {
+        SerialUSB.println("Current sensing setup complete");
+    }
 
     // Motor (electrical-angle) calibration:
     // sets the driver status to DriverCalibration and starts the automatic
@@ -312,13 +340,19 @@ inline void tunepulse_init() {
     TP.current_driver.setup_status.set_driver_status(OperationStatus::DriverCalibration);
     TP.current_driver.start_motor_calibration();
 
+    const uint32_t motor_t0 = millis();
     while (TP.current_driver.get_motor_status() != MotorStatus::Success) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
         if (TP.current_driver.get_motor_status() == MotorStatus::CalibError) {
-          
-                SerialUSB.println("Motor calibration Error");
-                break;
-            
+            SerialUSB.println("Motor calibration Error");
+            break;
+        }
+        if ((millis() - motor_t0) > TP_MOTOR_CAL_TIMEOUT_MS) {
+            // Same reasoning as the current-sense wait: a drive that cannot
+            // identify its motor (none connected, open phase, dead encoder) is
+            // far more useful reporting that over the protocol than hanging.
+            SerialUSB.println("Motor calibration TIMED OUT - continuing de-energized");
+            break;
         }
     }
 }
