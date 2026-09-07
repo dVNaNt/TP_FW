@@ -286,9 +286,8 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
             ((uint32_t)SPI1_RX_BUF[3] << 5)  |
             ((uint32_t)SPI1_RX_BUF[4] >> 3);
         POSITION_ENCODER_MT_RAW <<= 11; // Left-align into 32-bit Q0.32 representation
+        TP.encoder.set_fault(SPI1_RX_BUF[4] & 0b00000111);
 
-        POSITION_MT_STATUS = (uint8_t)(SPI1_RX_BUF[4] & 0x07U); // Status bits: overspeed / weak field / undervoltage
-        POSITION_MT_CRC    = SPI1_RX_BUF[5];                    // Received CRC-8 for diagnostics
 #else
         // TLE5012B: 15-bit left-aligned angle from RX[2..3]
         POSITION_ENCODER_TLE = ((uint16_t)SPI1_RX_BUF[2] << 9) | ((uint16_t)SPI1_RX_BUF[3] << 1);
