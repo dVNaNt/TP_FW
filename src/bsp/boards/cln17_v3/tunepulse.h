@@ -36,6 +36,10 @@
 /**
  * @brief Global motor-control application object for this board.
  *
+ * DEFINED in board.cpp, the board's single translation unit, so that exactly
+ * one object file owns it. Declared here because nearly every board header and
+ * the interrupt glue refer to it.
+ *
  * Constructed with board-specific constants from the target layer:
  * - PWM_TIMER_FREQ_HZ : PWM carrier frequency in Hz (e.g. 20 kHz).
  * - PWM_TIMER_PERIOD  : PWM timer auto-reload period (counts), defines the
@@ -45,12 +49,7 @@
  * - IA/IB/IC_MAX_CURRENT_FS : ADC full-scale values corresponding to the
  *                       maximum measurable phase currents for phases A/B/C.
  */
-TunePulseHeart TP(PWM_TIMER_FREQ_HZ,
-                  PWM_TIMER_PERIOD,
-                  SYS_PARAMS::MAX_SUPPLY_FS,
-                  SYS_PARAMS::IA_MAX_CURRENT_FS,
-                  SYS_PARAMS::IB_MAX_CURRENT_FS,
-                  SYS_PARAMS::IC_MAX_CURRENT_FS);
+extern TunePulseHeart TP;
 
 #include "bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
 #include "interrupt_setup.h"  // ISR glue: ADC / encoder / comparators -> TP

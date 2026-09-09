@@ -217,24 +217,7 @@ inline void poll() {
  * window and record the press timestamp. Time between the edges is measured
  * with one subtraction — no timers, no state machines in interrupt context.
  */
-extern "C" void EXTI15_10_IRQHandler(void) {
-    if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_14)) {
-        LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_14);
-
-        const uint32_t now = millis();
-
-        // Contact-bounce filter: ignore edges closer than DEBOUNCE_MS.
-        if ((now - BOOT::g_last_edge_ms) < BOOT::DEBOUNCE_MS) {
-            return;
-        }
-        BOOT::g_last_edge_ms = now;
-
-        // Latch the level right away: falling edge = press started.
-        BOOT::g_pressed = ((GPIOC->IDR & BOOT::BUTTON_PORT_PIN) == 0U);
-        if (BOOT::g_pressed) {
-            BOOT::g_press_start_ms = now;
-        }
-    }
-}
+// EXTI15_10_IRQHandler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln234/board.cpp) so that exactly one object file owns it.
 
 #endif  // BOOTLOADER_JUMP_CLN234_H

@@ -62,14 +62,7 @@ inline void DRV_ERR_Init() {
  *
  * The pin level is sampled directly: LOW = fault, HIGH = released.
  */
-extern "C" void EXTI1_IRQHandler(void) {
-    if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_1)) {
-        LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_1);  // Clear pending flag
-
-        // Active-low request: pin LOW = fault set, pin HIGH = clear
-        const bool is_fault = (LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_1) == 0U);
-        TP.driver_phy.set_fault().external(is_fault);
-    }
-}
+// EXTI1_IRQHandler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln234/board.cpp) so that exactly one object file owns it.
 
 #endif  // DRV_ERR_SETUP_CLN234_H

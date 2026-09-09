@@ -813,18 +813,14 @@ inline CANDriver CAN_BUS;
  *        Without this override the startup default (infinite loop) executed
  *        on the first received frame and hung the firmware.
  */
-extern "C" void FDCAN1_IT0_IRQHandler(void) {
-    HAL_FDCAN_IRQHandler(&CAN_BUS.hfdcan);
-}
+// FDCAN1_IT0_IRQHandler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
 
 /**
  * @brief HAL callback: new-message events are handled by the driver ISR.
  */
-extern "C" void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef*, uint32_t its) {
-    if ((its & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0U) {
-        CAN_BUS.on_rx_interrupt();      // Unpack FIFO into the chunk ring
-    }
-}
+// HAL_FDCAN_RxFifo0Callback: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
 
 #endif  // CAN_SETUP_CLN17V3_H
 

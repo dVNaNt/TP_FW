@@ -501,13 +501,7 @@ extern "C" void flashg4_ll_nmi_dispatch(uint32_t stacked_ctx) {
  * nothing else in this firmware uses them (no CSS/other NMI users); if that
  * ever changes, chain the other source through here or via nmi_ecc_recover().
  */
-extern "C" __attribute__((naked)) void NMI_Handler(void) {
-    __asm volatile(
-        "tst     lr, #4          \n"
-        "ite     eq              \n"
-        "mrseq   r0, msp         \n"
-        "mrsne   r0, psp         \n"
-        "b       flashg4_ll_nmi_dispatch \n");
-}
+// NMI_Handler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln234/board.cpp) so that exactly one object file owns it.
 
 #endif // FLASH_EEPROM_HW_HPP

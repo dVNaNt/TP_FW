@@ -195,12 +195,8 @@ __attribute__((always_inline, optimize("O3"))) inline void TIM1_Set_PWM_Values(
 extern void FOC_TimTrig_Callback();                // Forward declare the ultra-fast callback located in the NVIC file
 extern "C" FDCAN_HandleTypeDef* CAN_Get_Handle();  // Forward declare function to get CAN FDCAN handle
 
-extern "C" void TIM1_CC_IRQHandler(void) {  // Define the hardware interrupt vector for Capture/Compare events
-    if (TIM1->SR & TIM_SR_CC4IF) {          // Check purely if the Channel 4 (ADC trigger) interrupt flag is active
-        TIM1->SR = ~TIM_SR_CC4IF;           // Clear the interrupt flag immediately by writing 0 to its bit
-        FOC_TimTrig_Callback();             // Directly call our optimized callback, bypassing HAL completely
-    }  // End of CC4IF check
-}  // End of TIM1_CC_IRQHandler function
+// TIM1_CC_IRQHandler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
 
 inline void PWM_Init() {  // Define inline wrapper to trigger full PWM subsystem initialization
     MX_TIM1_Init();       // Execute bare-metal timer configuration

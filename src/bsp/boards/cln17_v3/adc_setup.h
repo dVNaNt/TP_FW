@@ -58,13 +58,8 @@ inline void MX_DMA_ADC1_Init(void) { // Initialize the DMA mechanism
  * @brief DMA1 Channel 5 IRQ handler
  * As requested, UNTOUCHED.
  */
-extern "C" void DMA1_Channel5_IRQHandler(void) { // Interrupt vector for DMA Channel 5
-    if (LL_DMA_IsActiveFlag_TC5(DMA1)) { // Check if the Transfer Complete flag is triggered
-        // OPTIMIZATION: Clear global flag (TC, TE, HT) in exactly 1 hardware clock cycle
-        LL_DMA_ClearFlag_GI5(DMA1); // Apply single-cycle flag clearance
-        ADC_READY_Callback(); // Trigger the main FOC mathematical loop
-    } // End of flag check
-} // End of DMA IRQ Handler
+// DMA1_Channel5_IRQHandler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
 
 /**
  * @brief Fast direct-register initialization for ADC1 and ADC2

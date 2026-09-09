@@ -260,50 +260,15 @@ inline void COMP_Set_OV_Protection_State(void) {
  * @brief COMP1/2/3 interrupt handler (shared IRQ)
  * Handles COMP1 (Phase B OC), COMP2 (Phase A OC), COMP3 (OV)
  */
-extern "C" void COMP1_2_3_IRQHandler(void) {
-    // Check COMP1 (Phase B overcurrent) - EXTI line 21
-    if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_21)) {
-        LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_21);  // Clear pending flag
-
-        TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        SerialUSB.println("B");
-    }
-
-    // Check COMP2 (Phase A overcurrent) - EXTI line 22
-    if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_22)) {
-        LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_22);  // Clear pending flag
-
-        TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        SerialUSB.println("A");
-    }
-
-    // Check COMP3 (Overvoltage) - EXTI line 29
-    if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_29)) {
-        LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_29);  // Clear pending flag
-
-        // Check if rising edge (fault) or falling edge (clear)
-        if (LL_COMP_ReadOutputLevel(COMP3) == LL_COMP_OUTPUT_LEVEL_HIGH) {
-            TP.driver_phy.set_fault().overvoltage(true);  // Set fatal overvoltage error
-        } else {
-            TP.driver_phy.set_fault().overvoltage(false);  // Clear overvoltage error
-        }
-        SerialUSB.println("V");
-    }
-}
+// COMP1_2_3_IRQHandler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln234/board.cpp) so that exactly one object file owns it.
 
 /**
  * @brief COMP4/5/6 interrupt handler (shared IRQ on STM32G474)
  * Handles COMP4 (Phase C overcurrent); COMP5/COMP6 are unused on this board
  */
-extern "C" void COMP4_5_6_IRQHandler(void) {
-    // Check COMP4 (Phase C overcurrent) - EXTI line 30
-    if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_30)) {
-        LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_30);  // Clear pending flag
-
-        TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        SerialUSB.println("C");
-    }
-}
+// COMP4_5_6_IRQHandler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln234/board.cpp) so that exactly one object file owns it.
 
 /**
  * @brief Initialize complete comparator protection system

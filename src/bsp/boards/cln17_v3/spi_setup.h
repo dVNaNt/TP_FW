@@ -248,56 +248,8 @@ static inline uint8_t Encoder_GetMTCRC() {
 // ==============================================================================
 // DMA RX COMPLETE IRQ
 // ==============================================================================
-extern "C" void DMA1_Channel1_IRQHandler(void) {
-    const uint32_t isr = DMA1->ISR;
-
-    // Transfer error: finish the SPI transaction safely.
-    if (isr & DMA_ISR_TEIF1) {
-        DMA1->IFCR = DMA_IFCR_CTEIF1 | DMA_IFCR_CGIF1; // Clear error and global flags
-
-        DMA1_Channel1->CCR &= ~DMA_CCR_EN;             // Stop RX channel
-        DMA1_Channel2->CCR &= ~DMA_CCR_EN;             // Stop TX channel
-
-        while (SPI1->SR & SPI_SR_BSY) {                // Wait for the physical SPI completion
-            __NOP();
-        }
-
-        SPI1_ChipSelect(false);                        // Release the bus
-        return;
-    }
-
-    if (isr & DMA_ISR_TCIF1) {
-        DMA1->IFCR = DMA_IFCR_CGIF1;                   // Acknowledge RX transfer-complete
-
-        // OPTIMIZATION (P1.3): at ~2.66 MHz SPI the last bytes are still
-        // shifting after DMA-complete. Sleep in WFE (woken by the
-        // higher-priority ADC/TIM1 interrupts that fire every cycle)
-        // instead of busy-spinning NOPs inside this priority-5 ISR.
-        while (SPI1->SR & SPI_SR_BSY) {
-            __WFE();
-        }
-
-        SPI1_ChipSelect(false); // Deassert CS to latch the packet
-
-#if (ENCODER_TYPE == ENCODER_MT6835)
-        // Assemble 21-bit angle {RX[2], RX[3], RX[4][7:3]} and capture status / CRC
-        POSITION_ENCODER_MT_RAW =
-            ((uint32_t)SPI1_RX_BUF[2] << 13) |
-            ((uint32_t)SPI1_RX_BUF[3] << 5)  |
-            ((uint32_t)SPI1_RX_BUF[4] >> 3);
-        POSITION_ENCODER_MT_RAW <<= 11; // Left-align into 32-bit Q0.32 representation
-
-        POSITION_MT_STATUS = (uint8_t)(SPI1_RX_BUF[4] & 0x07U); // Status bits: overspeed / weak field / undervoltage
-        POSITION_MT_CRC    = SPI1_RX_BUF[5];                    // Received CRC-8 for diagnostics
-#else
-        // TLE5012B: 15-bit left-aligned angle from RX[2..3]
-        POSITION_ENCODER_TLE = ((uint16_t)SPI1_RX_BUF[2] << 9) | ((uint16_t)SPI1_RX_BUF[3] << 1);
-#endif
-
-        // Called after the position variable has been updated.
-        POSITION_Callback();
-    }
-}
+// DMA1_Channel1_IRQHandler: interrupt vector, defined in the board translation unit
+// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
 
 #endif // SMART_ENCODER_SETUP_H
 
