@@ -76,8 +76,8 @@
 #include <Arduino.h>     // delay(), millis()
 #include "stm32g4xx.h"   // CMSIS device header: SPI1, DMA1, GPIO registers
 #include "lib/dev_log.h" // TP_LOG* macros: USB CDC diagnostics over SerialUSB
-#include "hardware/drv8353s.h"  // DRV8353S register map + SPI command builders
-#include "hardware/encoders/mt6835.h"  // MT6835 register map + SPI command builders + CRC-8
+#include "bsp/chips/drv8353s.h"  // DRV8353S register map + SPI command builders
+#include "bsp/chips/encoders/mt6835.h"  // MT6835 register map + SPI command builders + CRC-8
 
 extern void POSITION_Callback(); // Motor-control hook, called after each new angle
 

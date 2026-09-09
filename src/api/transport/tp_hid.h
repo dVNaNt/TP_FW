@@ -55,7 +55,7 @@
 
 #include <Arduino.h>
 
-#include "../../target/cln17_v3/usb_hid_setup.h"  // Composite device and the report endpoints
+#include "../../bsp/boards/cln17_v3/usb_hid_setup.h"  // Composite device and the report endpoints
 #include "../tp_chunks.h"                         // TpFrame
 #include "../tp_wire.h"                           // Identifier map
 

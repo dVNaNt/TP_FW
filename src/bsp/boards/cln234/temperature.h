@@ -50,8 +50,8 @@
 #ifndef TEMPERATURE_CLN234_H
 #define TEMPERATURE_CLN234_H
 
-#include "../../hardware/temperature/ntc.h"            // Target-agnostic NTC template (NTC_GetCelsius)
-#include "../../lib/drivers/pwm_driver/temperature.h"  // Generic Temperature driver (callback API)
+#include "bsp/chips/temperature/ntc.h"            // Target-agnostic NTC template (NTC_GetCelsius)
+#include "lib/drivers/pwm_driver/temperature.h"  // Generic Temperature driver (callback API)
 
 /**
  * @brief Raw -> degC conversion callback for the generic Temperature driver.
