@@ -563,3 +563,24 @@ FLASH: 99808 bytes (76.15% of 131072 bytes): +56 bytes
 RAM: 10832 bytes (33.06% of 32768 bytes): +0 bytes
 
 
+## 2026-09-09 - BSP layer: one translation unit per board and six shared STM32G4 drivers
+**Changes:**
+- src/target and src/hardware move to src/bsp as boards/, chips/ and stm32g4/
+- each board gains a board.cpp owning its interrupt vectors, HAL weak overrides, naked NMI handler and the TP object
+- main.cpp includes only bsp/board.h and names no board
+- CORDIC, TIM1 PWM, bootloader jump, NVM flash, comparators and FDCAN are shared once in bsp/stm32g4 and parameterized through each board's target.h
+- bsp/stm32g4/chip.h carries the G431/G474 die differences
+- tools/mapdiff.py added to prove a refactor changed no symbol sizes
+
+**Reasoning:**
+- The firmware was a single translation unit rooted at main.cpp, so vectors and mutable globals sat in headers and any second .cpp would have produced duplicate symbols
+- the two boards carried the same peripheral code at 79 to 100 percent similarity and had already drifted, leaving CLN234 with a stale NVM layout and a pre-protocol CAN driver
+
+**Notes:**
+- CLN17 v3 is byte-identical apart from two 8-byte entry-point forwarders. CLN234 gains 340 bytes of flash and 68 of RAM, all inside CANDriver, from adopting the protocol-capable FDCAN driver. Clock, ADC, GPIO and SPI stay board-specific: their two versions encode real hardware differences rather than duplication. FLASH_SIZE is defined by the HAL as a runtime density read, so declaring it in a descriptor silently moves every NVM partition
+- do not.
+
+FLASH: 98432 bytes (75.10% of 131072 bytes): -1376 bytes
+RAM: 10764 bytes (32.85% of 32768 bytes): -68 bytes
+
+

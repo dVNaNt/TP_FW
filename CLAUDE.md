@@ -21,7 +21,7 @@ If `platformio` is not on PATH, use `~/.platformio/penv/bin/pio` (already allow-
 `.claude/settings.local.json`).
 
 **`cln17_v3_release` is the only live environment.** `radix_release` and `cln17_v2_0_release` are
-commented out in `platformio.ini`. `src/target/radix/` still exists but does not compile in any
+commented out in `platformio.ini`. `src/target/radix/` still exists (left at the old path deliberately) but does not compile in any
 current build — do not assume changes there are covered by a build.
 
 **Upload flashes every connected ST-Link in parallel.** `extra_scripts = post:tools/upload_all_stlinks.py`
@@ -90,14 +90,16 @@ ADC DMA done → ADC_READY_Callback()     : range-check phases, feed current / s
 SPI DMA done → POSITION_Callback()      : encoder.set_raw_position(), then TP.tick()
 ```
 
-All of this lives in `src/target/cln17_v3/interrupt_setup.h`. `TP.tick()` is the single control
+The callback bodies live in `src/bsp/boards/<board>/interrupt_setup.h`; the interrupt VECTORS that
+invoke them are defined in `src/bsp/boards/<board>/board.cpp`. `TP.tick()` is the single control
 pass, gated on `driver_phy.current.is_changed() & driver_phy.supply.is_changed()` — the bitwise `&`
 is deliberate so both freshness flags are cleared every pass. A `std::atomic<bool> is_running`
 re-entrancy guard drops a sample rather than letting an ISR reenter a running pass.
 
 ### `TunePulseHeart` (`src/lib/lib.h`)
 
-The single global is `TP`, constructed at file scope in `src/tunepulse.h` from board constants.
+The single global is `TP`, defined in `src/bsp/boards/<board>/board.cpp` from board constants and
+declared `extern` in that board's `tunepulse.h`.
 It owns: `clock_` (Frequency), `motor_params` (Motor), `current_driver` (CurrentControl, the FOC
 current loop), `calibration_dump` + `system_dump` (two independent `FlashEEPROM` instances bound to
 separate NVM partitions), `angle_calibrator`, `position_controller` (MotorVectorSynthesis),
@@ -154,10 +156,30 @@ flash must run inside this window, or the rotor gets yanked against a frozen vec
     `drive_control.h` (control-mode machine + command mailbox + trajectory front end)
   - `math/` — `filters/` (EMA, median3, PLL), `motion/` (S-curve, Hermite, executor, governor,
     observer), `helpers/`, `trigonometry.h`
-- `src/target/cln17_v3/` — all board-specific setup (clock, GPIO, ADC, PWM, SPI, comparators,
-  CORDIC, CAN-FD, NVM flash, bootloader jump)
-- `src/tunepulse.h` — board integration: instantiates `TP`, registers LED/fault/limit callbacks,
-  `tunepulse_init()` bring-up sequence
+- `src/bsp/` — board support, split three ways by what a thing actually depends on:
+  - `stm32g4/` — peripheral drivers shared by every board on this MCU family: `cordic.h`,
+    `tim1_pwm.h`, `bootloader.h`, `nvm_flash.h`, `comp_dac.h`, `fdcan.h`. They take their
+    board-dependent values from the active board's `target.h`, which the per-environment include
+    path resolves, so none of them branches on a board name.
+  - `stm32g4/chip.h` — the small residue that is a property of the DIE rather than the board
+    (COMP4's vector name, whether the part has ADC3), keyed off the CMSIS define from the board
+    JSON. Keep it small: anything a board could choose belongs in `target.h`.
+  - `boards/<board>/` — what is genuinely board-specific: `target.h` (the descriptor: pinout,
+    full scales, and the entries the shared drivers read), `board.cpp`, plus the peripherals whose
+    two versions encode real hardware differences rather than duplication — clock (HSE 12 MHz vs
+    HSI16), ADC (the G474 samples phase C on ADC3), GPIO, SPI (CLN234 shares SPI1 between the
+    encoder and the DRV8353), and the application body in `run.h`.
+  - `chips/` — target-agnostic chip register maps and command builders (DRV8353S, MT6835, NTC).
+    No MCU dependency; usable from any board.
+- `src/bsp/boards/<board>/board.cpp` — the board's ONE translation unit. Everything that must
+  exist exactly once lives here: the interrupt vectors, the HAL weak-override callbacks, the naked
+  NMI handler, and the `TP` object. Every other board file is a header of inline definitions that
+  this unit is the sole includer of.
+- `src/bsp/board.h` — the whole contract between `main()` and the board: `board_setup()` and
+  `board_loop()`. It names no board. `main.cpp` includes only this, never a board's peripheral
+  headers, which is what keeps a board's vectors and globals confined to one object file.
+- `src/bsp/boards/<board>/tunepulse.h` — board integration: declares `TP`, registers
+  LED/fault/limit callbacks, `tunepulse_init()` bring-up sequence
 - `src/api/` — TunePulse CAN Protocol (TPCP) v1, header-only, wired into the build via `main.cpp`
   - `tp_wire.h` / `tp_chunks.h` — identifier map, opcodes, error codes, fixed-point codecs and the
     8-byte frame layouts. Hardware-independent: a host tool includes just these two.
@@ -174,9 +196,26 @@ now wired in through `DriveControl`; `src/api/CAN_PROTOCOL.md` §9 lists what th
 deliberately does not implement yet (calibration abort, full-calibration sequencing, absolute
 S-curve targets, firmware update over CAN).
 
+### Adding or changing board code
+
+Two rules keep the split working, and both fail at LINK time rather than compile time, so they are
+easy to break without noticing:
+
+1. **`main.cpp` must not include anything from a board.** It includes `bsp/board.h` and nothing
+   else board-related. Pulling a peripheral header in there puts that board's definitions into a
+   second object file and the duplicate symbols come back.
+2. **Mutable state in a shared `bsp/stm32g4/` header must be `inline`, never `static`.** A shared
+   header has to give every includer the same object; `static` hands each translation unit its own
+   copy and lets them silently disagree.
+
+Verify a refactor with `python tools/mapdiff.py BASE.map NEW.map`. `firmware.bin` is not
+byte-reproducible, so comparing images proves nothing; the map compares symbol SIZES and ignores
+addresses and which object file a symbol landed in, which is exactly what a pure refactor may
+change. Maps live at `.pio/build/<env>/firmware.map`.
+
 ### Compile-time hardware switches
 
-- Encoder selection is a `#define` in `src/target/cln17_v3/spi_setup.h`
+- Encoder selection is a `#define` in `src/bsp/boards/cln17_v3/spi_setup.h`
   (`ENCODER_TYPE ENCODER_MT6835` or `ENCODER_TLE5012B`) — there is no runtime detection. It also
   selects the DRV_EN pin in `tunepulse.h` (PB12 for MT6835 boards, PB11 for TLE5012B boards).
 - Board selection is a preprocessor define (`TARGET_CLN17V3`), not runtime branching.
