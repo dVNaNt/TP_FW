@@ -1,9 +1,9 @@
 /**
- * @file can_setup.h
+ * @file fdcan.h
  * @brief CAN-FD hardware driver + 8-byte chunk command channel (merged).
  *
  * Single-header CAN stack for STM32G431CB: FDCAN1 bring-up (GPIO PB8/PB9,
- * transceiver-enable PC14, bit timing calculation, TDC, IRQ) and a
+ * transceiver stand-by pin from the board descriptor, bit timing calculation, TDC, IRQ) and a
  * chunk-oriented command API on top.
  *
  * ## Node addressing and filtering
@@ -42,8 +42,8 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#ifndef CAN_SETUP_CLN17V3_H
-#define CAN_SETUP_CLN17V3_H
+#ifndef BSP_STM32G4_FDCAN_H
+#define BSP_STM32G4_FDCAN_H
 
 #include <Arduino.h>
 #include <cstring>
@@ -663,7 +663,7 @@ private:
         if (is_initialized) {
             deinit();                           // Restart if already active
         }
-        init_gpio();                            // PB8/PB9 AF9 + PC14 enable
+        init_gpio();                            // PB8/PB9 AF9 + stand-by pin
         RCC->APB1ENR1 |= RCC_APB1ENR1_FDCANEN;  // FDCAN kernel clock
         RCC->CCIPR = (RCC->CCIPR & ~RCC_CCIPR_FDCANSEL_Msk) |
                      (2U << RCC_CCIPR_FDCANSEL_Pos);  // Kernel clock = PCLK1
@@ -779,7 +779,12 @@ private:
     }
 
     /**
-     * @brief GPIO setup: PB9=TX / PB8=RX (AF9), PC14 = transceiver enable.
+     * @brief GPIO setup: PB9=TX / PB8=RX (AF9) plus the transceiver stand-by pin.
+     *
+     * The stand-by pin number comes from the board descriptor. Register names
+     * like GPIO_MODER_MODE14_Msk bake the pin into the identifier, so the
+     * position is computed instead: two mode bits per pin, and BSRR sets in
+     * its low half and resets in its high half.
      */
     void init_gpio() {
         RCC->AHB2ENR |= RCC_AHB2ENR_GPIOBEN | RCC_AHB2ENR_GPIOCEN;
@@ -796,10 +801,12 @@ private:
                         (9U << GPIO_AFRH_AFSEL8_Pos);
         GPIOB->PUPDR = (GPIOB->PUPDR & ~GPIO_PUPDR_PUPD8_Msk) |
                        (1U << GPIO_PUPDR_PUPD8_Pos);
-        // PC14: transceiver enable, push-pull output (low = enabled).
-        GPIOC->MODER = (GPIOC->MODER & ~GPIO_MODER_MODE14_Msk) |
-                       (1U << GPIO_MODER_MODE14_Pos);
-        GPIOC->BSRR = is_enabled ? GPIO_BSRR_BR14 : GPIO_BSRR_BS14;
+        // Transceiver stand-by control, push-pull output (low = enabled).
+        constexpr uint32_t kStandbyPin = BOARD_CAN_STANDBY_PIN;   // Board descriptor
+        GPIOC->MODER = (GPIOC->MODER & ~(3U << (kStandbyPin * 2U))) |
+                       (1U << (kStandbyPin * 2U));                // 01 = general purpose output
+        GPIOC->BSRR = is_enabled ? (1U << (kStandbyPin + 16U))     // BR: drive low  = enabled
+                                 : (1U << kStandbyPin);            // BS: drive high = stand-by
     }
 };
 
@@ -814,15 +821,15 @@ inline CANDriver CAN_BUS;
  *        on the first received frame and hung the firmware.
  */
 // FDCAN1_IT0_IRQHandler: interrupt vector, defined in the board translation unit
-// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
+// of whichever board is being built, so that exactly one object file owns it.
 
 /**
  * @brief HAL callback: new-message events are handled by the driver ISR.
  */
 // HAL_FDCAN_RxFifo0Callback: interrupt vector, defined in the board translation unit
-// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
+// of whichever board is being built, so that exactly one object file owns it.
 
-#endif  // CAN_SETUP_CLN17V3_H
+#endif  // BSP_STM32G4_FDCAN_H
 
 
 

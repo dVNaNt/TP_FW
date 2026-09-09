@@ -115,7 +115,7 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
 
 
 // ---------------------------------------------------------------------------
-// From comp_setup.h
+// From bsp/stm32g4/comp_dac.h
 // ---------------------------------------------------------------------------
 
 extern "C" void COMP1_2_3_IRQHandler(void) {
@@ -161,7 +161,7 @@ extern "C" void COMP4_5_6_IRQHandler(void) {
 
 
 // ---------------------------------------------------------------------------
-// From can_setup.h
+// From bsp/stm32g4/fdcan.h
 // ---------------------------------------------------------------------------
 
 extern "C" void FDCAN1_IT0_IRQHandler(void) {

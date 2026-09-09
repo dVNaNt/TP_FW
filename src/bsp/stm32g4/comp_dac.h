@@ -1,33 +1,12 @@
 /**
- * @file comp_setup.h
- * @brief Comparator-based overcurrent and overvoltage protection for CLN234
+ * @file comp_dac.h
+ * @brief Comparator-based overcurrent and overvoltage protection for CLN17 V3
  *
- * This module implements hardware-based protection using STM32G474 comparators and DACs.
- * The protection circuitry is IDENTICAL to the CLN17 v3 board (same comparator
- * instances, same input pins, same DAC threshold parameters):
+ * This module implements hardware-based protection using STM32G4 comparators and DACs:
  * - COMP1: Overcurrent protection for Phase B (I_B on PA1 vs DAC1_CH1)
  * - COMP2: Overcurrent protection for Phase A (I_A on PA3 vs DAC1_CH2)
  * - COMP3: Overvoltage protection (VSENS on PA0 vs DAC3_CH1)
  * - COMP4: Overcurrent protection for Phase C (I_C on PB0 vs DAC3_CH2)
- *
- * CLN234 CHANNEL PAIRING (differs from CLN17 v3 board wiring):
- * The driver hard-pairs current-sense channel N with PWM half-bridge N
- * (FOC phase k duty -> CCRk, channel k current, channel k DAC threshold).
- * On this board pwm_ch1 (TIM1_CH1) drives the motor phase whose current is
- * I_B, and pwm_ch2 (TIM1_CH2) drives the phase whose current is I_A:
- *   Driver CH1 (= pwm_ch1) <-> I_B/PA1  <-> COMP1/DAC1_CH1
- *   Driver CH2 (= pwm_ch2) <-> I_A/PA3  <-> COMP2/DAC1_CH2
- *   Driver CH3 (= pwm_ch3) <-> I_C/PB0  <-> COMP4/DAC3_CH2
- * The matching ADC slot reorder into the driver pipeline lives in
- * interrupt_setup.h (ADC_READY_Callback), and the CH1/CH2 DAC callback
- * assignment in tunepulse.h.
- *
- * Differences vs. CLN17 v3 (board wiring, not protection parameters):
- * - The MCU is an STM32G474CEU6, where COMP4 shares the COMP4_5_6 IRQ vector
- *   with COMP5/COMP6 (on the G431 it is a dedicated COMP4 vector).
- * - The gate-driver fault line is nFAULT on PB1 (EXTI1) and is already served
- *   by drv_err_setup.h, so the PB10 (DRV_FAULT) EXTI block of the CLN17 port
- *   is intentionally NOT duplicated here.
  *
  * PROTECTION STRATEGY:
  *
@@ -50,7 +29,7 @@
  * Interrupt Architecture:
  * - Overcurrent (COMP1/2/4): Rising edge only (Fault detection, sets error flag)
  * - Overvoltage (COMP3): Both edges (Rising sets fault, Falling clears fault)
- * - PB1 (nFAULT): Both edges (Falling sets fault, Rising clears fault) - see drv_err_setup.h
+ * - PB10 (DRV_FAULT): Both edges (Falling sets fault, Rising clears fault)
  *
  * Recovery Timer (managed in lib.h):
  * - Timer starts when ALL hard faults are cleared (comparator outputs go low)
@@ -67,10 +46,11 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#ifndef COMP_SETUP_CLN234_H
-#define COMP_SETUP_CLN234_H
+#ifndef BSP_STM32G4_COMP_DAC_H
+#define BSP_STM32G4_COMP_DAC_H
 
 #include <Arduino.h>
+#include "bsp/stm32g4/chip.h"
 #include "stm32g4xx_hal.h"
 #include "stm32g4xx_ll_bus.h"
 #include "stm32g4xx_ll_comp.h"
@@ -187,6 +167,41 @@ static inline void MX_COMPS_INIT(void) {          // Begin function to initializ
 }  // End of MX_COMPS_INIT function
 
 /**
+ * @brief Initialize GPIO PB10 (DRV_FAULT) with pullup for external fault detection
+ * PB10 is connected to driver fault output (active low)
+ * When driver detects overcurrent, it pulls PB10 low triggering interrupt
+ */
+#if BOARD_HAS_DRV_FAULT_EXTI
+static inline void MX_DRV_FAULT_GPIO_Init(void) {
+    // Enable SYSCFG clock (required for EXTI configuration)
+    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
+
+    // Enable GPIOB clock
+    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
+
+    // Configure PB10 as input with pullup
+    LL_GPIO_SetPinMode(GPIOB, LL_GPIO_PIN_10, LL_GPIO_MODE_INPUT);        // Set as input
+    LL_GPIO_SetPinPull(GPIOB, LL_GPIO_PIN_10, LL_GPIO_PULL_UP);           // Enable pullup resistor
+    LL_GPIO_SetPinSpeed(GPIOB, LL_GPIO_PIN_10, LL_GPIO_SPEED_FREQ_HIGH);  // High speed for fast response
+
+    // Configure EXTI line 10 for PB10
+    LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTB, LL_SYSCFG_EXTI_LINE10);  // Connect EXTI10 to GPIOB
+
+    // FIXED: Both-edge interrupts so the fault flag can also be cleared
+    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_10);           
+    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_10);   // Rising edge trigger (clear fault)
+    LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_10);  // Falling edge trigger (set fault)
+
+    // Clear any pending flags
+    LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_10);
+
+    // Enable NVIC interrupt for EXTI10
+    NVIC_SetPriority(EXTI15_10_IRQn, 0);  // Highest-1 priority for safety
+    NVIC_EnableIRQ(EXTI15_10_IRQn);
+}
+#endif  // BOARD_HAS_DRV_FAULT_EXTI
+
+/**
  * @brief Configure EXTI interrupts for all comparators
  * OC Comparators: Rising edge only (Fault detection)
  * OV Comparator: Both edges (Fault detection and clearing)
@@ -221,19 +236,13 @@ static inline void COMP_EXTI_Init(void) {
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_21 | LL_EXTI_LINE_22 | LL_EXTI_LINE_29 | LL_EXTI_LINE_30);
 
     // Enable NVIC interrupts
-    // TEMPORARY (bring-up on COM16): comparator IRQs are disabled to bypass
-    // the hardware OC/OV protection while the channel-pairing fix is being
-    // validated. EXTI lines stay armed, so the pending flags just accumulate
-    // harmlessly; the ISR handlers below are never invoked. NOTE: the digital
-    // (software) OC fallback in current_sense.h and the DRV8353 nFAULT line
-    // (drv_err_setup.h) remain ACTIVE.
-    // NVIC_SetPriority(COMP1_2_3_IRQn, 0);  // Highest priority for safety
-    // NVIC_EnableIRQ(COMP1_2_3_IRQn);
+#if BOARD_COMP_IRQ_ARMED
+    NVIC_SetPriority(COMP1_2_3_IRQn, 0);  // Highest priority for safety
+    NVIC_EnableIRQ(COMP1_2_3_IRQn);
 
-    // STM32G474 difference vs. G431: COMP4 shares the COMP4_5_6 vector with
-    // COMP5/COMP6 (there is no dedicated COMP4_IRQn on this device).
-    // NVIC_SetPriority(COMP4_5_6_IRQn, 0);  // Highest priority for safety
-    // NVIC_EnableIRQ(COMP4_5_6_IRQn);
+    NVIC_SetPriority(chip::kComp4Irq, 0);  // Highest priority for safety
+    NVIC_EnableIRQ(chip::kComp4Irq);
+#endif  // BOARD_COMP_IRQ_ARMED
 }
 
 /**
@@ -261,26 +270,36 @@ inline void COMP_Set_OV_Protection_State(void) {
  * Handles COMP1 (Phase B OC), COMP2 (Phase A OC), COMP3 (OV)
  */
 // COMP1_2_3_IRQHandler: interrupt vector, defined in the board translation unit
-// (bsp/boards/cln234/board.cpp) so that exactly one object file owns it.
+// of whichever board is being built, so that exactly one object file owns it.
 
 /**
- * @brief COMP4/5/6 interrupt handler (shared IRQ on STM32G474)
- * Handles COMP4 (Phase C overcurrent); COMP5/COMP6 are unused on this board
+ * @brief COMP4 interrupt handler
+ * Handles COMP4 (Phase C overcurrent)
  */
-// COMP4_5_6_IRQHandler: interrupt vector, defined in the board translation unit
-// (bsp/boards/cln234/board.cpp) so that exactly one object file owns it.
+// COMP4_IRQHandler: interrupt vector, defined in the board translation unit
+// of whichever board is being built, so that exactly one object file owns it.
 
 /**
- * @brief Initialize complete comparator protection system
- * Initializes DACs, comparators and EXTI interrupts for overcurrent and
- * overvoltage protection. The gate-driver nFAULT line (PB1/EXTI1) is NOT
- * handled here - it is armed by DRV_ERR_Init() in drv_err_setup.h.
+ * @brief EXTI15_10 interrupt handler
+ * Handles PB10 (DRV_FAULT) external interrupt on both edges
+ * Falling edge: Fault signal LOW -> Set error
+ * Rising edge: Fault signal HIGH -> Clear error
+ */
+// EXTI15_10_IRQHandler: interrupt vector, defined in the board translation unit
+// of whichever board is being built, so that exactly one object file owns it.
+
+/**
+ * @brief Initialize complete protection system
+ * Initializes DACs, comparators, GPIO fault input, and EXTI interrupts for overcurrent and overvoltage protection
  */
 inline void COMP_Protection_Init(void) {
     MX_DAC1_Init();  // Initialize DAC1 for COMP1/COMP2 thresholds
     MX_DAC3_Init();  // Initialize DAC3 for COMP3/COMP4 thresholds
     MX_COMPS_INIT();
-    COMP_EXTI_Init();  // Enable comparator interrupts
+#if BOARD_HAS_DRV_FAULT_EXTI
+    MX_DRV_FAULT_GPIO_Init();  // PB10 (DRV_FAULT) input with pull-up and EXTI
+#endif
+    COMP_EXTI_Init();          // Enable comparator interrupts
 }
 
-#endif  // COMP_SETUP_CLN234_H
+#endif  // BSP_STM32G4_COMP_DAC_H

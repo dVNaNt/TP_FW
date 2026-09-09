@@ -16,10 +16,10 @@
 
 #include "adc_setup.h"    // Include ADC subsystem initialization and control
 #include "clock_setup.h"  // Include system clock configuration
-#include "comp_setup.h"   // Include analog comparator subsystem setup
+#include "bsp/stm32g4/comp_dac.h"   // Include analog comparator subsystem setup
 #include "gpio_setup.h"   // Include general purpose I/O configuration
 
-#include "can_setup.h"        // Include CAN/CAN-FD communication setup
+#include "bsp/stm32g4/fdcan.h"        // Include CAN/CAN-FD communication setup
 #include "spi_setup.h"        // Include SPI communication setup for the encoder
 #include "bsp/stm32g4/tim1_pwm.h"  // Include PWM timer hardware definitions and functions
 

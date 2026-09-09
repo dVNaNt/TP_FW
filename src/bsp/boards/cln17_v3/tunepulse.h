@@ -54,8 +54,8 @@ extern TunePulseHeart TP;
 #include "bsp/stm32g4/bootloader.h"  // SW1 hold-to-bootloader (USB DFU)
 #include "interrupt_setup.h"  // ISR glue: ADC / encoder / comparators -> TP
 
-#include "can_setup.h"        // CAN-FD driver + chunk API (CAN_BUS)
-#include "comp_setup.h"       // Comparator (hardware OC/OV) protection
+#include "bsp/stm32g4/fdcan.h"        // CAN-FD driver + chunk API (CAN_BUS)
+#include "bsp/stm32g4/comp_dac.h"       // Comparator (hardware OC/OV) protection
 #include "bsp/stm32g4/cordic.h"     // CORDIC hardware trigonometry accelerator
 #include "bsp/stm32g4/nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
 #include "bsp/stm32g4/tim1_pwm.h"  // TIM1 complementary PWM backend

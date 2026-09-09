@@ -36,7 +36,7 @@
  */
 
 #include "bsp/stm32g4/bootloader.h"  // USB DFU entry for the reboot opcode
-#include "../../bsp/boards/cln17_v3/can_setup.h"        // CAN_BUS: the FDCAN1 driver
+#include "bsp/stm32g4/fdcan.h"        // CAN_BUS: the FDCAN1 driver
 #include "bsp/stm32g4/nvm_flash.h"        // Configuration partition callbacks
 #include "../tp_engine.h"                           // The protocol engine
 #include "tp_hid.h"                                 // Protocol transport over the vendor HID endpoints

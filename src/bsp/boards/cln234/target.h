@@ -131,3 +131,23 @@ namespace SYS_PARAMS {
 // real size when the CAN protocol is wired up on this board, and that change will
 // move the other two partitions, so it requires a recalibration.
 #define NVM_CONFIG_SECTION_SIZE 0UL
+
+// ---------------------------------------------------------------------------
+// Comparator protection policy, consumed by bsp/stm32g4/comp_dac.h
+// ---------------------------------------------------------------------------
+// The comparator vectors are NOT armed on this board yet. This is deliberate and
+// temporary: bring-up disabled the hardware OC/OV protection while the phase
+// channel-pairing fix is validated. The EXTI lines stay armed, so pending flags
+// accumulate harmlessly and the handlers are simply never invoked. Arming them
+// is a hardware-safety decision that needs a bench check per phase, not a code
+// change alone. This board reports gate-driver faults on PB1 instead, handled
+// separately in drv_err_setup.h.
+#define BOARD_COMP_IRQ_ARMED      0
+#define BOARD_HAS_DRV_FAULT_EXTI  0
+
+// ---------------------------------------------------------------------------
+// CAN transceiver wiring, consumed by bsp/stm32g4/fdcan.h
+// ---------------------------------------------------------------------------
+// FDCAN1 is on PB9 (TX) / PB8 (RX) on both boards; only the transceiver
+// stand-by control differs. It is on PC13 here, driven LOW to enable.
+#define BOARD_CAN_STANDBY_PIN 13

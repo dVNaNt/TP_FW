@@ -116,3 +116,19 @@ namespace SYS_PARAMS {
 // its whole partition when it runs out of slots, which would otherwise destroy the
 // stored node address.
 #define NVM_CONFIG_SECTION_SIZE 2048UL
+
+// ---------------------------------------------------------------------------
+// Comparator protection policy, consumed by bsp/stm32g4/comp_dac.h
+// ---------------------------------------------------------------------------
+// The hardware overcurrent/overvoltage comparators are ARMED on this board: a
+// trip cuts the bridge from a priority-0 vector, underneath the control loop.
+// The gate driver also reports faults on PB10, wired to EXTI10.
+#define BOARD_COMP_IRQ_ARMED      1
+#define BOARD_HAS_DRV_FAULT_EXTI  1
+
+// ---------------------------------------------------------------------------
+// CAN transceiver wiring, consumed by bsp/stm32g4/fdcan.h
+// ---------------------------------------------------------------------------
+// FDCAN1 is on PB9 (TX) / PB8 (RX) on both boards; only the transceiver
+// stand-by control differs. It is on PC14 here, driven LOW to enable.
+#define BOARD_CAN_STANDBY_PIN 14
