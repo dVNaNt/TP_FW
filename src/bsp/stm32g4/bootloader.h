@@ -1,5 +1,5 @@
 /**
- * @file bootloader_jump.h
+ * @file bootloader.h
  * @brief Software entry into the built-in STM32G4 system-memory USB bootloader
  *        (ROM DFU) triggered by holding the SW1 push-button (PC6) for > 3 s.
  *
@@ -29,8 +29,8 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#ifndef BOOTLOADER_JUMP_CLN17V3_H
-#define BOOTLOADER_JUMP_CLN17V3_H
+#ifndef BSP_STM32G4_BOOTLOADER_H
+#define BSP_STM32G4_BOOTLOADER_H
 
 #include <Arduino.h>
 
@@ -40,7 +40,7 @@
 #include "stm32g4xx_ll_gpio.h"
 #include "stm32g4xx_ll_system.h"
 
-#include "target.h"  // PINOUT definitions (SW1 = PC6)
+#include "target.h"  // Board descriptor: BOOT_BUTTON_* wiring for this board
 
 namespace BOOT {
 
@@ -51,7 +51,7 @@ constexpr uint32_t SYSTEM_MEMORY_BASE = 0x1FFF0000UL;
 constexpr uint32_t HOLD_THRESHOLD_MS = 3000UL;
 
 /// Button pin: SW1 on PC6, configured as input with pull-up (active LOW).
-constexpr uint32_t BUTTON_PORT_PIN = LL_GPIO_PIN_6;
+constexpr uint32_t BUTTON_PORT_PIN = BOOT_BUTTON_LL_PIN;
 
 /** Milliseconds between two consecutive polls of the hold-time check. */
 constexpr uint32_t POLL_INTERVAL_MS = 10;
@@ -60,11 +60,11 @@ constexpr uint32_t POLL_INTERVAL_MS = 10;
 constexpr uint32_t DEBOUNCE_MS = 30UL;
 
 // --- Shared state written by the EXTI ISR, read by poll() -----------------
-volatile bool g_pressed = false;          // true between falling/rising edge
-volatile uint32_t g_press_start_ms = 0;   // timestamp of the accepted falling
+inline volatile bool g_pressed = false;          // true between falling/rising edge
+inline volatile uint32_t g_press_start_ms = 0;   // timestamp of the accepted falling
                                           // edge ("super fast" timekeeping:
                                           // one subtraction in the ISR)
-volatile uint32_t g_last_edge_ms = 0;     // debounce reference
+inline volatile uint32_t g_last_edge_ms = 0;     // debounce reference
 
 /**
  * @brief Configures SW1 (PC6) as interrupt-driven input with internal pull-up.
@@ -90,15 +90,15 @@ inline void init_button() {
 
     // Route PC6 -> EXTI6, both edges, unmasked.
     LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTC, LL_SYSCFG_EXTI_LINE6);
-    LL_EXTI_EnableRisingTrig_0_31(LL_EXTI_LINE_6);   // release
-    LL_EXTI_EnableFallingTrig_0_31(LL_EXTI_LINE_6);  // press
-    LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_6);
-    LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_6);
+    LL_EXTI_EnableRisingTrig_0_31(BOOT_BUTTON_EXTI_LINE);   // release
+    LL_EXTI_EnableFallingTrig_0_31(BOOT_BUTTON_EXTI_LINE);  // press
+    LL_EXTI_ClearFlag_0_31(BOOT_BUTTON_EXTI_LINE);
+    LL_EXTI_EnableIT_0_31(BOOT_BUTTON_EXTI_LINE);
 
     // Below the real-time control interrupts (SPI1 = 6 / TIM1_CC = 3).
-    NVIC_SetPriority(EXTI9_5_IRQn,
+    NVIC_SetPriority(BOOT_BUTTON_IRQN,
                      NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 7, 0));
-    NVIC_EnableIRQ(EXTI9_5_IRQn);
+    NVIC_EnableIRQ(BOOT_BUTTON_IRQN);
 }
 
 /**
@@ -218,6 +218,6 @@ inline void poll() {
  * with one subtraction — no timers, no state machines in interrupt context.
  */
 // EXTI9_5_IRQHandler: interrupt vector, defined in the board translation unit
-// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
+// of whichever board is being built, so that exactly one object file owns it.
 
-#endif  // BOOTLOADER_JUMP_CLN17V3_H
+#endif  // BSP_STM32G4_BOOTLOADER_H

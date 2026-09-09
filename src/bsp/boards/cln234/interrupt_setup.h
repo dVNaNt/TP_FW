@@ -20,7 +20,7 @@
 #include "gpio_setup.h"   // Include general purpose I/O configuration
 
 #include "spi_setup.h"        // Include the shared SPI bus (DRV8353 + MT6835)
-#include "timer_pwm_setup.h"  // Include PWM timer hardware definitions and functions
+#include "bsp/stm32g4/tim1_pwm.h"  // Include PWM timer hardware definitions and functions
 #include "temperature.h"      // External NTC model: Temperature_NTC_Feed() raw domain
 #include "ws2812.h"           // WS2812 status LED: LED_Update() pumped from the 20 kHz tick
 

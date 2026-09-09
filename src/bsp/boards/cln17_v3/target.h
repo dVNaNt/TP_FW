@@ -39,6 +39,7 @@ constexpr PinName DRV_LOW = PB_11;    // Permanently driven LOW (MT6835 board re
 #else
 constexpr PinName DRV_EN = PB_11;     // Driver Enable (TLE5012B board revision)
 constexpr PinName I_CAL = PB_12;      // Current Calibration/Offset (TLE5012B board revision)
+
 #endif
 
 constexpr PinName DRV_FAULT = PB_10;  // Driver Fault Input (active low)
@@ -96,3 +97,22 @@ namespace SYS_PARAMS {
     constexpr int32_t DEADTIME_TICKS_CONST = 20;
 }
 
+// ---------------------------------------------------------------------------
+// Boot button (SW1) wiring, consumed by bsp/stm32g4/bootloader.h
+// ---------------------------------------------------------------------------
+// SW1 is on PC6, active low. Holding it for three seconds at boot enters the
+// USB DFU bootloader. The pin, its EXTI line and the vector that line belongs to
+// are all board facts, so the shared driver reads them from here instead of
+// branching on a board name.
+#define BOOT_BUTTON_LL_PIN    LL_GPIO_PIN_6
+#define BOOT_BUTTON_EXTI_LINE LL_EXTI_LINE_6
+#define BOOT_BUTTON_IRQN      EXTI9_5_IRQn
+
+// ---------------------------------------------------------------------------
+// Persistent NVM layout, consumed by bsp/stm32g4/nvm_flash.h
+// ---------------------------------------------------------------------------
+// CLN17 v3 is an STM32G431CB: 128 KiB of flash. The node-configuration partition
+// is separate from the user partition on purpose - the motor-profile engine erases
+// its whole partition when it runs out of slots, which would otherwise destroy the
+// stored node address.
+#define NVM_CONFIG_SECTION_SIZE 2048UL

@@ -58,11 +58,11 @@ extern TunePulseHeart TP;
 // Board bring-up headers. Order matters: the ISR glue and the fault hooks
 // reference the TP object, so they are included after its construction.
 #include "ws2812.h"           // WS2812 status LED (TIM8_CH1 + DMA)
-#include "bootloader_jump.h"  // SW1 (PC14) hold-to-bootloader (USB DFU)
+#include "bsp/stm32g4/bootloader.h"  // SW1 (PC14) hold-to-bootloader (USB DFU)
 #include "interrupt_setup.h"  // ISR glue + NVIC (pulls clock/gpio/adc/spi/timer_pwm/drv_err/temperature)
 #include "comp_setup.h"       // Comparator (hardware OC/OV) protection (same circuit as CLN17 v3)
-#include "cordic_setup.h"     // CORDIC hardware trigonometry accelerator
-#include "nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
+#include "bsp/stm32g4/cordic.h"     // CORDIC hardware trigonometry accelerator
+#include "bsp/stm32g4/nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
 #include "can_setup.h"        // CAN-FD driver + chunk API (CAN_BUS)
 
 /**

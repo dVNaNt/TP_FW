@@ -1,6 +1,10 @@
 /**
- * @file timer_pwm_setup.h
- * @brief TIM1 complementary-PWM hardware backend.
+ * @file tim1_pwm.h
+ * @brief TIM1 complementary-PWM hardware backend, shared by every STM32G4 board.
+ *
+ * Board-dependent values (carrier period, dead time, ADC trigger offset) come
+ * from the active board's target.h, which the per-environment include path
+ * resolves. The TIM1 wiring itself is identical across the family.
  *
  * PWM_Init() configures TIM1 (center-aligned, complementary outputs, dead
  * time); TIM1_Set_PWM_Values() writes the three compare registers;
@@ -9,8 +13,8 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#ifndef TIMER_PWM_CLN17V3_H  // Include guard to prevent multiple inclusions of this header file
-#define TIMER_PWM_CLN17V3_H  // Define the include guard macro for the preprocessor
+#ifndef BSP_STM32G4_TIM1_PWM_H  // Include guard to prevent multiple inclusions of this header file
+#define BSP_STM32G4_TIM1_PWM_H  // Define the include guard macro for the preprocessor
 
 #include <Arduino.h>            // Include Arduino framework for basic standard types
 #include "stm32g4xx.h"          // Include pure CMSIS register definitions for STM32G4
@@ -29,19 +33,19 @@ constexpr int32_t TIMER_CLOCK_HZ = 170UL;  // Define the core system clock speed
 
 constexpr uint8_t PWM_DEADTIME_TICKS = SYS_PARAMS::DEADTIME_TICKS_CONST;  // Extract initial deadtime from system parameters
 
-volatile uint8_t PWM_DEADTIME_RUNTIME = PWM_DEADTIME_TICKS;  // Allow deadtime to be updated dynamically at runtime
+inline volatile uint8_t PWM_DEADTIME_RUNTIME = PWM_DEADTIME_TICKS;  // Allow deadtime to be updated dynamically at runtime
 
-volatile int16_t ADC_DELAY_TICKS = SYS_PARAMS::ADC_DELAY_TICKS_CONST;  // Set volatile ADC delay for FOC trigger offset
-volatile int16_t ADC_TRIGGER_POINT = 0;                                // Initialize volatile ADC trigger point to zero
+inline volatile int16_t ADC_DELAY_TICKS = SYS_PARAMS::ADC_DELAY_TICKS_CONST;  // Set volatile ADC delay for FOC trigger offset
+inline volatile int16_t ADC_TRIGGER_POINT = 0;                                // Initialize volatile ADC trigger point to zero
 
 // OPTIMIZATION (P2.1): last written CCR4 delay / BDTR deadtime. Both values
 // change rarely, so the per-period register rewrites are skipped until the
 // requested value actually differs. Seeded with impossible values so the
 // first cycle after boot always performs the write.
-static int16_t adc_delay_written = -1;          // Cached clamped ADC delay currently present in CCR4
-static uint8_t deadtime_written = 0xFF;         // Cached deadtime currently present in BDTR (0xFF never configured)
+inline int16_t adc_delay_written = -1;          // Cached clamped ADC delay currently present in CCR4
+inline uint8_t deadtime_written = 0xFF;         // Cached deadtime currently present in BDTR (0xFF never configured)
 
-TIM_HandleTypeDef htim1;  // Declare the HAL structure globally to satisfy HAL_TIM_IRQHandler requirement
+inline TIM_HandleTypeDef htim1;  // Declare the HAL structure globally to satisfy HAL_TIM_IRQHandler requirement
 
 inline void MX_TIM1_Init(void) {         // Define an inline function for bare-metal register initialization
     RCC->APB2ENR |= RCC_APB2ENR_TIM1EN;  // Enable the hardware clock routing specifically for TIM1 peripheral
@@ -196,11 +200,11 @@ extern void FOC_TimTrig_Callback();                // Forward declare the ultra-
 extern "C" FDCAN_HandleTypeDef* CAN_Get_Handle();  // Forward declare function to get CAN FDCAN handle
 
 // TIM1_CC_IRQHandler: interrupt vector, defined in the board translation unit
-// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
+// of whichever board is being built, so that exactly one object file owns it.
 
 inline void PWM_Init() {  // Define inline wrapper to trigger full PWM subsystem initialization
     MX_TIM1_Init();       // Execute bare-metal timer configuration
     MX_TIM1_Start();      // Execute bare-metal output and interrupt startup sequence
 }  // End of PWM_Init function
 
-#endif  // TIMER_PWM_CLN17V3_H // Final close of the header include guard
+#endif  // BSP_STM32G4_TIM1_PWM_H // Final close of the header include guard

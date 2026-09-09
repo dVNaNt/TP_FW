@@ -51,14 +51,14 @@
  */
 extern TunePulseHeart TP;
 
-#include "bootloader_jump.h"  // SW1 hold-to-bootloader (USB DFU)
+#include "bsp/stm32g4/bootloader.h"  // SW1 hold-to-bootloader (USB DFU)
 #include "interrupt_setup.h"  // ISR glue: ADC / encoder / comparators -> TP
 
 #include "can_setup.h"        // CAN-FD driver + chunk API (CAN_BUS)
 #include "comp_setup.h"       // Comparator (hardware OC/OV) protection
-#include "cordic_setup.h"     // CORDIC hardware trigonometry accelerator
-#include "nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
-#include "timer_pwm_setup.h"  // TIM1 complementary PWM backend
+#include "bsp/stm32g4/cordic.h"     // CORDIC hardware trigonometry accelerator
+#include "bsp/stm32g4/nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
+#include "bsp/stm32g4/tim1_pwm.h"  // TIM1 complementary PWM backend
 
 /**
  * @brief LED apply callback for the CLN17-v3 tricolor element.

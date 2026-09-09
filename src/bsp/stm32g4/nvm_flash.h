@@ -15,13 +15,23 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#ifndef FLASH_EEPROM_HW_HPP
-#define FLASH_EEPROM_HW_HPP
+#ifndef BSP_STM32G4_NVM_FLASH_H
+#define BSP_STM32G4_NVM_FLASH_H
 
 #include <cstdint>
-#include "stm32g431xx.h" 
+#include "stm32g4xx.h"   // Family header; the exact part comes from the CMSIS define
+#include "target.h"      // Board descriptor: flash size and NVM partition sizes
 
-// If HAL is not used, define the flash size manually (128 KB for STM32G431)
+// Flash size of the part. Deliberately NOT set by the board descriptor: the HAL
+// already defines FLASH_SIZE as a runtime read of the factory density register at
+// FLASHSIZE_BASE, so this resolves per part with no board input and the two boards
+// (128 KiB G431 / 512 KiB G474) need no #if. The fallback below only applies to a
+// build without the HAL, and is the smallest density in the family so that a
+// mis-built image reserves its NVM too low rather than off the end of flash.
+//
+// Do not replace this with a constant. EEPROM_BASE is measured DOWN from the end
+// of flash, so changing how the size is obtained moves every stored partition and
+// silently invalidates the calibration already written to boards in the field.
 #ifndef FLASH_SIZE
 #define FLASH_SIZE (128UL * 1024UL)
 #endif
@@ -541,6 +551,6 @@ extern "C" void flashg4_ll_nmi_dispatch(uint32_t stacked_ctx) {
  * ever changes, chain the other source through here or via nmi_ecc_recover().
  */
 // NMI_Handler: interrupt vector, defined in the board translation unit
-// (bsp/boards/cln17_v3/board.cpp) so that exactly one object file owns it.
+// of whichever board is being built, so that exactly one object file owns it.
 
-#endif // FLASH_EEPROM_HW_HPP
+#endif // BSP_STM32G4_NVM_FLASH_H

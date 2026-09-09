@@ -1,6 +1,9 @@
 /**
- * @file cordic_setup.h
- * @brief CORDIC hardware accelerator initialization for STM32G474CEU6
+ * @file cordic.h
+ * @brief CORDIC hardware accelerator initialization, shared by every STM32G4 board.
+ *
+ * Identical on every part in the family: the block has no board-dependent
+ * wiring, so nothing here is parameterized.
  *
  * This file configures the CORDIC (COordinate Rotation DIgital Computer) hardware
  * accelerator available on STM32G4 series microcontrollers. CORDIC provides

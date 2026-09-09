@@ -61,7 +61,7 @@ extern "C" void DMA1_Channel5_IRQHandler(void) { // Interrupt vector for DMA Cha
 
 
 // ---------------------------------------------------------------------------
-// From timer_pwm_setup.h
+// From bsp/stm32g4/tim1_pwm.h
 // ---------------------------------------------------------------------------
 
 extern "C" void TIM1_CC_IRQHandler(void) {  // Define the hardware interrupt vector for Capture/Compare events
@@ -176,7 +176,7 @@ extern "C" void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef*, uint32_t its) {
 
 
 // ---------------------------------------------------------------------------
-// From nvm_flash.h
+// From bsp/stm32g4/nvm_flash.h
 // ---------------------------------------------------------------------------
 
 extern "C" __attribute__((naked)) void NMI_Handler(void) {
@@ -190,7 +190,7 @@ extern "C" __attribute__((naked)) void NMI_Handler(void) {
 
 
 // ---------------------------------------------------------------------------
-// From bootloader_jump.h
+// From bsp/stm32g4/bootloader.h
 // ---------------------------------------------------------------------------
 
 extern "C" void EXTI15_10_IRQHandler(void) {

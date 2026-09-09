@@ -21,7 +21,7 @@
 
 #include "can_setup.h"        // Include CAN/CAN-FD communication setup
 #include "spi_setup.h"        // Include SPI communication setup for the encoder
-#include "timer_pwm_setup.h"  // Include PWM timer hardware definitions and functions
+#include "bsp/stm32g4/tim1_pwm.h"  // Include PWM timer hardware definitions and functions
 
 // OPTIMIZATION (P2.5): cache &TP.driver_phy once instead of walking
 // the global object member chain on every sample. The address is fixed at

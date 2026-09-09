@@ -28,6 +28,7 @@
 
 #ifndef TARGET_CLN234  // Also passed on the command line (-D) - avoid redefinition warnings
 #define TARGET_CLN234
+
 #endif
 
 #include "Arduino.h"
@@ -109,3 +110,24 @@ namespace SYS_PARAMS {
     constexpr int32_t ADC_DELAY_TICKS_CONST = 120;  // ADC trigger offset after PWM center
     constexpr int32_t DEADTIME_TICKS_CONST = 20;    // TIM1 dead-time in timer ticks
 }
+
+// ---------------------------------------------------------------------------
+// Boot button (SW1) wiring, consumed by bsp/stm32g4/bootloader.h
+// ---------------------------------------------------------------------------
+// SW1 is on PC14, active low. Holding it for three seconds at boot enters the
+// USB DFU bootloader. The pin, its EXTI line and the vector that line belongs to
+// are all board facts, so the shared driver reads them from here instead of
+// branching on a board name.
+#define BOOT_BUTTON_LL_PIN    LL_GPIO_PIN_14
+#define BOOT_BUTTON_EXTI_LINE LL_EXTI_LINE_14
+#define BOOT_BUTTON_IRQN      EXTI15_10_IRQn
+
+// ---------------------------------------------------------------------------
+// Persistent NVM layout, consumed by bsp/stm32g4/nvm_flash.h
+// ---------------------------------------------------------------------------
+// CLN234 is an STM32G474CE: 512 KiB of flash. The node-configuration partition is
+// sized zero for now, which keeps EEPROM_BASE and the calibration/user partitions
+// byte-identical to the layout this board has already been flashed with. It gets a
+// real size when the CAN protocol is wired up on this board, and that change will
+// move the other two partitions, so it requires a recalibration.
+#define NVM_CONFIG_SECTION_SIZE 0UL
