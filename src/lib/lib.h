@@ -46,7 +46,6 @@
 #include "motor_control/types.h"
 
 #include "drivers/tunepulse_interlayer.h"
-#define DEV_LOG_ENABLE
 // Forward declaration of the board integration type (defined by target layer)
 struct TunePulseHeart;
 
