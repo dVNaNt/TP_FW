@@ -192,8 +192,7 @@ def pio_post_hook(env) -> None:
     this script instead of the single-probe OpenOCD invocation.
     """
     platform = env.PioPlatform()                        # Access PlatformIO platform
-    openocd_dir = platform.get_package_dir("tool-openocd")  # Locate tool-openocd package
-    openocd = os.path.join(openocd_dir, "bin", "openocd.exe")  # Windows binary path
+    openocd_dir = platform.get_package_dir("tool-openocd")  # May be None if not installed
     # Target config from the board manifest (e.g. stm32g4x for G431)
     target = env.BoardConfig().get("debug.openocd_target", "stm32g4x")
     script = os.path.join(env.subst("$PROJECT_DIR"),    # Absolute path of this script
@@ -201,14 +200,24 @@ def pio_post_hook(env) -> None:
     # Firmware path computed at hook time; forward slashes avoid TCL escape
     # issues in OpenOCD's "program" command (e.g. ".pio\build..." -> "\b")
     firmware = env.subst("$BUILD_DIR/${PROGNAME}.elf").replace("\\", "/")
-    # Replace uploader: python <this script> --openocd <path> --target <cfg> <firmware>
+    # Upload flags: target config file and firmware image path. When
+    # tool-openocd is not installed (e.g. build-only CI runs) the --openocd
+    # option is omitted on purpose: main() resolves the binary lazily at
+    # upload time, so a plain `pio run` build never touches OpenOCD and
+    # cannot crash on the missing package.
+    flags = [
+        "--target", f"target/{target}.cfg",             # Target config file
+        firmware,                                       # Firmware .elf path
+    ]
+    if openocd_dir is not None:                         # Package present: resolve now
+        # On POSIX the binary has no .exe suffix; pick the name by host OS
+        exe = "openocd.exe" if os.name == "nt" else "openocd"
+        flags = ["--openocd",                           # Resolved OpenOCD binary
+                 os.path.join(openocd_dir, "bin", exe)] + flags
+    # Replace uploader: python <this script> [--openocd <path>] <firmware>
     env.Replace(
         UPLOADER=f'"{sys.executable}" "{script}"',
-        UPLOADERFLAGS=[
-            "--openocd", openocd,                       # Resolved OpenOCD binary
-            "--target", f"target/{target}.cfg",         # Target config file
-            firmware,                                   # Firmware .elf path
-        ])
+        UPLOADERFLAGS=flags)
 
 
 def main() -> int:
@@ -241,8 +250,9 @@ def main() -> int:
         base = os.environ.get(                          # PIO home dir or ~/.platformio
             "PLATFORMIO_HOME_DIR",
             os.path.join(os.path.expanduser("~"), ".platformio"))
+        exe = "openocd.exe" if os.name == "nt" else "openocd"  # Host-specific binary name
         args.openocd = os.path.join(
-            base, "packages", "tool-openocd", "bin", "openocd.exe")
+            base, "packages", "tool-openocd", "bin", exe)
     return run(args.openocd, args.target, args.firmware, args.jobs)
 
 
