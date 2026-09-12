@@ -658,3 +658,21 @@ FLASH: 99520 bytes (75.93% of 131072 bytes): +29776 bytes
 RAM: 11660 bytes (35.58% of 32768 bytes): +3328 bytes
 
 
+## 2026-09-12 - Repo hygiene and build speed
+**Changes:**
+- Ignore .vscode/ and remove it from git tracking
+- Enable PlatformIO build cache (build_cache_dir)
+- Add toolchain and build-cache caching to CI
+- Add tools/protect_main.ps1 to enforce required CI checks on main
+
+**Reasoning:**
+- Faster rebuilds between environments and CI runs
+- Prevent merging branches that do not compile
+
+**Notes:**
+- Run tools/protect_main.ps1 -Token <PAT> once to activate merge protection on GitHub
+
+FLASH: 99520 bytes (75.93% of 131072 bytes): +0 bytes
+RAM: 11660 bytes (35.58% of 32768 bytes): +0 bytes
+
+

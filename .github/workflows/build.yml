@@ -11,6 +11,15 @@
 #  - Uploads the same files as a workflow artifact (available on every run,
 #    including pull requests).
 #
+# Build performance: the PlatformIO toolchains/packages (~/.platformio) and
+# the project build cache (.pio/build_cache, see build_cache_dir in
+# platformio.ini) are cached between runs. A warm cache typically turns a
+# ~5 minute cold build into a ~1-2 minute incremental one.
+#
+# Merge protection: the "Build Firmware" checks produced here are required
+# status checks on main (branch protection / ruleset), so a pull request
+# whose branch does not compile cannot be merged.
+#
 # Triggers: push to main, pull requests to main, and manual dispatch.
 #
 # Copyright 2026, creapunk
@@ -45,6 +54,28 @@ jobs:
         uses: actions/setup-python@v5      # Python for PlatformIO CLI
         with:
           python-version: '3.11'
+
+      # Cache the PlatformIO core itself (penv), plus platforms and packages
+      # (toolchains, framework sources, drivers). Keyed on platformio.ini so a
+      # dependency bump re-downloads while routine code changes do not.
+      - name: Cache PlatformIO toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/penv
+            ~/.platformio/platforms
+            ~/.platformio/packages
+          key: pio-tools-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-tools-${{ runner.os }}-
+
+      # Cache derived build files (objects, archives) across runs, so a pull
+      # request that touches only project sources skips framework compilation.
+      - name: Cache project build cache
+        uses: actions/cache@v4
+        with:
+          path: .pio/build_cache
+          key: pio-build-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('src/**/*.h', 'src/**/*.hpp', 'src/**/*.c', 'src/**/*.cpp') }}
+          restore-keys: pio-build-${{ runner.os }}-${{ matrix.env }}-
 
       - name: Install PlatformIO
         run: pip install -U platformio     # Install the build toolchain manager
