@@ -54,7 +54,7 @@ Once this is completed, simply running `PlatformIO: Upload` will upload the buil
 
 ### Using SWD over USB with STMViewer
 
-- [Debugger](https://hackaday.io/project/192857-swd-over-usb-type-c-new-way-of-programming-boards)
+- [Debugger](https://github.com/creapunk/SWDxUSBC)
 - [STMViewer](https://github.com/klonyyy/STMViewer)
 
 ![STMViewer Overview](https://cdn.hackaday.io/images/original/8468041693931987527.gif)

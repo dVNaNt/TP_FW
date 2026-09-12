@@ -24,7 +24,6 @@ __pycache__/
 .idea/
 
 # LLM assistant steering files
-.llm/
 compile_commands.json
 *.txt
 
