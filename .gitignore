@@ -9,12 +9,22 @@ build/
 .vscode/ipch
 
 private/
-.idea/.gitignore
-.idea/modules.xml
-.idea/TunePulse.iml
-.idea/vcs.xml
 
-.kiro/
+# Legacy code kept locally only, excluded from the repository
+old/
+
+# MCUView project file (local only)
+mcuview.mcuvproj
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
+# JetBrains IDE
+.idea/
+
+# LLM assistant steering files
+.llm/
 compile_commands.json
 *.txt
 

@@ -1,0 +1,79 @@
+/**
+ * @file build.yml
+ * @brief GitHub Actions CI workflow: builds every PlatformIO environment
+ *
+ * The workflow builds each firmware environment defined in platformio.ini
+ * (one matrix job per environment), then publishes the resulting firmware
+ * binaries:
+ *  - Commits `binaries/<env_name>/firmware.bin` and `firmware.elf` back to
+ *    the repository (push builds on main only), so the latest firmware is
+ *    always available directly from the `binaries/` folder on GitHub.
+ *  - Uploads the same files as a workflow artifact (available on every run,
+ *    including pull requests).
+ *
+ * Triggers: push to main, pull requests to main, and manual dispatch.
+ *
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
+ */
+
+name: Build Firmware                       # Workflow display name
+
+on:                                        # Events that trigger the workflow
+  push:
+    branches: [main]                       # Build on every push to main
+  pull_request:
+    branches: [main]                       # Build on pull requests targeting main
+  workflow_dispatch:                       # Allow manual runs from the Actions tab
+
+permissions:
+  contents: write                          # Required to commit binaries back to the repo
+
+jobs:
+  build:
+    runs-on: ubuntu-latest                 # Latest Ubuntu runner
+    strategy:
+      fail-fast: false                     # Keep building other envs if one fails
+      matrix:
+        env: [cln17_v3_release, cln234_release]  # One job per PlatformIO env
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4          # Fetch the full repository
+
+      - name: Set up Python
+        uses: actions/setup-python@v5      # Python for PlatformIO CLI
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install -U platformio     # Install the build toolchain manager
+
+      - name: Build ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}  # Compile the selected environment
+
+      - name: Collect firmware binaries
+        run: |
+          # Place .bin and .elf of this env into its own folder under binaries/
+          mkdir -p binaries/${{ matrix.env }}
+          cp .pio/build/${{ matrix.env }}/firmware.bin binaries/${{ matrix.env }}/firmware.bin
+          cp .pio/build/${{ matrix.env }}/firmware.elf binaries/${{ matrix.env }}/firmware.elf
+
+      - name: Commit binaries to repository
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          # Publish the freshly built firmware into the binaries/ folder
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add binaries
+          # Commit only when the binaries actually changed
+          git diff --cached --quiet || git commit -m "CI: update ${{ matrix.env }} firmware binaries [skip ci]"
+          # Rebase in case the parallel matrix job pushed first, then push
+          git pull --rebase origin main || true
+          git push
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4   # Save binaries as a downloadable artifact
+        with:
+          name: firmware-${{ matrix.env }}
+          path: binaries/${{ matrix.env }}/
