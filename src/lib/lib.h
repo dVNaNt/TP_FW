@@ -15,6 +15,8 @@
  * - @c system_dump        : flash-backed storage for generic user data (2 KB).
  * - @c angle_calibrator   : electrical-angle calibration state machine.
  * - @c position_controller: cascaded position/velocity/current synthesizer.
+ * - @c drive              : control-mode machine, command mailbox and the
+ *                           trajectory queue driven by the communication stack.
  * - @c driver_phy         : physical layer (PWM, ADC current sense, supply).
  * - @c encoder            : magnetic encoder interface.
  *
@@ -38,11 +40,12 @@
 #include "math/motion/motion_governor.h"
 #include "motor_control/calibration/angle_calibrator.h"
 #include "motor_control/current_control/current_control.h"
+#include "math/helpers/buzzer.h"       // MotorSpeaker: coils-as-speaker tone generator
+#include "motor_control/drive_control.h"  // Runtime control-mode machine + trajectory front end
 #include "motor_control/motor.h"
 #include "motor_control/types.h"
 
 #include "drivers/tunepulse_interlayer.h"
-#define DEV_LOG_ENABLE
 // Forward declaration of the board integration type (defined by target layer)
 struct TunePulseHeart;
 
@@ -79,14 +82,30 @@ struct TunePulseHeart;
  *   sample are available (double-buffer handshake via is_changed()).
  * - Reads the encoder, applies sign corrections, then dispatches on
  *   motor_status:
- *     - Success          : run angle correction / closed-loop position control.
+ *     - Success          : run the angle calibration sweep while the table is
+ *                          missing; once calibrated, hand the pass to
+ *                          DriveControl (see below).
  *     - CalibError       : zero the current target (safe stop).
  *     - NotCalibrated    : hold phases shorted (INFINITY) until current-sense
  *                          offset calibration completes.
- *     - anything else    : apply a small negative voltage (-0.1 V) as an
- *                          idle/brake state and return early.
+ *     - anything else    : release the bridge (NaN sentinel) and return early.
  * - Finally computes the alpha-beta voltage vector with FOC and pushes it to
  *   the physical PWM layer.
+ *
+ * Once the drive is calibrated the closed-loop pass is resolved entirely by
+ * @c drive (DriveControl): it drains the command mailbox filled by the
+ * communication stack, services the master-liveness watchdog, advances the
+ * queued trajectory and returns one action plus its targets. tick() only
+ * translates that action into the physical layer, so no control policy is
+ * duplicated here and a remote master and a local caller reach the drive
+ * through exactly the same path.
+ *
+ * PWM sentinel semantics (see timer_pwm_setup.h::pwm_phase_ccr):
+ * - +INFINITY -> INT16_MAX duty on every phase: all HIGH-side switches on, so
+ *   every motor terminal is tied to the DC bus (shorted winding = braking).
+ * - NaN       -> INT16_MIN duty on every phase, whose magnitude exceeds the
+ *   timer period, so BOTH FETs of every phase are disabled: true Hi-Z
+ *   freewheel, not "all low-side on".
  */
 struct TunePulseHeart {
 public:
@@ -113,6 +132,7 @@ public:
 
     AngleCalibrator angle_calibrator;                                   ///< Electrical-angle calibration state machine.
     MotorVectorSynthesis position_controller = MotorVectorSynthesis();  ///< Cascaded position/velocity/current controller.
+    DriveControl drive;                     ///< Control-mode machine, command mailbox and trajectory queue.
     MotorStatus motor_status;               ///< Current high-level motor status (calibration lifecycle).
     uint16_t angle_el_ = 0;                 ///< Last computed electrical rotor angle [0..65535] mapped to 0..360 deg.
     Vec2D_f32 pwm_voltage_ab = {0.0, 0.0};  ///< Last commanded alpha-beta voltage vector [V].
@@ -150,6 +170,7 @@ public:
         : clock_(170000000, freq_hz),
           current_driver(motor_params, driver_phy),                    // Pass feedback and motor reference
           angle_calibrator(freq_hz, motor_params, &calibration_dump),  // Whole motor (with its table) + table flash
+          drive(freq_hz),                                              // Control front end shares the loop rate
           driver_phy(iA_fs, iB_fs, iC_fs, 128, max_sup),
           motor_status(MotorStatus::NotCalibrated) {}
 
@@ -203,6 +224,16 @@ public:
     // the rotor exactly at that zero.
     int32_t pos_hold_target_ = 0;
 
+    /// Current commanded to the FOC loop on the previous pass [A]. Feeds the
+    /// executor torque triggers and the telemetry snapshot, so a segment can
+    /// end on a force condition without the control loop measuring anything new.
+    float last_current_a_ = 0.0f;
+
+    /// Endstop / probe input word handed to the trajectory triggers. No such
+    /// inputs are wired on CLN17 v3 yet, so it stays zero; a board that adds
+    /// them only has to publish their state here.
+    uint8_t io_inputs_ = 0;
+
     /**
      * @brief Periodic control-loop entry point (called once per fresh sample).
      *
@@ -222,6 +253,15 @@ public:
 
     float temperature = 0;
     uint32_t counter = 0;
+
+    /**
+     * @brief Coils-as-speaker tone generator (DriveMode::Tone).
+     *
+     * Constructed at the control-loop rate because it synthesizes the waveform
+     * one sample per control pass: the frequency it is asked for is only
+     * meaningful relative to that rate.
+     */
+    MotorSpeaker speaker{PWM_TIMER_FREQ_HZ};
     void tick() {
         if (is_running.exchange(true, std::memory_order_acq_rel))  // Single-owner entry: drop the sample if a pass is in progress
             return;
@@ -251,6 +291,20 @@ public:
             // ========================================================================
             bool flash_window = false;       // True when THIS pass leaves the bridge in a zero-current state
             float targt = current_target_a;  // Local working copy of the current target [A]
+
+            // Closed loop is reachable only with a valid angle table; every
+            // other state (boot, identification, angle sweep, fault) drives the
+            // bridge directly and bypasses the front end.
+            const bool closed_loop = (motor_status == MotorStatus::Success) && angle_calibrator.is_calibrated();
+            if (!closed_loop) {
+                // Still service the front end so commands arriving during boot
+                // or calibration are consumed rather than piling up in the
+                // mailbox until it overflows, and so the telemetry snapshot
+                // keeps reporting the real position instead of stale zeros.
+                // inhibit = true freezes trajectory time and yields no output:
+                // the branches below command the bridge themselves.
+                (void)drive.tick(real_pos, last_current_a_, io_inputs_, true);
+            }
             switch (motor_status) {
                 case MotorStatus::Success: {
                     if (!angle_calibrator.is_calibrated()) {
@@ -263,6 +317,11 @@ public:
                             // calibration lurch across the 50-pole-pair detent
                             // field that read as "the corrected angle is garbage".
                             pos_hold_target_ = real_pos;
+                            // Rebase the drive front end onto the same position:
+                            // rearm() re-seeds every target and the trajectory
+                            // queue, so the first commanded pass after the sweep
+                            // can never contain a step either.
+                            drive.rearm(real_pos, drive.now_us());
                             targt = current_target_a = 0.5;
                         } else if (angle_calibrator.is_settling() || angle_calibrator.is_persisting() ||
                                    motor_params.is_flash_busy()) {
@@ -279,20 +338,95 @@ public:
                             flash_window = true;  // Zero-current vector latched: NVM programming allowed
                         }
                         break;
-                    } else {
-                        // Real electrical angle (needed for closed loop and sync):
-                        // apply flash-stored correction then the polarity sign.
-                        angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_ang)) *
-                                               -motor_params.get_direction());
-                        targt = position_controller.tick(real_pos, pos_hold_target_, 0.0, current_target_a, 0);
-                        if (motor_params.is_flash_busy()) {
-                            // Motor-profile record write in progress (e.g. the
-                            // post-calibration profile save): the upcoming flash
-                            // programming would freeze this ISR mid-control, so
-                            // command zero current for the transfer ticks.
-                            targt = 0.0f;
-                            flash_window = true;  // Zero-current vector latched: NVM programming allowed
+                    }
+
+                    // Real electrical angle (needed for closed loop and sync):
+                    // apply flash-stored correction then the polarity sign.
+                    angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_ang)) *
+                                           -motor_params.get_direction());
+
+                    // ================================================================
+                    // Closed-loop dispatch through the drive front end.
+                    //
+                    // DriveControl owns everything a remote master can change:
+                    // the control mode, the position/velocity/current targets,
+                    // the trajectory queue and the master-liveness watchdog. It
+                    // resolves all of that into ONE action plus its targets, so
+                    // this branch stays a pure translation from that action to
+                    // the physical layer and no control policy lives here.
+                    //
+                    // A motor-profile record write (e.g. the post-calibration
+                    // save) is signalled as an NVM window: the front end then
+                    // freezes trajectory time and commands zero current for the
+                    // transfer ticks, which is exactly what this branch did
+                    // before the front end existed.
+                    // ================================================================
+                    const bool nvm_window = motor_params.is_flash_busy();
+                    const DriveOutput cmd = drive.tick(real_pos, last_current_a_, io_inputs_, nvm_window);
+
+                    switch (cmd.action) {
+                        case DriveAction::RunPosition:
+                            // Cascaded position loop against the resolved target.
+                            targt = position_controller.tick(real_pos, cmd.target_pos_q16, cmd.target_vel_rps,
+                                                             cmd.max_current_a, false);
+                            break;
+                        case DriveAction::RunTorque:
+                            // Position loop bypassed: command the q-axis current directly.
+                            targt = cmd.torque_target_a;
+                            break;
+                        case DriveAction::Tone: {
+                            // The coils are a speaker: no regulator runs and the
+                            // alpha-beta vector comes straight from the tone
+                            // generator, one sample per control pass.
+                            //
+                            // Amplitude is a Q15 fraction of the measured supply
+                            // rail rather than a fixed voltage, so a note keeps
+                            // the same loudness as the bus sags, and the same
+                            // command is safe on a 12 V and a 48 V bus.
+                            // Full-scale carrier: MotorSpeaker's second argument
+                            // IS the generator amplitude, so passing 0 here
+                            // silences it outright. Loudness is applied below in
+                            // volts instead, which keeps it explicit and
+                            // independent of the class's internal base level.
+                            const Vec2D wave = speaker.tick(cmd.tone_freq_hz, 32767);
+                            const float scale = (cmd.tone_amp_q15 * driver_phy.supply.get_voltage()) / 32768.0f / 32768.0f;
+                            pwm_voltage_ab.a = (float)wave.a * scale;
+                            pwm_voltage_ab.b = (float)wave.b * scale;
+                            driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+                            last_current_a_ = 0.0f;              // Nothing commanded through FOC
+                            // The bridge IS driven here, so this is emphatically
+                            // not a window in which flash may be programmed.
+                            tp_flash_programming_window = false;
+                            is_running.store(false, std::memory_order_release);
+                            return;
                         }
+                        case DriveAction::Brake: {
+                            // INFINITY sentinel: all high-side switches ON, so every
+                            // motor terminal is tied to the DC bus. The shorted
+                            // winding brakes the rotor and no vector is latched.
+                            pwm_voltage_ab.a = pwm_voltage_ab.b = INFINITY;
+                            driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+                            last_current_a_ = 0.0f;             // Nothing commanded through FOC
+                            tp_flash_programming_window = true;  // Phases shorted: NVM programming safe
+                            is_running.store(false, std::memory_order_release);
+                            return;
+                        }
+                        case DriveAction::Freewheel:
+                        default: {
+                            // NaN sentinel: INT16_MIN duty on all phases, which the
+                            // PWM backend resolves to |duty| >= period, i.e. BOTH
+                            // FETs of every phase disabled (glitch-free Hi-Z).
+                            pwm_voltage_ab.a = pwm_voltage_ab.b = NAN;
+                            driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+                            last_current_a_ = 0.0f;             // Nothing commanded through FOC
+                            tp_flash_programming_window = true;  // Bridge released: NVM programming safe
+                            is_running.store(false, std::memory_order_release);
+                            return;
+                        }
+                    }
+
+                    if (nvm_window) {
+                        flash_window = true;  // Zero-current vector latched: NVM programming allowed
                     }
 
                     break;
@@ -328,12 +462,9 @@ public:
                 }
             }
 
-            if (!is_pos_used) {
-                targt = current_target_a;
-            }
-
             // Final FOC step: convert (electrical angle, q-current target) into
             // an alpha-beta voltage vector and hand it to the physical layer.
+            last_current_a_ = targt;  // Remember what FOC was asked for: next pass feeds it to the triggers
             pwm_voltage_ab = current_driver.tick_control_foc((int16_t)angle_el_, targt);
             driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
 
@@ -348,5 +479,4 @@ public:
         is_running.store(false, std::memory_order_release);
     }
 
-    bool is_pos_used = 1;
 };

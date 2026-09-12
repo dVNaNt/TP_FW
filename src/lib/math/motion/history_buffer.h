@@ -108,6 +108,9 @@ public:
     inline void trim_to_active()   { if (cursor_ > tail_) tail_ = cursor_ - 1; }
     inline void trim_all_history() { tail_ = cursor_; }
 
+    /// @brief Free slots left for new segments (history is evicted before this hits zero).
+    inline size_t free_count() const { return (head_ - tail_ >= N) ? 0 : (N - (head_ - tail_)); }
+
     inline size_t future_count() const { return head_ - cursor_; }
     inline size_t history_count() const { return (cursor_ > tail_) ? (cursor_ - tail_ - 1) : 0; }
 };
