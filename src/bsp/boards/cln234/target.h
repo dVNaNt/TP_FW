@@ -1,0 +1,153 @@
+/**
+ * @file target.h
+ * @brief Board-configuration umbrella for the CLN234 hardware.
+ *
+ * Collects MCU clock constants, PWM timer frequency/period, ADC full-scale
+ * definitions (SYS_PARAMS) and pulls in all peripheral setup headers.
+ *
+ * Board summary:
+ * - MCU            : STM32G474CEU6 (512 KiB flash, 128 KiB SRAM, LQFP48)
+ * - Gate driver    : DRV8353 (SPI), enabled by DRV_EN, fault on DRV_ERR
+ * - Encoder        : MT6835 (21-bit absolute), SPI mode 3
+ * - Shared SPI bus : DRV8353 and MT6835 both sit on SPI1 with separate
+ *                    chip selects (DRV_CS on PC15, ENC_CS on PA4). The bus
+ *                    boots directly in MT6835 encoder mode (8-bit, mode 3,
+ *                    DMA angle polling). The DRV8353 SPI primitives are
+ *                    kept but unused for now - the gate driver runs on its
+ *                    hardware defaults (DRV_EN = HIGH only).
+ * - Status LED     : WS2812 on PC6 (TIM8_CH1 PWM, open-drain output)
+ * - CAN            : FDCAN1 on PB8/PB9, transceiver standby on PC13
+ *
+ * The macros SupplyVoltage/Motor/MotorType/PhasePattern/ControlMode/
+ * DriverStatus defined here are #undef'd by tunepulse.h after inclusion.
+ * Copyright 2026, creapunk
+ * Licensed under the Apache License, Version 2.0
+ */
+
+#pragma once
+
+#ifndef TARGET_CLN234  // Also passed on the command line (-D) - avoid redefinition warnings
+#define TARGET_CLN234
+
+#endif
+
+#include "Arduino.h"
+
+// Bring in the shared-SPI bus setup: the DRV8353/MT6835 bus arbitration
+// primitives are needed by the driver and encoder layers below.
+#include "spi_setup.h"
+
+namespace PINOUT {
+// Motor Control (PWM & Sensing)
+constexpr PinName PWM1H = PA_8;   // TIM1_CH1 - High-side Gate 1
+constexpr PinName PWM2H = PA_9;   // TIM1_CH2 - High-side Gate 2
+constexpr PinName PWM3H = PA_10;  // TIM1_CH3 - High-side Gate 3
+constexpr PinName PWM1L = PB_13;  // TIM1_CH1N - Low-side Gate 1
+constexpr PinName PWM2L = PB_14;  // TIM1_CH2N - Low-side Gate 2
+constexpr PinName PWM3L = PB_15;  // TIM1_CH3N - Low-side Gate 3
+
+// Gate-driver control pins
+constexpr PinName DRV_EN = PB_12;     // Driver Enable (active high)
+constexpr PinName DRV_ERR = PB_1;     // Driver nFAULT input (active low)
+
+// Current sensing (ADC, fed by the DRV8353 integrated shunt amplifiers)
+constexpr PinName I_A = PA_3;   // ADC1_IN4  - Current Sense Phase A
+constexpr PinName I_B = PA_1;   // ADC2_IN2  - Current Sense Phase B
+constexpr PinName I_C = PB_0;   // ADC1_IN15 - Current Sense Phase C
+
+// Voltage sensing
+constexpr PinName VSENS = PA_0;  // ADC2_IN1 - Bus Voltage Sense
+constexpr PinName ENC_CAL = PA_2; // Encoder calibration output (analog, unused for now)
+constexpr PinName TEMP = PC_4;   // ADC2_IN5 - External board temperature sensor
+
+// CAN bus
+constexpr PinName CAN_RX = PB_8;   // CAN Receive (also BOOT0)
+constexpr PinName CAN_TX = PB_9;   // CAN Transmit
+constexpr PinName CAN_SD = PC_13;  // CAN Transceiver Standby/Shutdown
+
+// Expansion UART (USART3)
+constexpr PinName EXP_TX = PC_10;  // Expansion UART TX
+constexpr PinName EXP_RX = PC_11;  // Expansion UART RX
+
+// Shared encoder / gate-driver SPI bus (SPI1)
+constexpr PinName ENC_SCK = PA_5;   // SPI1 SCK (AF5)
+constexpr PinName ENC_MISO = PA_6;  // SPI1 MISO (AF5)
+constexpr PinName ENC_MOSI = PA_7;  // SPI1 MOSI (AF5)
+constexpr PinName ENC_CS = PA_4;    // MT6835 Chip Select (GPIO)
+constexpr PinName DRV_CS = PC_15;   // DRV8353 Chip Select (GPIO)
+
+// Control connector A (SPI3 / step-dir / ABZ)
+constexpr PinName CTRL_A_SCK = PB_3;    // CTRL.A_SCK | SPI3 CLK | USART2 TX | TIM3 Z
+constexpr PinName CTRL_A_MISO = PB_4;   // CTRL.A_MISO | SPI3 MISO | USART2 RX | TIM3 B
+constexpr PinName CTRL_A_MOSI = PB_5;   // CTRL.A_MOSI | SPI3 MOSI | USART2 CK | TIM3 A
+constexpr PinName CTRL_A_CS = PB_11;    // CTRL.A_CS (GPIO)
+
+// Control connector B (I2C1 / LPUART1)
+constexpr PinName CTRL_B_SCL = PA_15;   // CTRL.B_SCL | I2C1 SCL
+constexpr PinName CTRL_B_A = PB_6;      // CTRL.B_A | I2C1 SDA (alt function)
+constexpr PinName CTRL_B_SDA = PB_7;    // CTRL.B_SDA/B | I2C1 SDA
+constexpr PinName CTRL_B_TX = PC_10;    // CTRL.B_TX | LPUART1_TX
+constexpr PinName CTRL_B_RX = PC_11;    // CTRL.B_RX | LPUART1_RX
+
+// User interface & misc
+constexpr PinName LED = PC_6;        // WS2812 status LED (TIM8_CH1, open-drain)
+constexpr PinName SW1 = PC_14;       // Switch/button (active low)
+
+// Debug interface
+constexpr PinName IO_SWDIO = PA_13;  // SWD Data
+constexpr PinName IO_SWCLK = PA_14;  // SWD Clock
+}  // namespace PINOUT
+
+namespace SYS_PARAMS {
+    // NOTE: the current-sense full scales below are inherited from the
+    // CLN17 v3 design as a bring-up default. They MUST be re-derived for
+    // the CLN234 shunt resistors and the DRV8353 CSA gain (see drv8353.h,
+    // CSA_CTRL.CSA_GAIN) once the board BOM is fixed.
+    constexpr float MAX_SUPPLY_FS = 109.4;       // Bus voltage ADC full scale [V]
+    constexpr float IA_MAX_CURRENT_FS = 23.5;    // Phase A current full scale [A]
+    constexpr float IB_MAX_CURRENT_FS = 23.5;    // Phase B current full scale [A]
+    constexpr float IC_MAX_CURRENT_FS = 23.5;    // Phase C current full scale [A]
+    constexpr int32_t ADC_DELAY_TICKS_CONST = 120;  // ADC trigger offset after PWM center
+    constexpr int32_t DEADTIME_TICKS_CONST = 20;    // TIM1 dead-time in timer ticks
+}
+
+// ---------------------------------------------------------------------------
+// Boot button (SW1) wiring, consumed by bsp/stm32g4/bootloader.h
+// ---------------------------------------------------------------------------
+// SW1 is on PC14, active low. Holding it for three seconds at boot enters the
+// USB DFU bootloader. The pin, its EXTI line and the vector that line belongs to
+// are all board facts, so the shared driver reads them from here instead of
+// branching on a board name.
+#define BOOT_BUTTON_LL_PIN    LL_GPIO_PIN_14
+#define BOOT_BUTTON_EXTI_LINE LL_EXTI_LINE_14
+#define BOOT_BUTTON_IRQN      EXTI15_10_IRQn
+
+// ---------------------------------------------------------------------------
+// Persistent NVM layout, consumed by bsp/stm32g4/nvm_flash.h
+// ---------------------------------------------------------------------------
+// CLN234 is an STM32G474CE: 512 KiB of flash. The node-configuration partition is
+// sized zero for now, which keeps EEPROM_BASE and the calibration/user partitions
+// byte-identical to the layout this board has already been flashed with. It gets a
+// real size when the CAN protocol is wired up on this board, and that change will
+// move the other two partitions, so it requires a recalibration.
+#define NVM_CONFIG_SECTION_SIZE 0UL
+
+// ---------------------------------------------------------------------------
+// Comparator protection policy, consumed by bsp/stm32g4/comp_dac.h
+// ---------------------------------------------------------------------------
+// The comparator vectors are NOT armed on this board yet. This is deliberate and
+// temporary: bring-up disabled the hardware OC/OV protection while the phase
+// channel-pairing fix is validated. The EXTI lines stay armed, so pending flags
+// accumulate harmlessly and the handlers are simply never invoked. Arming them
+// is a hardware-safety decision that needs a bench check per phase, not a code
+// change alone. This board reports gate-driver faults on PB1 instead, handled
+// separately in drv_err_setup.h.
+#define BOARD_COMP_IRQ_ARMED      0
+#define BOARD_HAS_DRV_FAULT_EXTI  0
+
+// ---------------------------------------------------------------------------
+// CAN transceiver wiring, consumed by bsp/stm32g4/fdcan.h
+// ---------------------------------------------------------------------------
+// FDCAN1 is on PB9 (TX) / PB8 (RX) on both boards; only the transceiver
+// stand-by control differs. It is on PC13 here, driven LOW to enable.
+#define BOARD_CAN_STANDBY_PIN 13
