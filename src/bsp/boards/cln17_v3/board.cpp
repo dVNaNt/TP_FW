@@ -117,6 +117,11 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
 
         POSITION_MT_STATUS = (uint8_t)(SPI1_RX_BUF[4] & 0x07U); // Status bits: overspeed / weak field / undervoltage
         POSITION_MT_CRC    = SPI1_RX_BUF[5];                    // Received CRC-8 for diagnostics
+
+        // Raise the encoder fault while any sensor status bit is set: the
+        // atomic flag fires the registered fault action once on the rising
+        // edge, so a healthy reading clears it on the next frame.
+        TP.encoder.set_fault(POSITION_MT_STATUS != 0U);
 #else
         // TLE5012B: 15-bit left-aligned angle from RX[2..3]
         POSITION_ENCODER_TLE = ((uint16_t)SPI1_RX_BUF[2] << 9) | ((uint16_t)SPI1_RX_BUF[3] << 1);
