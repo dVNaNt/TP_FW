@@ -49,10 +49,10 @@ Reference build (clean `main`): RAM 7420 B, Flash 64664 B.
 
 ## Changelog
 
-Every substantive change gets an entry via the generator — do not hand-edit `changelog.md`:
+Every substantive change gets an entry via the generator — do not hand-edit `changelog/changelog.md`:
 
 ```bash
-python changelogger.py "Summary" "Change A; Change B" "Reason A; Reason B" "Notes" <flash_bytes> <ram_bytes>
+python changelog/changelogger.py "Summary" "Change A; Change B" "Reason A; Reason B" "Notes" <flash_bytes> <ram_bytes>
 ```
 
 Semicolons split a field into bullets. The script diffs against the previous entry's sizes, so the

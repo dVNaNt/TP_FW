@@ -2,10 +2,11 @@ import argparse
 import datetime
 import os
 import re
-import sys                                      # Path of the tools directory
+import sys                                      # Path manipulation for imports
 
-sys.path.insert(0, os.path.join(                # Make tools/ importable by path
-    os.path.dirname(os.path.abspath(__file__)), "tools"))
+# Project root is one level above this script (changelog/)
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "tools"))  # Make tools/ importable by path
 import tg_log                                   # Console + Telegram logging setup
 
 MAX_FLASH = 131072
@@ -27,7 +28,7 @@ def get_previous_sizes(filepath):
     return prev_flash, prev_ram
 
 def format_as_list(text):
-    # Разбиваем текст по ';' или переносам строк для генерации markdown-списка
+    # Split the text by ';' or newlines to build a markdown list
     items = [item.strip() for item in re.split(r'[;\n]', text) if item.strip()]
     if not items:
         return "- None"
@@ -47,7 +48,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Файл создается в той же директории, где лежит скрипт
+    # Changelog file lives next to the script (changelog/changelog.md)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     changelog_path = os.path.join(script_dir, "changelog.md")
     

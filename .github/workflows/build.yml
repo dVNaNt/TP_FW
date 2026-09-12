@@ -1,21 +1,21 @@
-/**
- * @file build.yml
- * @brief GitHub Actions CI workflow: builds every PlatformIO environment
- *
- * The workflow builds each firmware environment defined in platformio.ini
- * (one matrix job per environment), then publishes the resulting firmware
- * binaries:
- *  - Commits `binaries/<env_name>/firmware.bin` and `firmware.elf` back to
- *    the repository (push builds on main only), so the latest firmware is
- *    always available directly from the `binaries/` folder on GitHub.
- *  - Uploads the same files as a workflow artifact (available on every run,
- *    including pull requests).
- *
- * Triggers: push to main, pull requests to main, and manual dispatch.
- *
- * Copyright 2026, creapunk
- * Licensed under the Apache License, Version 2.0
- */
+# =============================================================================
+# @file build.yml
+# @brief GitHub Actions CI workflow: builds every PlatformIO environment
+#
+# The workflow builds each firmware environment defined in platformio.ini
+# (one matrix job per environment), then publishes the resulting firmware
+# binaries:
+#  - Commits `binaries/<env_name>/firmware.bin` and `firmware.elf` back to
+#    the repository (push builds on main only), so the latest firmware is
+#    always available directly from the `binaries/` folder on GitHub.
+#  - Uploads the same files as a workflow artifact (available on every run,
+#    including pull requests).
+#
+# Triggers: push to main, pull requests to main, and manual dispatch.
+#
+# Copyright 2026, creapunk
+# Licensed under the Apache License, Version 2.0
+# =============================================================================
 
 name: Build Firmware                       # Workflow display name
 
