@@ -301,9 +301,15 @@ inline void tunepulse_init() {
         .ext_cb(PWM_Set_All_HiZ)
         .uv_cb(PWM_Set_All_HiZ)
         .ot_cb(PWM_Set_All_HiZ)   // Software overtemperature: same Hi-Z safe state as hardware faults
-        .op_cb(PWM_Set_All_HiZ).phase_cb(PWM_Set_All_HiZ)  // Software overpower: Hi-Z safe state on power/current limit violation
-        .enc_cb(PWM_Set_All_HiZ);                           // Position feedback lost: Hi-Z rather than a loop chasing a phantom
+        .op_cb(PWM_Set_All_HiZ).phase_cb(PWM_Set_All_HiZ);  // Software overpower: Hi-Z safe state on power/current limit violation
     TP.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
+
+    // Position feedback lost (the board's link supervisor or the sensor's own
+    // status bits raised the encoder flag): release the bridge at once, from
+    // the acquisition ISR, rather than let a loop chase a phantom position.
+    // The encoder is not a driver fault source; the control loop keeps the
+    // bridge released and refuses closed loop while the flag is latched.
+    TP.encoder.set_callback().fault_cb(PWM_Set_All_HiZ);
 
     delay(100);
 

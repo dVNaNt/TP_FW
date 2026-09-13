@@ -81,6 +81,28 @@ typedef void (*TpBindFilters)(uint8_t node_id, bool promiscuous);
 /** @brief Reboot the device; mode 1 jumps into the USB DFU bootloader. */
 typedef void (*TpRebootFn)(uint8_t mode);
 
+/**
+ * @brief Health of the link to the position sensor, as the board sees it.
+ *
+ * Frame validation is board code (what a valid frame looks like, how the bus
+ * is reset and what the sensor's status bits mean are properties of one SPI
+ * link and one chip), so the engine does not read it from the generic
+ * Encoder object: the board fills this snapshot on request through the probe
+ * registered with bind_encoder_link(). Diagnostics record 0x43/0x07 is the
+ * wire form of it; a board that registers no probe answers NOT_IMPLEMENTED.
+ */
+struct TpEncoderLinkInfo {
+    bool     check_proven;   ///< The integrity check has proven itself and failing frames are dropped.
+    bool     link_down;      ///< The link is declared down: nothing is ingested, the encoder fault is raised.
+    uint8_t  sensor_status;  ///< The sensor's own status bits from the last accepted frame (low 3 bits).
+    uint16_t relinks;        ///< Bus resets since boot.
+    uint32_t frames_bad;     ///< Frames that failed the check since boot.
+    uint32_t frames_ok;      ///< Frames that passed since boot.
+};
+
+/** @brief Fill a TpEncoderLinkInfo snapshot (board-provided). */
+typedef void (*TpEncoderLinkProbe)(TpEncoderLinkInfo& out);
+
 // ============================================================================
 // Protocol engine
 // ============================================================================
@@ -110,6 +132,12 @@ public:
      * @param reboot    Reboot / DFU entry function.
      */
     void bind_platform(FlashEEPROM* cfg_flash, TpRebootFn reboot);
+
+    /**
+     * @brief Register the board's position-sensor link probe (optional).
+     * @param probe Fills a TpEncoderLinkInfo; nullptr leaves 0x43/0x07 unimplemented.
+     */
+    void bind_encoder_link(TpEncoderLinkProbe probe) { encoder_link_ = probe; }
 
     /**
      * @brief Bring the protocol up: identity, stored configuration, filters.
@@ -458,6 +486,7 @@ private:
     TpFrameWrite      write_ = nullptr;         ///< Transport TX callback.
     TpBindFilters     bind_filters_ = nullptr;  ///< Transport filter rebind callback.
     TpRebootFn        reboot_ = nullptr;        ///< Reset / DFU entry.
+    TpEncoderLinkProbe encoder_link_ = nullptr; ///< Board probe behind diagnostics 0x43/0x07.
 
     TpNodeConfig   config_;     ///< Live configuration shadow.
     TpNodeIdentity identity_;   ///< Immutable device identity.

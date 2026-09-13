@@ -196,8 +196,7 @@ enum TpSubAxis : uint8_t {
 enum TpSubCurrents : uint8_t {
     TP_SUB_CURRENTS_DQ    = 0x00u,  ///< Supply current, q-axis current, d-axis current.
     TP_SUB_CURRENTS_AB    = 0x01u,  ///< Supply current, alpha (coil A) current, beta (coil B) current.
-    TP_SUB_CURRENTS_SUM   = 0x02u,  ///< Supply current, third-channel current, sum of all three (Kirchhoff residual).
-    TP_SUB_CURRENTS_COUNT = 0x03u   ///< Number of records in the group.
+    TP_SUB_CURRENTS_COUNT = 0x02u   ///< Number of records in the group.
 };
 
 /** Sub identifiers of the 0x43 diagnostics group. */

@@ -74,11 +74,118 @@ static volatile uint32_t POSITION_ENCODER_MT_RAW = 0; // 32-bit left-aligned ang
 static volatile uint8_t  POSITION_MT_STATUS = 0;      // STATUS[2:0]: overspeed / weak field / undervoltage
 static volatile uint8_t  POSITION_MT_CRC = 0;         // CRC-8 received from the sensor
 
-// Frame validation: every burst frame carries the sensor's CRC-8 and the DMA
-// completion handler (board.cpp) checks it before publishing the angle. The
-// accept / drop policy and the statistics live in the generic Encoder object
-// (Encoder::accept_frame), so the protocol can report them without reaching
-// into board code; this header only decodes bytes.
+// ==============================================================================
+// LINK SUPERVISION (frame validation, link-down detection, bus reset requests)
+// ==============================================================================
+/**
+ * @brief Health of the SPI link to the MT6835, kept by the acquisition ISR.
+ *
+ * Every burst frame carries the sensor's CRC-8, and the DMA completion
+ * handler (board.cpp) checks it before anything of the frame is published.
+ * A frame that fails the check is not a position: it is a bus glitch, a
+ * transfer cut short by a preempting interrupt, or a sensor that stopped
+ * answering (an idle-high data line reads as the top of the range).
+ * Integrating such a frame counts a whole revolution whenever the garbage
+ * lands on the far side of the half-turn boundary, so a run of them walked
+ * the turn counter hundreds of turns away from a stationary rotor and left
+ * the position loop chasing a phantom. Bad frames are therefore dropped and
+ * the last good angle stands for that control period.
+ *
+ * The check has to prove itself before it may drop anything: if the CRC
+ * routine ever disagreed with the sensor (wrong polynomial, byte order),
+ * rejecting every frame would blind the drive outright. Frames are only
+ * rejected once kTrustAfter consecutive frames have passed on this boot with
+ * no failure before them.
+ *
+ * A link that fails for kFaultRun consecutive frames is DOWN: NOTHING is
+ * ingested any more, not even a frame that happens to pass (one corrupted
+ * frame in 256 carries a matching CRC by chance, and on a persistently broken
+ * link those few dozen a second were enough to walk the turn counter away by
+ * themselves), and the ISR raises the generic encoder fault flag so the
+ * control loop releases the bridge. A bus reset (Encoder_Relink) is requested
+ * once per kFaultRun failures while the link stays down, so a dead sensor is
+ * retried a few hundred times a second at the cost of one reset each, never
+ * in a tight loop. The link is up again, and ingestion resumes, only after
+ * kTrustAfter consecutive valid frames.
+ *
+ * This is deliberately BOARD code: what a valid frame looks like, how the
+ * bus is reset and what the sensor's status bits mean are all properties of
+ * this SPI link and this chip. The generic Encoder object only tracks the
+ * position and carries the fault flag; it validates nothing.
+ *
+ * Single writer (the DMA completion ISR); the protocol reads the counters
+ * from thread mode as a snapshot, torn reads are acceptable for statistics.
+ */
+struct EncoderLink {
+    static constexpr uint32_t kTrustAfter = 256;  ///< Consecutive valid frames that prove the check / recover the link.
+    static constexpr uint16_t kFaultRun = 64;     ///< Consecutive failures that mean the sensor is gone (3.2 ms at 20 kHz).
+
+    uint32_t frames_ok = 0;       ///< Frames that passed the check since boot.
+    uint32_t frames_bad = 0;      ///< Frames that failed it since boot.
+    uint16_t bad_run = 0;         ///< Consecutive failures right now.
+    uint16_t bad_run_max = 0;     ///< Longest failure run since boot.
+    uint16_t good_run = 0;        ///< Consecutive passes while the link is proving its recovery.
+    uint16_t relinks = 0;         ///< Bus resets requested since boot.
+    uint8_t  sensor_status = 0;   ///< STATUS[2:0] of the last accepted frame: overspeed / weak field / undervoltage.
+    bool     check_trusted = false;  ///< Check proven on this boot: failing frames are dropped.
+    bool     link_down = false;      ///< Link declared down: ingestion suspended, fault flag raised by the ISR.
+    bool     relink_request = false; ///< A bus reset is owed to the ISR.
+
+    /**
+     * @brief Decide whether a freshly received frame may be ingested.
+     * @param valid true when the frame's CRC-8 matched.
+     * @return true when the frame should be published (angle + status).
+     */
+    inline bool accept(bool valid) {
+        if (valid) {
+            frames_ok++;                                             // Statistics
+            if (!check_trusted && (frames_ok >= kTrustAfter) && (frames_bad == 0u)) {
+                check_trusted = true;                                // The check agrees with the sensor: arm the drop
+            }
+            bad_run = 0;                                             // Sensor is answering
+            if (link_down) {
+                if (++good_run >= kTrustAfter) {
+                    link_down = false;                               // Link re-established
+                    good_run = 0;
+                } else {
+                    return false;                                    // Still proving the recovered link
+                }
+            }
+            return true;
+        }
+        frames_bad++;                                                // Statistics
+        good_run = 0;                                                // A recovering link starts over
+        if (bad_run < UINT16_MAX) {
+            bad_run++;                                               // Length of the current failure run
+        }
+        if (bad_run > bad_run_max) {
+            bad_run_max = bad_run;                                   // Worst run seen, for the diagnostics
+        }
+        if (check_trusted && (bad_run % kFaultRun) == 0u) {
+            link_down = true;                                        // No valid frame for kFaultRun periods
+            relink_request = true;                                   // Ask for a bus reset (once per run)
+        }
+        return !check_trusted;                                       // Unproven check: ingest as before
+    }
+
+    /**
+     * @brief Hand over a pending bus reset request.
+     * @return true exactly once per request.
+     */
+    inline bool take_relink_request() {
+        if (!relink_request) {
+            return false;
+        }
+        relink_request = false;
+        if (relinks < UINT16_MAX) {
+            relinks++;                                               // Bus resets since boot
+        }
+        return true;
+    }
+};
+
+/** The link supervisor of the encoder SPI bus (written by the DMA completion ISR). */
+static EncoderLink ENCODER_LINK;
 #else
 static uint8_t SPI1_TX_BUF[4] __attribute__((aligned(4))) = // TLE5012B TX frame: angle-read command
     {0x80, 0x20, 0xFF, 0xFF};
@@ -249,7 +356,7 @@ static inline void Encoder_StartTransfer() {
  * @brief Reset the encoder SPI link: abort any transfer, flush the receive
  *        FIFO, clear the DMA flags and re-enable the peripheral.
  *
- * Called from the completion handler when Encoder::accept_frame() reports
+ * Called from the completion handler when EncoderLink::accept() reports
  * that the link has been down for a run of frames. A byte left in the SPI
  * receive FIFO shifts every later frame; disabling the SPI and draining the
  * FIFO is the only way to realign it. The next timer trigger starts a fresh

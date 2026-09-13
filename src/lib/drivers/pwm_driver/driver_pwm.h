@@ -17,7 +17,7 @@
  *
  * ## Fault Management Architecture
  *
- * The driver maintains a unified fault bitfield (@ref fault_flags_) with eight fault sources:
+ * The driver maintains a unified fault bitfield (@ref fault_flags_) with seven fault sources:
  *
  * | Bit | Fault         | Safe State | Recovery Timer  |
  * |-----|---------------|------------|-----------------|
@@ -28,10 +28,9 @@
  * | 4   | Undervoltage  | HiZ        | VoltageProtectionProxy |
  * | 5   | Overpower     | HiZ        | Power::OverpowerProxy |
  * | 6   | Phase error   | HiZ        | None (follows MotorControl error state) |
- * | 7   | Encoder       | HiZ        | None (manual: raised by the control loop while the position feedback is lost) |
  *
- * **Priority**: EXT (8) > ENC (7) > OV (6) > UV (5) > OC (4) > PHASE (3) > OP (2) > OT (1). The
- * highest-priority active fault determines which callback fires. When all faults clear, the restore
+ * **Priority**: EXT (7) > OV (6) > UV (5) > OC (4) > PHASE (3) > OP (2) > OT (1). The highest-priority
+ * active fault determines which callback fires. When all faults clear, the restore
  * callback fires.
  *
  * ## Thread Safety
@@ -113,7 +112,6 @@ public:
         FAULT_UNDERVOLTAGE = 1 << 4,  ///< HiZ
         FAULT_OVERPOWER = 1 << 5,     ///< HiZ
         FAULT_PHASE = 1 << 6,         ///< HiZ (MotorControl voltage/current path)
-        FAULT_ENCODER = 1 << 7,       ///< HiZ (position feedback lost: the control loop must not run closed loop)
     };
 
 private:
@@ -132,7 +130,6 @@ private:
     void (*cb_ext_)() = nullptr;      ///< External fault callback
     void (*cb_op_)() = nullptr;       ///< Overpower fault callback
     void (*cb_phase_)() = nullptr;    ///< Phase-stage error callback
-    void (*cb_enc_)() = nullptr;      ///< Encoder (position feedback lost) callback
     void (*cb_restore_)() = nullptr;  ///< Restore callback (fires when all faults clear)
 
     std::atomic<uint8_t> active_priority_ = 0;  ///< Tracks the highest active priority for callback logic
@@ -141,8 +138,7 @@ private:
      * @brief Get the priority of the highest active fault.
      *
      * Priority encoding (higher number = higher priority):
-     * - 8: External hardware fault
-     * - 7: Encoder (position feedback lost)
+     * - 7: External hardware fault
      * - 6: Overvoltage
      * - 5: Undervoltage
      * - 4: Overcurrent
@@ -152,12 +148,10 @@ private:
      * - 0: No fault active
      *
      * @param flags Current fault flags bitfield
-     * @return Priority level (0..8)
+     * @return Priority level (0..7)
      */
     inline uint8_t get_top_priority(uint8_t flags) const {
         if (flags & FAULT_EXTERNAL)
-            return 8;
-        if (flags & FAULT_ENCODER)
             return 7;
         if (flags & FAULT_OVERVOLTAGE)
             return 6;
@@ -180,17 +174,13 @@ private:
      * Each callback is checked for nullptr before invocation — callbacks are
      * optional and may be left unset.
      *
-     * @param priority Priority level (0=restore, 1=OT, 2=OP, 3=PHASE, 4=OC, 5=UV, 6=OV, 7=ENC, 8=EXT)
+     * @param priority Priority level (0=restore, 1=OT, 2=OP, 3=PHASE, 4=OC, 5=UV, 6=OV, 7=EXT)
      */
     inline void trigger_cb(uint8_t priority) {
         switch (priority) {
-            case 8:
+            case 7:
                 if (cb_ext_)
                     cb_ext_();
-                break;
-            case 7:
-                if (cb_enc_)
-                    cb_enc_();
                 break;
             case 6:
                 if (cb_ov_)
@@ -516,15 +506,6 @@ struct FaultCallbackProxy {
         return *this;
     }
     /**
-     * @brief Set encoder fault callback (position feedback lost).
-     * @param cb Function pointer (nullptr to unset)
-     * @return Reference to this proxy for chaining
-     */
-    inline FaultCallbackProxy& enc_cb(void (*cb)()) {
-        drv_.cb_enc_ = cb;
-        return *this;
-    }
-    /**
      * @brief Set restore callback (fired when all faults clear).
      * @param cb Function pointer (nullptr to unset)
      * @return Reference to this proxy for chaining
@@ -689,25 +670,6 @@ struct FaultTriggerProxy {
             drv_.check_and_trigger_priority(old | DriverPWM::FAULT_EXTERNAL);
         } else {
             drv_.fault_flags_.fetch_and(~DriverPWM::FAULT_EXTERNAL, std::memory_order_relaxed);
-        }
-    }
-
-    /**
-     * @brief Trigger or clear the encoder fault (forces HiZ).
-     *
-     * Raised by the control loop while the position feedback is lost (the
-     * encoder link reports itself down); there is no recovery timer, the
-     * condition re-asserts the bit on the next control pass for as long as
-     * it lasts, so a fault reset releases it only once the link is back.
-     *
-     * @param state true to trigger, false to clear
-     */
-    inline void encoder(bool state) {
-        if (state) {
-            uint8_t old = drv_.fault_flags_.fetch_or(DriverPWM::FAULT_ENCODER, std::memory_order_relaxed);
-            drv_.check_and_trigger_priority(old | DriverPWM::FAULT_ENCODER);
-        } else {
-            drv_.fault_flags_.fetch_and((uint8_t)~DriverPWM::FAULT_ENCODER, std::memory_order_relaxed);  // Bit 7: mask must stay 8 bits wide
         }
     }
 };

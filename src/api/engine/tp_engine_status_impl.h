@@ -24,7 +24,7 @@ inline uint8_t TpProtocol::drive_state() const {
     if (reboot_pending_) {
         return TP_STATE_REBOOTING;                       // Reset already armed
     }
-    if (tp_->driver_phy.get_fault() != 0u) {
+    if (tp_->fault_byte() != 0u) {
         return TP_STATE_FAULT;                           // A latched fault wins over everything
     }
     if (config_.node_id == TP_NODE_UNASSIGNED) {
@@ -104,7 +104,7 @@ inline float TpProtocol::motor_temperature() const {
 }
 
 inline float TpProtocol::load_ratio() const {
-    if (tp_->driver_phy.get_fault() != 0u) {
+    if (tp_->fault_byte() != 0u) {
         return 2.0f;                                     // Beyond any limit: reported as overload
     }
     const float lim = (config_.current_limit_a > 0.0f) ? config_.current_limit_a : 1.0f;  // Envelope

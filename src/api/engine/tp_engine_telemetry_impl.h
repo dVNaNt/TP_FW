@@ -88,7 +88,7 @@ inline void TpProtocol::emit_emergency_on_change() {
     if (tp_ == nullptr) {
         return;                                          // Not bound to a drive
     }
-    const uint8_t fault = tp_->driver_phy.get_fault();   // Current fault byte
+    const uint8_t fault = tp_->fault_byte();   // Current fault byte
     if (fault == last_fault_) {
         return;                                          // Nothing changed
     }

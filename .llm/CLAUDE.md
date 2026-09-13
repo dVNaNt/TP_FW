@@ -42,8 +42,8 @@ The node-config partition is deliberately separate: the motor-profile engine era
 partition when it runs out of slots (~60 saves), which would otherwise destroy the stored node
 address.
 
-Reference build (this branch, 2026-09-13, rebased onto main): `cln17_v3_release` RAM 11760 B,
-Flash 71444 B; `cln17_v3_dev` Flash 83192 B. (Before the protocol rewrite: 61140 B / 72112 B.)
+Reference build (this branch, 2026-09-13, review round 1): `cln17_v3_release` RAM 11752 B,
+Flash 71288 B; `cln17_v3_dev` Flash 82700 B. (Before the protocol rewrite: 61140 B / 72112 B.)
 
 **Build flags that decide the size** (all in `platformio.ini`, mirrored in `cln234_release`):
 

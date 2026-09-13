@@ -150,6 +150,24 @@ static void print_heartbeat() {
 /**
  * @brief One-time initialization: bootloader button, USB, motor stack, protocol.
  */
+#if (ENCODER_TYPE == ENCODER_MT6835)
+/**
+ * @brief Board probe behind diagnostics record 0x43/0x07 (encoder link).
+ *
+ * Copies the SPI link supervisor's counters (spi_setup.h, written by the DMA
+ * completion ISR) into the protocol's snapshot. Torn reads are acceptable:
+ * these are statistics, and each field is a single aligned word.
+ */
+static void encoder_link_probe(TpEncoderLinkInfo& out) {
+    out.check_proven = ENCODER_LINK.check_trusted;    // Failing frames are being dropped
+    out.link_down = ENCODER_LINK.link_down;           // Nothing ingested, fault raised
+    out.sensor_status = ENCODER_LINK.sensor_status;   // MT6835 STATUS[2:0] of the last accepted frame
+    out.relinks = ENCODER_LINK.relinks;               // Bus resets since boot
+    out.frames_bad = ENCODER_LINK.frames_bad;         // CRC failures since boot
+    out.frames_ok = ENCODER_LINK.frames_ok;           // Frames accepted since boot
+}
+#endif
+
 inline void run_setup() {
     BOOT::init_button();  // SW1 (PC6) -> 3 s hold enters the USB DFU bootloader
 
@@ -213,6 +231,9 @@ inline void run_setup() {
     if (!tp_can_begin(TP)) {
         TP_LOG("CAN protocol init FAILED");
     }
+#if (ENCODER_TYPE == ENCODER_MT6835)
+    TP_API.bind_encoder_link(encoder_link_probe);  // 0x43/0x07 reads the SPI link supervisor
+#endif
 
     // A node with no address answers network management only, which is exactly
     // what makes it discoverable; say so once so an unconfigured board on the

@@ -109,14 +109,15 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
 
 #if (ENCODER_TYPE == ENCODER_MT6835)
         // Validate the frame against the sensor's CRC-8 before anything of it
-        // is published; Encoder::accept_frame() decides whether a frame that
-        // failed is dropped (it is, once the check has proven itself on this
-        // boot) and keeps the statistics. A dropped frame leaves the previous
-        // angle in place for this control period.
+        // is published; the board's link supervisor (EncoderLink, spi_setup.h)
+        // decides whether a frame that failed is dropped (it is, once the
+        // check has proven itself on this boot), keeps the statistics and
+        // declares the link down after a run of failures. A dropped frame
+        // leaves the previous angle in place for this control period.
         const uint8_t b0 = SPI1_RX_BUF[2];   // ANGLE[20:13]
         const uint8_t b1 = SPI1_RX_BUF[3];   // ANGLE[12:5]
         const uint8_t b2 = SPI1_RX_BUF[4];   // ANGLE[4:0] << 3 | STATUS[2:0]
-        if (TP.encoder.accept_frame(MT6835::Crc8(b0, b1, b2) == SPI1_RX_BUF[5])) {
+        if (ENCODER_LINK.accept(MT6835::Crc8(b0, b1, b2) == SPI1_RX_BUF[5])) {
             // Assemble 21-bit angle {RX[2], RX[3], RX[4][7:3]} and capture status / CRC
             POSITION_ENCODER_MT_RAW =
                 ((uint32_t)b0 << 13) |
@@ -126,16 +127,22 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
 
             POSITION_MT_STATUS = (uint8_t)(b2 & 0x07U); // Status bits: overspeed / weak field / undervoltage
             POSITION_MT_CRC    = SPI1_RX_BUF[5];        // Received CRC-8 for diagnostics
-            TP.encoder.set_sensor_status(MT6835::Status(b2)); // Weak field / undervoltage reach the diagnostics
+            ENCODER_LINK.sensor_status = MT6835::Status(b2); // Weak field / undervoltage reach the diagnostics
 
             // Raise the encoder fault while any sensor status bit is set: the
             // atomic flag fires the registered fault action once on the rising
             // edge, so a healthy reading clears it on the next frame. Only an
-            // ACCEPTED frame gets here, so this never clears the fault that
-            // accept_frame() holds while the link itself is down.
+            // ACCEPTED frame gets here, so a link that is down (nothing is
+            // accepted) can never be cleared by this line; the recovered link
+            // clears it with its first accepted healthy frame.
             TP.encoder.set_fault(POSITION_MT_STATUS != 0U);
-        } else if (TP.encoder.take_relink_request()) {
-            Encoder_Relink();                           // Link down for a run of frames: realign the bus
+        } else {
+            if (ENCODER_LINK.link_down) {
+                TP.encoder.set_fault(true);             // Position feedback lost: the control loop releases the bridge
+            }
+            if (ENCODER_LINK.take_relink_request()) {
+                Encoder_Relink();                       // Link down for a run of frames: realign the bus
+            }
         }
 #else
         // TLE5012B: 15-bit left-aligned angle from RX[2..3]

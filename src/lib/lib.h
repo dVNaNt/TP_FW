@@ -260,6 +260,44 @@ public:
     /// the routine rotates the shaft, so the targets it froze are stale.
     bool was_identifying_ = false;
 
+    /**
+     * @brief Latched copy of the encoder's fault flag.
+     *
+     * The encoder object only reports the LIVE condition (the board's link
+     * supervisor or the sensor's own status bits raised it, the next healthy
+     * frame clears it). Position feedback that came and went is still a
+     * fault the operator has to acknowledge: the rotor may have moved while
+     * the bridge was released, and resuming the loop against a stale target
+     * on the first healthy frame would snap it back. So the condition is
+     * latched here, in the integration layer - it is not a power-stage fault
+     * and does not belong in the driver's fault byte - until a fault reset
+     * releases it (clear_encoder_fault()). While latched the control pass
+     * keeps the bridge released and closed loop is refused.
+     */
+    bool encoder_fault_latched_ = false;
+
+    /// Bit of fault_byte() that stands for the latched encoder fault, above the driver's seven.
+    static constexpr uint8_t kEncoderFaultBit = 0x80u;
+
+    /**
+     * @brief The drive's fault byte: the driver's latched faults plus the encoder latch.
+     *
+     * This is what the protocol reports (system / driver status, the beat) and
+     * what every "refuse while faulted" guard consults. Bits 0-6 are the
+     * driver's own (DriverPWM::FAULT_*), bit 7 is kEncoderFaultBit.
+     */
+    uint8_t fault_byte() const {
+        return (uint8_t)(driver_phy.get_fault() | (encoder_fault_latched_ ? kEncoderFaultBit : 0u));
+    }
+
+    /**
+     * @brief Release the encoder fault latch (the operator's fault reset).
+     *
+     * A link that is still down re-latches on the very next control pass,
+     * like every other latched condition, so this cannot mask a real fault.
+     */
+    void clear_encoder_fault() { encoder_fault_latched_ = false; }
+
     /// Endstop / probe input word handed to the trajectory triggers. No such
     /// inputs are wired on CLN17 v3 yet, so it stays zero; a board that adds
     /// them only has to publish their state here.
@@ -299,16 +337,15 @@ public:
         if (driver_phy.current.is_changed() & driver_phy.supply.is_changed()) {
             driver_phy.tick();
             counter++;
-            // A downed encoder link is a driver fault: the bridge goes Hi-Z
-            // and enabling is refused until the link is back. The encoder
-            // object keeps its flag raised for as long as the link is down,
-            // so a fault reset that comes too early is re-asserted here on
-            // the very next pass, like every other latched condition.
+            // Position feedback lost: latch it (see encoder_fault_latched_).
+            // The encoder keeps its flag raised for as long as the condition
+            // lasts, so a fault reset that comes too early is re-latched here
+            // on the very next pass, like every other latched condition.
             if (encoder.is_fault()) {
-                driver_phy.set_fault().encoder(true);
+                encoder_fault_latched_ = true;
             }
-            led.set().led1().r(driver_phy.get_fault() ? 255 : 0);  // LED1 = fault indicator (red channel)
-            uint32_t faulte = driver_phy.get_fault();
+            led.set().led1().r(fault_byte() ? 255 : 0);  // LED1 = fault indicator (red channel)
+            uint32_t faulte = fault_byte();
             // if (faulte) {
             //     SerialUSB.println(faulte);
             // }
@@ -338,8 +375,8 @@ public:
             // started at runtime (TP_CALIB_ELECTRICAL over the protocol) counts
             // too: MotorCalibration owns the bridge until it reports Success.
             const bool identifying = current_driver.is_identifying();
-            const bool closed_loop =
-                (motor_status == MotorStatus::Success) && angle_calibrator.is_calibrated() && !identifying;
+            const bool closed_loop = (motor_status == MotorStatus::Success) && angle_calibrator.is_calibrated() &&
+                                     !identifying && !encoder_fault_latched_;
             if (!closed_loop) {
                 // Still service the front end so commands arriving during boot
                 // or calibration are consumed rather than piling up in the
@@ -351,6 +388,22 @@ public:
             }
             switch (motor_status) {
                 case MotorStatus::Success: {
+                    if (encoder_fault_latched_) {
+                        // Position feedback lost (or was, until the operator
+                        // resets): every position-dependent routine below - the
+                        // sweep, the closed-loop dispatch - would act on a
+                        // stale or phantom angle. Release the bridge (NaN
+                        // sentinel: both FETs of every phase off) and hold it
+                        // released until the fault reset. The encoder's own
+                        // fault action already did this from the acquisition
+                        // ISR; this keeps it so against every later pass.
+                        pwm_voltage_ab.a = pwm_voltage_ab.b = NAN;
+                        driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+                        last_current_a_ = 0.0f;             // Nothing commanded through FOC
+                        tp_flash_programming_window = true;  // Bridge released: NVM programming safe
+                        is_running.store(false, std::memory_order_release);
+                        return;
+                    }
                     if (!angle_calibrator.is_calibrated()) {
                         angle_el_ = angle_calibrator.tick(real_raw_pos, (int16_t)current_driver.motor.get_motor_type());
                         if (angle_calibrator.is_calibrated()) {
@@ -411,9 +464,9 @@ public:
                         // ramp voltage armed: the instant the fault cleared it
                         // resumed at full voltage and tripped again, forever.
                         // Abort instead; the boot path is untouched.
-                        if (driver_phy.get_fault() != 0u) {
+                        if (fault_byte() != 0u) {
                             current_driver.abort_identification("DRIVER FAULT during runtime identification",
-                                                                (uint8_t)driver_phy.get_fault());
+                                                                fault_byte());
                         }
                         targt = 0.0f;                      // MotorCalibration commands the voltages
                         break;                             // Straight to tick_control_foc()

@@ -52,19 +52,6 @@ private:
     /// Sequence lock: odd = write in progress, even = stable. Single writer.
     std::atomic<uint32_t> seq_{0};
 
-    static constexpr uint32_t kTrustAfter = 256;  ///< Consecutive valid frames that prove the integrity check.
-    static constexpr uint16_t kFaultRun = 64;     ///< Consecutive failures that mean the sensor is gone (3.2 ms at 20 kHz).
-    uint32_t frames_ok_ = 0;                      ///< Frames that passed the check since boot.
-    uint32_t frames_bad_ = 0;                     ///< Frames that failed it since boot.
-    uint16_t bad_run_ = 0;                        ///< Consecutive failures right now.
-    uint16_t bad_run_max_ = 0;                    ///< Longest failure run since boot.
-    uint16_t good_run_ = 0;                       ///< Consecutive passes while the link is proving its recovery.
-    uint16_t relinks_ = 0;                        ///< Bus resets requested since boot.
-    uint8_t sensor_status_ = 0;                   ///< Sensor status bits of the last accepted frame.
-    bool check_trusted_ = false;                  ///< Check proven on this boot: failing frames are dropped.
-    bool link_down_ = false;                      ///< Link declared down: ingestion suspended, fault raised.
-    bool relink_request_ = false;                 ///< A bus reset is owed to the owner.
-
 public:
     /// Default constructor: zeroed position, empty callbacks.
     Encoder() {}
@@ -102,116 +89,6 @@ public:
         std::atomic_thread_fence(std::memory_order_release);
         seq_.fetch_add(1, std::memory_order_relaxed); // Makes counter even
     }
-
-    // =======================================================================
-    // Frame health (single writer: the acquisition ISR)
-    // =======================================================================
-
-    /**
-     * @brief Decide whether a freshly received sensor frame may be ingested.
-     *
-     * A frame that fails the sensor's own integrity check is not a position:
-     * it is a bus glitch, a transfer cut short by a preempting interrupt, or
-     * a sensor that stopped answering (an idle-high data line reads as the
-     * top of the range). Integrating such a frame counts a whole revolution
-     * whenever the garbage lands on the far side of the half-turn boundary,
-     * so a run of them walked the turn counter hundreds of turns away from a
-     * stationary rotor and left the position loop chasing a phantom. Bad
-     * frames are therefore dropped and the last good angle stands for that
-     * control period.
-     *
-     * The check has to prove itself before it may drop anything: if the
-     * caller's CRC ever disagreed with the sensor (wrong polynomial, byte
-     * order), rejecting every frame would blind the drive outright. Frames are
-     * only rejected once kTrustAfter consecutive frames have passed on this
-     * boot with no failure before them.
-     *
-     * A link that fails for kFaultRun consecutive frames is DOWN: the fault
-     * flag is raised (the control loop turns it into a driver fault, so the
-     * bridge goes Hi-Z and enabling is refused) and NOTHING is ingested any
-     * more, not even a frame that happens to pass - one corrupted frame in
-     * 256 carries a matching CRC by chance, and on a persistently broken
-     * link those few dozen a second were enough to walk the turn counter
-     * away by themselves. The owner is asked to re-establish the link (the
-     * board resets its bus peripheral) once per kFaultRun failures while it
-     * stays down. The link is up again, and ingestion resumes, only after
-     * kTrustAfter consecutive valid frames.
-     *
-     * @param valid true when the frame passed the sensor's integrity check.
-     * @return true when the frame should be ingested (set_raw_position()).
-     */
-    inline bool accept_frame(bool valid) {
-        if (valid) {
-            frames_ok_++;                                        // Statistics
-            if (!check_trusted_ && (frames_ok_ >= kTrustAfter) && (frames_bad_ == 0u)) {
-                check_trusted_ = true;                           // The check agrees with the sensor: arm the drop
-            }
-            bad_run_ = 0;                                        // Sensor is answering
-            if (link_down_) {
-                if (++good_run_ >= kTrustAfter) {
-                    link_down_ = false;                          // Link re-established
-                    good_run_ = 0;
-                    set_fault(false);                            // Feedback is trustworthy again
-                } else {
-                    return false;                                // Still proving the recovered link
-                }
-            }
-            return true;
-        }
-        frames_bad_++;                                           // Statistics
-        good_run_ = 0;                                           // A recovering link starts over
-        if (bad_run_ < UINT16_MAX) {
-            bad_run_++;                                          // Length of the current failure run
-        }
-        if (bad_run_ > bad_run_max_) {
-            bad_run_max_ = bad_run_;                             // Worst run seen, for the diagnostics
-        }
-        if (check_trusted_ && (bad_run_ % kFaultRun) == 0u) {
-            link_down_ = true;                                   // No valid frame for kFaultRun periods
-            relink_request_ = true;                              // Ask the owner to reset the bus (once per run)
-            set_fault(true);
-        }
-        return !check_trusted_;                                  // Unproven check: ingest as before
-    }
-
-    /**
-     * @brief Hand over a pending request to re-establish the link.
-     *
-     * The owner (the board's acquisition handler) calls this after every
-     * accept_frame() and, when it returns true, resets the sensor bus. One
-     * request is raised each time the link has been down for another
-     * kFaultRun frames, so a dead sensor is retried a few hundred times a
-     * second at a cost of one bus reset each, never in a tight loop.
-     *
-     * @return true exactly once per request.
-     */
-    inline bool take_relink_request() {
-        if (!relink_request_) {
-            return false;
-        }
-        relink_request_ = false;
-        if (relinks_ < UINT16_MAX) {
-            relinks_++;                                          // Bus resets since boot
-        }
-        return true;
-    }
-
-    /// Publish the sensor's own status bits from the last accepted frame (sensor specific).
-    inline void set_sensor_status(uint8_t status) { sensor_status_ = status; }
-    /// Sensor status bits of the last accepted frame.
-    inline uint8_t sensor_status() const { return sensor_status_; }
-    /// Frames that passed the integrity check since boot.
-    inline uint32_t frames_ok() const { return frames_ok_; }
-    /// Frames that failed it since boot.
-    inline uint32_t frames_bad() const { return frames_bad_; }
-    /// Longest run of consecutive failures since boot.
-    inline uint16_t bad_run_max() const { return bad_run_max_; }
-    /// Bus resets requested since boot (each one after kFaultRun consecutive failures).
-    inline uint16_t relinks() const { return relinks_; }
-    /// True once the check has proven itself and failing frames are dropped.
-    inline bool check_trusted() const { return check_trusted_; }
-    /// True while the link is down: nothing is ingested and the fault flag is raised.
-    inline bool link_down() const { return link_down_; }
 
     // =======================================================================
     // Fast 32-bit reads (Direct memory access)

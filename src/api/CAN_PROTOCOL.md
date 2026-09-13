@@ -387,10 +387,7 @@ for `0x00`, samples for `0x2F`; a plain register is emitted once. Bounded to
 ### 6.2 `0x42` System currents (sub-space)
 
 `[2..3]` supply current bf16 [A], then `0x42/0x00`: `[4..5]` Iq, `[6..7]` Id;
-`0x42/0x01`: `[4..5]` Ia (alpha / coil A), `[6..7]` Ib (beta / coil B);
-`0x42/0x02`: `[4..5]` third sensed channel current (raw channel order), `[6..7]` sum of the three
-sensed channels, the Kirchhoff residual the phase-balance supervision trips on (NaN while a
-channel is masked by a high duty).
+`0x42/0x01`: `[4..5]` Ia (alpha / coil A), `[6..7]` Ib (beta / coil B).
 
 ### 6.3 `0x43` Diagnostics (sub-space) **[decision]**
 
@@ -407,7 +404,7 @@ needs and the design did not list.
 | `0x05` | Calibration result | `[2..3]` R bf16, `[4..5]` Ld bf16, `[6..7]` Lq bf16                                 |
 | `0x06` | FOC frame          | `[2..3]` electrical angle the current loop uses (65536 per period), `[4..5]` u_d bf16 [V], `[6..7]` u_q bf16 [V] |
 | `0x08` | Identification failure | `[2]` reason (0 none, 1 pattern not recognised, 2 underpower, 3 overpower in rotation, 4 driver fault, 5 HFI inductance missing or inconsistent between the probe frequencies, 255 unclassified), `[3]` stage at abort (MotorStatus), `[4]` driver fault byte at abort, `[5]` test voltage 0.1 V, `[6]` Ia 0.05 A i8, `[7]` Ib 0.05 A i8 |
-| `0x07` | Encoder link       | `[2]` flags (bit0 integrity check proven and failing frames dropped, bit1 link down = encoder fault, bit2 sensor overspeed, bit3 weak magnetic field, bit4 sensor undervoltage), `[3]` bus resets since boot, `[4..5]` frames failed u16, `[6..7]` frames passed u16 (wraps) |
+| `0x07` | Encoder link       | `[2]` flags (bit0 integrity check proven and failing frames dropped, bit1 link down = encoder fault, bit2 sensor overspeed, bit3 weak magnetic field, bit4 sensor undervoltage), `[3]` bus resets since boot, `[4..5]` frames failed u16, `[6..7]` frames passed u16 (wraps). Filled by the board's link supervisor (frame validation is board code); a board without one answers NOT_IMPLEMENTED |
 
 Stage and progress follow whichever routine owns the bridge. While the
 electrical identification runs, `stage` is its MotorStatus value and progress
@@ -436,11 +433,15 @@ sub-space block; it lives at `0x58` so byte 1 can carry the fault byte. Its
 reserved word holds the warning byte and the operation status. Motor Status
 byte 1 (design: TBD) packs state and mode, byte 2 the identity bits.
 
-**Fault bits** (1:1 with the driver): `0x01` overvoltage, `0x02` overcurrent,
-`0x04` overheat, `0x08` external, `0x10` undervoltage, `0x20` overpower,
-`0x40` phase, `0x80` encoder (position feedback lost: the link failed its integrity check for 64
-consecutive frames; the drive resets the sensor bus and clears the bit by itself once 256 valid
-frames are back, a fault reset then releases the latch). **Warning bits:** `0x01` not calibrated, `0x02` NVM busy, `0x04`
+**Fault bits:** bits 0–6 are the power stage's own latches, 1:1 with the
+driver: `0x01` overvoltage, `0x02` overcurrent, `0x04` overheat, `0x08`
+external, `0x10` undervoltage, `0x20` overpower, `0x40` phase. `0x80` encoder
+is composed by the drive from the position sensor's fault flag (the board's
+link supervisor found the link down - 64 consecutive frames failed the
+integrity check, the bus is reset until 256 valid frames are back - or the
+sensor reported overspeed / weak field / undervoltage). The condition itself
+clears when the feedback is healthy again; the bit stays latched, the bridge
+released and closed loop refused, until a fault reset. **Warning bits:** `0x01` not calibrated, `0x02` NVM busy, `0x04`
 watchdog expired, `0x08` queue low, `0x10` segment dropped, `0x20` comm
 degraded, `0x40` temperature above the warning threshold, `0x80` supply
 inside the hysteresis band of a rail limit. **States:** `0` boot, `1`

@@ -27,7 +27,7 @@ inline TpError TpProtocol::set_enable(bool on) {
             // electrical angle: refuse rather than jerk.
             return TP_ERR_NOT_CALIBRATED;
         }
-        if (tp_->driver_phy.get_fault() != 0u) {
+        if (tp_->fault_byte() != 0u) {
             return TP_ERR_FAULT_ACTIVE;                  // Clear the latch first
         }
         if (tp_->current_driver.is_identifying()) {
@@ -77,7 +77,7 @@ inline TpError TpProtocol::start_calibration(uint8_t bits) {
     if ((bits & (TP_CAL_F | TP_CAL_M)) != 0u) {
         return TP_ERR_NOT_IMPLEMENTED;                   // No flux or mechanical routine exists
     }
-    if (tp_->driver_phy.get_fault() != 0u) {
+    if (tp_->fault_byte() != 0u) {
         return TP_ERR_FAULT_ACTIVE;                      // Clear faults before moving the rotor
     }
     if ((calibration_running() & ~cal_pending_) != 0u) {
@@ -262,7 +262,7 @@ inline TpError TpProtocol::handle_midi(const TpFrame& f) {
     if (!tp_->angle_calibrator.is_calibrated()) {
         return TP_ERR_NOT_CALIBRATED;                    // Tone mode still drives the bridge
     }
-    if (tp_->driver_phy.get_fault() != 0u) {
+    if (tp_->fault_byte() != 0u) {
         return TP_ERR_FAULT_ACTIVE;
     }
     float duration_ms = 0.0f;                            // 0 = until the next command
@@ -338,7 +338,7 @@ inline void TpProtocol::service_auto_enable() {
     if (auto_enable_done_ || ((config_.flags & TP_CFG_AUTO_ENABLE) == 0u) || (tp_ == nullptr)) {
         return;                                          // Not configured, or already done
     }
-    if (!tp_->angle_calibrator.is_calibrated() || (tp_->driver_phy.get_fault() != 0u)) {
+    if (!tp_->angle_calibrator.is_calibrated() || (tp_->fault_byte() != 0u)) {
         return;                                          // Not ready yet: try again next pass
     }
     auto_enable_done_ = true;                            // One shot for the life of this boot
@@ -374,7 +374,7 @@ inline void TpProtocol::clear_faults() {
     tp_->driver_phy.set_fault().phase(false);         // Release the phase-stage latch
     tp_->driver_phy.set_fault().overheat(false);      // Release the OT latch
     tp_->driver_phy.set_fault().external(false);      // Release the external-fault latch
-    tp_->driver_phy.set_fault().encoder(false);       // Release the encoder latch (re-asserted while the link is down)
+    tp_->clear_encoder_fault();                       // Release the encoder latch (re-latched while the feedback is still lost)
     // A failed runtime identification parks the drive in CalibError, which
     // refuses every enable until a reboot. The fault reset is the operator's
     // "try again": drop back to the last known parameters and let the drive

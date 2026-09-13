@@ -1116,3 +1116,26 @@ FLASH: 71444 bytes (62.29% of 114688 bytes): +248 bytes
 RAM: 11760 bytes (35.89% of 32768 bytes): +512 bytes
 
 
+## 2026-09-13 - Review: encoder validation moves to the BSP, the encoder fault leaves the driver, current_sense.h and 0x42 back to the spec
+**Changes:**
+- current_sense.h restored to main: the 0x42/0x02 current-sum record is gone (0x42 is DQ and AB only, as the design says) from tp_cmds.h, the reader, CAN_PROTOCOL.md, tpcp_host.py and CLN Studio
+- the relative phase-balance tolerance in motor_control.h is untouched, it never depended on the sensor class
+- encoder.h restored to main: the frame accept / drop policy, link-down detection, bus reset requests and counters now live in EncoderLink (cln17_v3 spi_setup.h), driven by the DMA completion ISR, which sets the encoder's fault flag when the link is down and, as main does, when the sensor reports a status bit
+- driver_pwm.h restored to main: no FAULT_ENCODER, no callback, no trigger
+- PWM_Set_All_HiZ is registered as the encoder's own fault action, TunePulseHeart latches the encoder flag (encoder_fault_latched_), holds the bridge released and refuses closed loop while it is set, and fault_byte() composes the driver's seven bits with the latch as bit 7 - every engine guard, status register and the beat read that
+- a fault reset clears the latch through clear_encoder_fault()
+- diag 0x43/0x07 reads a TpEncoderLinkInfo snapshot through a board-registered probe (TpProtocol::bind_encoder_link, run.h) and answers NOT_IMPLEMENTED on a board that registers none
+
+**Reasoning:**
+- Review of the branch: data validity is a BSP concern - what a valid frame is, how the bus is reset and what the status bits mean belong to the SPI link and the chip, the generic encoder driver only tracks position and carries a flag
+- the PWM driver's fault byte is power-stage only, sensorless operation is planned
+- 0x42 is defined as DQ / AB currents
+
+**Notes:**
+- Wire format of 0x43/0x07 and fault bit 0x80 unchanged, host tool and Studio decode as before. Behaviour unchanged on the bench path: link down -> Hi-Z at once from the ISR, latched until a fault reset, bus reset every 64 failed frames, recovery after 256 good ones. cln17_v3_dev 82700 B
+- cln234_release 51392 B
+
+FLASH: 71288 bytes (62.16% of 114688 bytes): -156 bytes
+RAM: 11752 bytes (35.86% of 32768 bytes): -8 bytes
+
+

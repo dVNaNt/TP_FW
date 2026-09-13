@@ -107,7 +107,7 @@ SUB_AXIS = {"axis_control": 0, "led": 1, "gearbox": 2, "io_map": 3, "encoder_1":
             "homing_quick": 6, "homing_fine": 7, "ref_cw": 8, "ref_ccw": 9, "pos_zero": 10,
             "zero_offset_cw": 11, "zero_offset_ccw": 12, "field_cw": 13, "field_ccw": 14,
             "internal_offset": 15}
-SUB_CURRENTS = {"dq": 0, "ab": 1, "sum": 2}
+SUB_CURRENTS = {"dq": 0, "ab": 1}
 SUB_DIAG = {"comm": 0, "calibration": 1, "queue": 2, "persist": 3, "encoder": 4, "calib_result": 5, "foc": 6,
             "encoder_link": 7, "ident_fail": 8}
 
@@ -389,7 +389,6 @@ REGISTERS = {
     # ---- 0x40 - 0x7F read only ---------------------------------------------
     "currents:dq": Reg(0x42, [F("supply", "bf16", 2), F("iq", "bf16", 4), F("id", "bf16", 6)], sub=0, writable=False),
     "currents:ab": Reg(0x42, [F("supply", "bf16", 2), F("ia", "bf16", 4), F("ib", "bf16", 6)], sub=1, writable=False),
-    "currents:sum": Reg(0x42, [F("supply", "bf16", 2), F("ic", "bf16", 4), F("residual", "bf16", 6)], sub=2, writable=False),
     "diag:comm": Reg(0x43, [F("bus_state", "u8", 2), F("tec", "u8", 3), F("rec", "u8", 4), F("dropped", "u8", 5),
                             F("rejected", "u16", 6)], sub=0, writable=False),
     "diag:calibration": Reg(0x43, [F("running", "u8", 2), F("stage", "u8", 3), F("progress", "u8", 4),

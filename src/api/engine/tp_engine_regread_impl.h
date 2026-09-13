@@ -196,19 +196,6 @@ inline TpError TpProtocol::read_register(uint8_t cmd, uint8_t sub, const TpFrame
                 rsp.currents.second = tp_pack_bf16(ab.b);
                 return TP_ERR_NONE;
             }
-            if (sub == TP_SUB_CURRENTS_SUM) {
-                // The three sensed channel currents must sum to zero (every
-                // current that leaves through one channel returns through
-                // another). The residual is what the phase-balance supervision
-                // trips on: a sensor gain or offset error scales it with the
-                // current, a coil leaking to ground puts the missing return
-                // current here. Raw channel order, before any pattern remap.
-                float i[3];                                                       // Sensed channels [A]
-                const bool all = tp_->driver_phy.current.channels_amps(i);         // False while one is masked
-                rsp.currents.first = tp_pack_bf16(i[2]);                          // Third channel
-                rsp.currents.second = tp_pack_bf16(all ? (i[0] + i[1] + i[2]) : NAN);  // Residual
-                return TP_ERR_NONE;
-            }
             return TP_ERR_UNKNOWN_SUB;
         }
 
@@ -331,7 +318,7 @@ inline TpError TpProtocol::read_status(uint8_t cmd, TpFrame& rsp) {
         case TP_REG_SYSTEM_STATUS:
             rsp.system_status.io = tp_->io_inputs_;
             rsp.system_status.uptime = tp_pack_bf16((float)(millis() / 1000u));
-            rsp.system_status.fault = (uint32_t)tp_->driver_phy.get_fault() << TP_STATUS_FAULT_SHIFT |
+            rsp.system_status.fault = (uint32_t)tp_->fault_byte() << TP_STATUS_FAULT_SHIFT |
                                       (uint32_t)warn_flags() << TP_STATUS_WARN_SHIFT |
                                       (uint32_t)drive_state() << TP_STATUS_STATE_SHIFT |
                                       (uint32_t)control_mode() << TP_STATUS_MODE_SHIFT;
@@ -397,7 +384,7 @@ inline TpError TpProtocol::read_status(uint8_t cmd, TpFrame& rsp) {
         }
 
         case TP_REG_DRIVER_STATUS:
-            rsp.driver_status.fault = tp_->driver_phy.get_fault();
+            rsp.driver_status.fault = tp_->fault_byte();
             rsp.driver_status.warn = warn_flags();
             rsp.driver_status.op_status = (uint8_t)tp_->current_driver.get_driver_status();
             rsp.driver_status.temp = tp_pack_temp_u8(tp_->driver_phy.temperature.get_temperature_c());
@@ -503,14 +490,16 @@ inline TpError TpProtocol::read_diag(uint8_t sub, TpFrame& rsp) {
         }
 
         case TP_SUB_DIAG_ENCODER_LINK: {
-            const Encoder& e = tp_->encoder;                              // Frame-health owner
-            const uint32_t bad = e.frames_bad();                          // Failures since boot
-            const uint16_t rl = e.relinks();                              // Bus resets since boot
-            rsp.diag_enc_link.flags = (uint8_t)((e.check_trusted() ? 0x01u : 0u) | (e.link_down() ? 0x02u : 0u) |
-                                                ((e.sensor_status() & 0x07u) << 2));  // Sensor's own status bits
-            rsp.diag_enc_link.relinks = (uint8_t)((rl > 255u) ? 255u : rl);
-            rsp.diag_enc_link.frames_bad = (uint16_t)((bad > 0xFFFFu) ? 0xFFFFu : bad);
-            rsp.diag_enc_link.frames_ok = (uint16_t)e.frames_ok();         // Wraps: a liveness counter
+            if (encoder_link_ == nullptr) {
+                return TP_ERR_NOT_IMPLEMENTED;                            // This board validates no frames
+            }
+            TpEncoderLinkInfo e;                                          // Snapshot filled by the board
+            encoder_link_(e);
+            rsp.diag_enc_link.flags = (uint8_t)((e.check_proven ? 0x01u : 0u) | (e.link_down ? 0x02u : 0u) |
+                                                ((e.sensor_status & 0x07u) << 2));  // Sensor's own status bits
+            rsp.diag_enc_link.relinks = (uint8_t)((e.relinks > 255u) ? 255u : e.relinks);
+            rsp.diag_enc_link.frames_bad = (uint16_t)((e.frames_bad > 0xFFFFu) ? 0xFFFFu : e.frames_bad);
+            rsp.diag_enc_link.frames_ok = (uint16_t)e.frames_ok;          // Wraps: a liveness counter
             return TP_ERR_NONE;
         }
 
@@ -574,7 +563,7 @@ inline void TpProtocol::pack_pulsebeat(TpFrame& f, bool advance) {
     f.u64 = 0;                                           // Clean slate
     f.beat.cmd = (uint8_t)(TP_CMD_PULSEBEAT | seq);
     f.beat.queue_ts = tp_beat_queue_ts(t.queue_depth, t.time_scale_q10);
-    f.beat.status_fault = (uint8_t)(drive_state() | (tp_fault_group(tp_->driver_phy.get_fault()) << 4));
+    f.beat.status_fault = (uint8_t)(drive_state() | (tp_fault_group(tp_->fault_byte()) << 4));
     f.beat.warn_mode_err = tp_beat_warn_mode_err(tp_warn_group(warn_flags()), control_mode(), following_error_ratio());
     f.beat.load = (int8_t)tp_pack_usage_i8(load_ratio());
     f.beat.io = tp_->io_inputs_;
