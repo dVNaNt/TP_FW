@@ -42,8 +42,8 @@ The node-config partition is deliberately separate: the motor-profile engine era
 partition when it runs out of slots (~60 saves), which would otherwise destroy the stored node
 address.
 
-Reference build (this branch, 2026-09-13, table CRC): `cln17_v3_release` RAM 11760 B,
-Flash 71480 B; `cln17_v3_dev` Flash 83080 B. (Before the protocol rewrite: 61140 B / 72112 B.)
+Reference build (this branch, 2026-09-13, review round 2): `cln17_v3_release` RAM 11760 B,
+Flash 71576 B; `cln17_v3_dev` Flash 83096 B. (Before the protocol rewrite: 61140 B / 72112 B.)
 
 **Build flags that decide the size** (all in `platformio.ini`, mirrored in `cln234_release`):
 
@@ -59,7 +59,7 @@ Flash 71480 B; `cln17_v3_dev` Flash 83080 B. (Before the protocol rewrite: 61140
   HardwareSerial + HAL UART (5.5 KiB).
 - `-flto=auto`: anything referenced only from inline asm needs `__attribute__((used))`
   (`nvm_flash.h`: `flashg4_ll_nmi_dispatch`) or LTO drops it and the link fails.
-- `-D TP_CRC_HW=1`: `Crc::Stream` (`src/lib/math/helpers/crc.h`) runs on the STM32G4 CRC unit
+- `-D TP_CRC_HW=1`: `Crc::Stream` (`src/lib/math/crc.h`) runs on the STM32G4 CRC unit
   through `src/bsp/stm32g4/crc.h`; without the flag it shifts in software and the stored records
   are bit-identical. The one-shot `Crc::crc8/16/32` are always software (constexpr, ISR-safe); the
   unit is one shared peripheral with no locking, so only one stream may be open at a time.
@@ -188,8 +188,8 @@ flash must run inside this window, or the rotor gets yanked against a frozen vec
   - `motor_control/` — motor params, angle calibration + table, current control (`foc-current.h`, HFI),
     `drive_control.h` (control-mode machine + command mailbox + trajectory front end)
   - `math/` — `filters/` (EMA, median3, PLL), `motion/` (S-curve, Hermite, executor, governor,
-    observer), `helpers/` (incl. `crc.h`: CRC-8/16/32, software + optional hardware stream),
-    `trigonometry.h`
+    observer), `helpers/`, `trigonometry.h`, `crc.h` (CRC-8/16/32, software + optional hardware
+    stream)
 - `src/bsp/` — board support, split three ways by what a thing actually depends on:
   - `stm32g4/` — peripheral drivers shared by every board on this MCU family: `cordic.h`, `crc.h`,
     `tim1_pwm.h`, `bootloader.h`, `nvm_flash.h`, `comp_dac.h`, `fdcan.h`. They take their

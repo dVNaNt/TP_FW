@@ -101,12 +101,16 @@ static volatile uint8_t  POSITION_MT_CRC = 0;         // CRC-8 received from the
  * ingested any more, not even a frame that happens to pass (one corrupted
  * frame in 256 carries a matching CRC by chance, and on a persistently broken
  * link those few dozen a second were enough to walk the turn counter away by
- * themselves), and the ISR raises the generic encoder fault flag so the
- * control loop releases the bridge. A bus reset (Encoder_Relink) is requested
- * once per kFaultRun failures while the link stays down, so a dead sensor is
- * retried a few hundred times a second at the cost of one reset each, never
- * in a tight loop. The link is up again, and ingestion resumes, only after
- * kTrustAfter consecutive valid frames.
+ * themselves), and the ISR raises the generic encoder fault flag. What the
+ * bridge does about that is the control loop's decision (lib.h: today it
+ * releases the phases and refuses closed loop; a sensorless fallback or a
+ * second encoder could take over there one day) - the board only RESTORES:
+ * the encoder's fault action is Encoder_FaultAction(), which resets the bus,
+ * and a further reset is requested once per kFaultRun failures while the
+ * link stays down, so a dead sensor is retried a few hundred times a second
+ * at the cost of one reset each, never in a tight loop. The link is up
+ * again, and ingestion resumes, only after kTrustAfter consecutive valid
+ * frames.
  *
  * This is deliberately BOARD code: what a valid frame looks like, how the
  * bus is reset and what the sensor's status bits mean are all properties of
@@ -129,7 +133,7 @@ struct EncoderLink {
     uint8_t  sensor_status = 0;   ///< STATUS[2:0] of the last accepted frame: overspeed / weak field / undervoltage.
     bool     check_trusted = false;  ///< Check proven on this boot: failing frames are dropped.
     bool     link_down = false;      ///< Link declared down: ingestion suspended, fault flag raised by the ISR.
-    bool     relink_request = false; ///< A bus reset is owed to the ISR.
+    bool     relink_request = false; ///< A bus reset is owed (consumed by Encoder_Relink).
 
     /**
      * @brief Decide whether a freshly received frame may be ingested.
@@ -168,20 +172,6 @@ struct EncoderLink {
         return !check_trusted;                                       // Unproven check: ingest as before
     }
 
-    /**
-     * @brief Hand over a pending bus reset request.
-     * @return true exactly once per request.
-     */
-    inline bool take_relink_request() {
-        if (!relink_request) {
-            return false;
-        }
-        relink_request = false;
-        if (relinks < UINT16_MAX) {
-            relinks++;                                               // Bus resets since boot
-        }
-        return true;
-    }
 };
 
 /** The link supervisor of the encoder SPI bus (written by the DMA completion ISR). */
@@ -356,14 +346,22 @@ static inline void Encoder_StartTransfer() {
  * @brief Reset the encoder SPI link: abort any transfer, flush the receive
  *        FIFO, clear the DMA flags and re-enable the peripheral.
  *
- * Called from the completion handler when EncoderLink::accept() reports
- * that the link has been down for a run of frames. A byte left in the SPI
- * receive FIFO shifts every later frame; disabling the SPI and draining the
- * FIFO is the only way to realign it. The next timer trigger starts a fresh
- * transfer. Cheap (a few microseconds) and idempotent, so it is safe to
- * repeat while the sensor stays silent.
+ * Called through the encoder's fault action the moment EncoderLink::accept()
+ * declares the link down, then from the completion handler once per further
+ * run of failures while it stays down. A byte left in the SPI receive FIFO
+ * shifts every later frame; disabling the SPI and draining the FIFO is the
+ * only way to realign it. The next timer trigger starts a fresh transfer.
+ * Cheap (a few microseconds) and idempotent, so it is safe to repeat while
+ * the sensor stays silent. Consumes the supervisor's pending request, so a
+ * reset already performed by the fault action is not repeated by the ISR.
  */
 static inline void Encoder_Relink() {
+#if (ENCODER_TYPE == ENCODER_MT6835)
+    ENCODER_LINK.relink_request = false;                       // This reset serves the pending request
+    if (ENCODER_LINK.relinks < UINT16_MAX) {
+        ENCODER_LINK.relinks++;                                // Bus resets since boot
+    }
+#endif
     ENCODER_RELINKING = true;                                  // Hold off the timer-triggered start
     DMA1_Channel1->CCR &= ~DMA_CCR_EN;                         // Stop RX channel
     DMA1_Channel2->CCR &= ~DMA_CCR_EN;                         // Stop TX channel
@@ -376,6 +374,24 @@ static inline void Encoder_Relink() {
     SPI1_ChipSelect(false);                                    // Release the bus
     SPI1->CR1 |= SPI_CR1_SPE;                                  // Enable the peripheral again
     ENCODER_RELINKING = false;                                 // Transfers may start again
+}
+
+/**
+ * @brief The encoder's fault action: restore the link.
+ *
+ * Registered as Encoder::fault_cb, so it runs once on every rising edge of
+ * the encoder fault flag, from the acquisition ISR. It is purely a RESTORE
+ * hook - the board re-initialises what it owns, the SPI bus - and touches
+ * nothing of the power stage: the control loop reads the same flag and
+ * decides what the bridge does. A flag raised by the sensor's own status
+ * bits (weak field, undervoltage) on a healthy link needs no bus reset.
+ */
+static inline void Encoder_FaultAction() {
+#if (ENCODER_TYPE == ENCODER_MT6835)
+    if (ENCODER_LINK.link_down) {
+        Encoder_Relink();                                      // First reset, at once
+    }
+#endif
 }
 
 /** Control periods skipped because the previous transfer was still in flight. */

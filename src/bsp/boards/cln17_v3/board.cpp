@@ -138,10 +138,13 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
             TP.encoder.set_fault(POSITION_MT_STATUS != 0U);
         } else {
             if (ENCODER_LINK.link_down) {
-                TP.encoder.set_fault(true);             // Position feedback lost: the control loop releases the bridge
+                // Position feedback lost. The rising edge runs the encoder's
+                // fault action (Encoder_FaultAction: bus reset); the control
+                // loop sees the flag on this very pass and releases the bridge.
+                TP.encoder.set_fault(true);
             }
-            if (ENCODER_LINK.take_relink_request()) {
-                Encoder_Relink();                       // Link down for a run of frames: realign the bus
+            if (ENCODER_LINK.relink_request) {
+                Encoder_Relink();                       // Still down after another run of failures: reset again
             }
         }
 #else

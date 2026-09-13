@@ -24,7 +24,7 @@
 #define HARDWARE_MT6835_H
 
 #include <stdint.h>
-#include "lib/math/helpers/crc.h"  // Crc::crc8: the one CRC implementation of the firmware
+#include "lib/math/crc.h"  // Crc::crc8: the one CRC implementation of the firmware
 
 namespace MT6835 {
 

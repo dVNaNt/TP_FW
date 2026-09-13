@@ -62,7 +62,7 @@ extern TunePulseHeart TP;
 #include "interrupt_setup.h"  // ISR glue + NVIC (pulls clock/gpio/adc/spi/timer_pwm/drv_err/temperature)
 #include "bsp/stm32g4/comp_dac.h"       // Comparator (hardware OC/OV) protection (same circuit as CLN17 v3)
 #include "bsp/stm32g4/cordic.h"     // CORDIC hardware trigonometry accelerator
-#include "bsp/stm32g4/crc.h"        // CRC unit backend of lib/math/helpers/crc.h (active with TP_CRC_HW)
+#include "bsp/stm32g4/crc.h"        // CRC unit backend of lib/math/crc.h (active with TP_CRC_HW)
 #include "bsp/stm32g4/nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
 #include "bsp/stm32g4/fdcan.h"        // CAN-FD driver + chunk API (CAN_BUS)
 

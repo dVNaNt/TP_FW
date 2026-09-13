@@ -32,7 +32,7 @@
 
 #include "../../common.h" // Include common project definitions, utilities, and macros
 #include "../../drivers/flash_eeprom.h" // EEPROM-emulation driver used for calibration-table persistence
-#include "../../math/helpers/crc.h" // Crc::Stream: CRC-32 over the stored record
+#include "../../math/crc.h"         // Crc::Stream: CRC-32 over the stored record
 
 #ifndef CAL_TABLE_CAPACITY // Check if CAL_TABLE_CAPACITY is not defined externally
 #define CAL_TABLE_CAPACITY 400 // Maximum number of calibration points allocated in memory

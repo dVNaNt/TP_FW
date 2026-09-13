@@ -57,7 +57,7 @@ extern TunePulseHeart TP;
 #include "bsp/stm32g4/fdcan.h"        // CAN-FD driver + chunk API (CAN_BUS)
 #include "bsp/stm32g4/comp_dac.h"       // Comparator (hardware OC/OV) protection
 #include "bsp/stm32g4/cordic.h"     // CORDIC hardware trigonometry accelerator
-#include "bsp/stm32g4/crc.h"        // CRC unit backend of lib/math/helpers/crc.h (active with TP_CRC_HW)
+#include "bsp/stm32g4/crc.h"        // CRC unit backend of lib/math/crc.h (active with TP_CRC_HW)
 #include "bsp/stm32g4/nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
 #include "bsp/stm32g4/tim1_pwm.h"  // TIM1 complementary PWM backend
 #include "lib/dev_log.h"      // TP_LOG*: bring-up messages exist only in DEV_LOG_ENABLE builds
@@ -305,12 +305,14 @@ inline void tunepulse_init() {
         .op_cb(PWM_Set_All_HiZ).phase_cb(PWM_Set_All_HiZ);  // Software overpower: Hi-Z safe state on power/current limit violation
     TP.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
 
-    // Position feedback lost (the board's link supervisor or the sensor's own
-    // status bits raised the encoder flag): release the bridge at once, from
-    // the acquisition ISR, rather than let a loop chase a phantom position.
-    // The encoder is not a driver fault source; the control loop keeps the
-    // bridge released and refuses closed loop while the flag is latched.
-    TP.encoder.set_callback().fault_cb(PWM_Set_All_HiZ);
+    // The encoder's fault action RESTORES, it does not protect: on the rising
+    // edge of the encoder fault flag the board resets the sensor bus
+    // (Encoder_FaultAction). What the bridge does while the feedback is lost
+    // is the control loop's decision (lib.h releases the phases and refuses
+    // closed loop; a sensorless fallback or a second encoder could take over
+    // there), which is why the encoder is not a driver fault source and no
+    // PWM safe state is wired here.
+    TP.encoder.set_callback().fault_cb(Encoder_FaultAction);
 
     delay(100);
 

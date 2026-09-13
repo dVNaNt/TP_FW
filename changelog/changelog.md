@@ -1160,3 +1160,23 @@ FLASH: 71480 bytes (62.33% of 114688 bytes): +192 bytes
 RAM: 11760 bytes (35.89% of 32768 bytes): +8 bytes
 
 
+## 2026-09-13 - Encoder fault action restores the link; the bridge is the control loop's decision; CRC module at lib/math/crc.h
+**Changes:**
+- Encoder::fault_cb is now Encoder_FaultAction (cln17_v3 spi_setup.h): a bus reset when the link is down, nothing else
+- the PWM safe state is no longer wired to the encoder at all - lib.h alone decides what the machine does without its position feedback (release + refuse closed loop today, a sensorless estimator or a second encoder later)
+- Encoder_Relink consumes the supervisor's pending request and counts itself, so the first reset comes from the fault action and the retries from the ISR without a double reset
+- EncoderLink::take_relink_request removed
+- crc.h moved from lib/math/helpers to lib/math, include guard and backend selection expressed as #ifndef (software is the default branch, TP_CRC_HW the override)
+
+**Reasoning:**
+- Review: the encoder failure callback is the hook for restore actions (bus re-init and the like) while PWM control is handled in lib, which keeps the option of switching to sensorless FOC or an external encoder when the primary one is inactive
+- the CRC math belongs in src/lib/math with an ifndef switch
+
+**Notes:**
+- Bench (node 2): table loads, moves track, encoder link clean. cln17_v3_dev 83096 B
+- cln234_release 51696 B
+
+FLASH: 71576 bytes (62.41% of 114688 bytes): +96 bytes
+RAM: 11760 bytes (35.89% of 32768 bytes): +0 bytes
+
+

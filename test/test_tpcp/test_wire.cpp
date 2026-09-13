@@ -25,7 +25,7 @@
 #include "../../src/api/registers/tp_register_map.h"
 #include "../../src/api/node/tp_node_identity.h"
 #include "../../src/api/node/tp_discovery.h"
-#include "../../src/lib/math/helpers/crc.h"
+#include "../../src/lib/math/crc.h"
 
 /** Unity per-test setup hook (nothing to prepare). */
 void setUp(void) {}

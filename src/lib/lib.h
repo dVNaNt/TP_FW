@@ -265,14 +265,15 @@ public:
      *
      * The encoder object only reports the LIVE condition (the board's link
      * supervisor or the sensor's own status bits raised it, the next healthy
-     * frame clears it). Position feedback that came and went is still a
-     * fault the operator has to acknowledge: the rotor may have moved while
-     * the bridge was released, and resuming the loop against a stale target
-     * on the first healthy frame would snap it back. So the condition is
-     * latched here, in the integration layer - it is not a power-stage fault
-     * and does not belong in the driver's fault byte - until a fault reset
-     * releases it (clear_encoder_fault()). While latched the control pass
-     * keeps the bridge released and closed loop is refused.
+     * frame clears it) and its fault action only restores the sensor link.
+     * Position feedback that came and went is still a fault the operator
+     * has to acknowledge: the rotor may have moved while the bridge was
+     * released, and resuming the loop against a stale target on the first
+     * healthy frame would snap it back. So the condition is latched here, in
+     * the integration layer - it is not a power-stage fault and does not
+     * belong in the driver's fault byte - until a fault reset releases it
+     * (clear_encoder_fault()). While latched the control pass keeps the
+     * bridge released and closed loop is refused.
      */
     bool encoder_fault_latched_ = false;
 
@@ -394,9 +395,12 @@ public:
                         // sweep, the closed-loop dispatch - would act on a
                         // stale or phantom angle. Release the bridge (NaN
                         // sentinel: both FETs of every phase off) and hold it
-                        // released until the fault reset. The encoder's own
-                        // fault action already did this from the acquisition
-                        // ISR; this keeps it so against every later pass.
+                        // released until the fault reset. This is THE place
+                        // that decides what the machine does without its
+                        // position feedback (the encoder's own fault action only
+                        // restores the sensor link): a sensorless estimator or
+                        // a second encoder would be selected here instead of
+                        // the release.
                         pwm_voltage_ab.a = pwm_voltage_ab.b = NAN;
                         driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
                         last_current_a_ = 0.0f;             // Nothing commanded through FOC

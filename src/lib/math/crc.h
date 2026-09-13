@@ -41,16 +41,21 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#pragma once
+#ifndef TP_MATH_CRC_H
+#define TP_MATH_CRC_H
 
 #include <stddef.h>  // size_t
 #include <stdint.h>  // Fixed-width integer types
 
-#ifdef TP_CRC_HW
-// Hardware backend, provided by the board support package (bsp/stm32g4/crc.h
-// on STM32G4). Declared inline here and defined inline there: the whole
-// firmware is one translation unit per board, so the definition follows in
-// the same unit. The lib layer names no peripheral.
+// Backend selection. Software is the default; a board that defines TP_CRC_HW
+// (platformio.ini) provides the three hook functions below and the streaming
+// context runs on its CRC peripheral instead. Declared inline here and
+// defined inline in the BSP (bsp/stm32g4/crc.h): the firmware is one
+// translation unit per board, so the definition follows in the same unit and
+// the lib layer names no peripheral.
+#ifndef TP_CRC_HW
+#define TP_CRC_SOFTWARE 1  ///< Crc::Stream shifts in software.
+#else
 /// Program the unit for a width (8 / 16 / 32), polynomial and initial value, and reset it.
 inline void tp_crc_hw_begin(uint8_t width, uint32_t poly, uint32_t init);
 /// Shift in bytes in memory order.
@@ -174,12 +179,12 @@ public:
      */
     void begin(uint8_t width, uint32_t poly, uint32_t init) {
         width_ = width;
-#ifdef TP_CRC_HW
-        tp_crc_hw_begin(width, poly, init);            // The unit holds the register from here on
-#else
+#ifdef TP_CRC_SOFTWARE
         const uint8_t shift = (uint8_t)(32u - width);  // Left-align both the polynomial and the register
         poly_ = poly << shift;
         crc_ = init << shift;
+#else
+        tp_crc_hw_begin(width, poly, init);            // The unit holds the register from here on
 #endif
     }
 
@@ -189,12 +194,12 @@ public:
      * @param len  Byte count.
      */
     void feed(const uint8_t* data, size_t len) {
-#ifdef TP_CRC_HW
-        tp_crc_hw_feed(data, len);
-#else
+#ifdef TP_CRC_SOFTWARE
         for (size_t i = 0; i < len; ++i) {
             crc_ = shift_byte(crc_, data[i], poly_);
         }
+#else
+        tp_crc_hw_feed(data, len);
 #endif
     }
 
@@ -209,19 +214,21 @@ public:
 
     /// Remainder so far, right-aligned to the width given to begin().
     uint32_t value() const {
-#ifdef TP_CRC_HW
-        return tp_crc_hw_value();
-#else
+#ifdef TP_CRC_SOFTWARE
         return crc_ >> (32u - width_);                 // Back to the natural width
+#else
+        return tp_crc_hw_value();
 #endif
     }
 
 private:
     uint8_t width_ = 32;                               ///< Register width in bits.
-#ifndef TP_CRC_HW
+#ifdef TP_CRC_SOFTWARE
     uint32_t poly_ = POLY32;                           ///< Left-aligned polynomial.
     uint32_t crc_ = INIT32;                            ///< Left-aligned register.
 #endif
 };
 
 }  // namespace Crc
+
+#endif  // TP_MATH_CRC_H
