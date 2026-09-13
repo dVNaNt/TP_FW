@@ -14,6 +14,11 @@
  * faults on the bus, while the USB console stays a read-only diagnostic
  * channel.
  *
+ * The console (boot banner, 1 Hz heartbeat) exists only when DEV_LOG_ENABLE is
+ * defined (cln17_v3_dev / cln17_v3_bench). The release image prints nothing,
+ * skips the wait for a host to open the CDC port, and is reached over TPCP
+ * alone - the CDC endpoint still carries the binary protocol (tp_serial.h).
+ *
  * The layering is strict: can_setup.h owns the FDCAN1 peripheral, src/api/
  * owns the protocol (wire format, registers, discovery, telemetry) and
  * drive_control.h turns protocol commands into control-loop targets. This file
@@ -33,6 +38,7 @@
 
 #include "api/transport/tp_can.h"   // TunePulse CAN Protocol bound to FDCAN1
 
+#ifdef DEV_LOG_ENABLE
 /** Max time run_setup() waits for the USB host to open the CDC port [ms]. */
 static constexpr uint32_t USB_ATTACH_TIMEOUT_MS = 5000;
 
@@ -62,10 +68,10 @@ static uint32_t hb_last_ticks = 0;
  * SPI1 ISR produces.
  */
 static void print_heartbeat() {
-    // One report is roughly 190 characters; if that much room is not free the
+    // One report is roughly 230 characters; if that much room is not free the
     // line is skipped entirely, which keeps run_loop() - and therefore the CAN
     // protocol service - free of any host-paced stall.
-    if (!tp_log_room(200)) {
+    if (!tp_log_room(240)) {
         hb_last_ms = millis();                           // Skip this window, keep the cadence
         hb_last_ticks = TP.counter;                      // ... and the rate baseline
         return;
@@ -122,6 +128,14 @@ static void print_heartbeat() {
     SerialUSB.print((unsigned long)TP_HID.tx_count());                // Frames packed into HID reports
     SerialUSB.print(" drop=");
     SerialUSB.print((unsigned long)(TP_HID.dropped() + TP_HID.overruns()));  // Lost to a full ring
+    SerialUSB.print("] gw[on=");
+    SerialUSB.print((unsigned)tp_gateway_armed);                      // USB<->CAN relay armed
+    SerialUSB.print(" down=");
+    SerialUSB.print((unsigned long)tp_gateway_down);                  // Host frames copied to the bus
+    SerialUSB.print(" up=");
+    SerialUSB.print((unsigned long)tp_gateway_up);                    // Bus answers copied to the host
+    SerialUSB.print(" lost=");
+    SerialUSB.print((unsigned long)tp_gateway_lost);                  // Relays dropped on a full ring
     SerialUSB.print("] mode=");
     DriveTelemetry dt;                                                // Live control snapshot
     TP.drive.read_telemetry(dt);
@@ -131,10 +145,29 @@ static void print_heartbeat() {
     SerialUSB.print(" q=");
     SerialUSB.println((unsigned)dt.queue_depth);                      // Queued motion segments
 }
+#endif  // DEV_LOG_ENABLE
 
 /**
  * @brief One-time initialization: bootloader button, USB, motor stack, protocol.
  */
+#if (ENCODER_TYPE == ENCODER_MT6835)
+/**
+ * @brief Board probe behind diagnostics record 0x43/0x07 (encoder link).
+ *
+ * Copies the SPI link supervisor's counters (spi_setup.h, written by the DMA
+ * completion ISR) into the protocol's snapshot. Torn reads are acceptable:
+ * these are statistics, and each field is a single aligned word.
+ */
+static void encoder_link_probe(TpEncoderLinkInfo& out) {
+    out.check_proven = ENCODER_LINK.check_trusted;    // Failing frames are being dropped
+    out.link_down = ENCODER_LINK.link_down;           // Nothing ingested, fault raised
+    out.sensor_status = ENCODER_LINK.sensor_status;   // MT6835 STATUS[2:0] of the last accepted frame
+    out.relinks = ENCODER_LINK.relinks;               // Bus resets since boot
+    out.frames_bad = ENCODER_LINK.frames_bad;         // CRC failures since boot
+    out.frames_ok = ENCODER_LINK.frames_ok;           // Frames accepted since boot
+}
+#endif
+
 inline void run_setup() {
     BOOT::init_button();  // SW1 (PC6) -> 3 s hold enters the USB DFU bootloader
 
@@ -155,7 +188,17 @@ inline void run_setup() {
         // is the thing that failed. The board still boots and stays reachable
         // over CAN, which is the point of not stopping here.
     }
+    // The USB stack installs its interrupts at priority 1 (USBD_IRQ_PRIO in
+    // the core, not overridable), above the control pass (DMA1 channel 1 at
+    // 2, see interrupt_setup.h). A HID report or a CDC transfer handled in
+    // that interrupt then preempts the pass for its own duration, and a pass
+    // stretched across the next PWM period boundary reaches the bridge one
+    // period late - a loop delay that jitters with the host's polling. USB is
+    // a background service here: it moves below every control interrupt.
+    NVIC_SetPriority(USB_HP_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
+    NVIC_SetPriority(USB_LP_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
 
+#ifdef DEV_LOG_ENABLE
     // Wait for the host to actually OPEN the port (DTR asserted) before
     // printing anything. USBSerial::write() silently discards every byte
     // while !CDC_connected(), so a banner emitted right after begin() is
@@ -186,6 +229,7 @@ inline void run_setup() {
     SerialUSB.println(" B");
     SerialUSB.println("  Bringing up peripherals + calibration...");
     SerialUSB.println("========================================================");
+#endif  // DEV_LOG_ENABLE
 
     tunepulse_init();
 
@@ -194,14 +238,17 @@ inline void run_setup() {
     // tunepulse_init() programmed, so the persisted values are the ones that
     // end up in force. It also starts the link at the stored bit rates.
     if (!tp_can_begin(TP)) {
-        SerialUSB.println("CAN protocol init FAILED");
+        TP_LOG("CAN protocol init FAILED");
     }
+#if (ENCODER_TYPE == ENCODER_MT6835)
+    TP_API.bind_encoder_link(encoder_link_probe);  // 0x43/0x07 reads the SPI link supervisor
+#endif
 
     // A node with no address answers network management only, which is exactly
     // what makes it discoverable; say so once so an unconfigured board on the
     // bench is not mistaken for a dead one.
     if (TP_API.config().node_id == TP_NODE_UNASSIGNED) {
-        SerialUSB.println("  CAN: no node address stored - awaiting discovery (0x100..0x103)");
+        TP_LOG("  CAN: no node address stored - listening on 0x3FF for discovery (registers 0x11 / 0x12)");
     }
 }
 
@@ -232,11 +279,13 @@ inline void run_loop() {
     }
 #endif
 
+#ifdef DEV_LOG_ENABLE
     // Periodic liveness + control-rate report. Dropped rather than blocked
     // when the console is not draining (see print_heartbeat).
     if ((millis() - hb_last_ms) >= HEARTBEAT_PERIOD_MS) {
         print_heartbeat();
     }
+#endif
 }
 
 #endif  // RUN_CLN17V3_H

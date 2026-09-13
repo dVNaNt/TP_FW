@@ -537,8 +537,15 @@ public:
 volatile uint32_t FlashG4_LL::ecc_guard_state = 0;
 volatile bool     FlashG4_LL::ecc_fault_flag  = false;
 
-/** C-linkage trampoline called by the naked NMI_Handler with the stack frame. */
-extern "C" void flashg4_ll_nmi_dispatch(uint32_t stacked_ctx) {
+/**
+ * C-linkage trampoline called by the naked NMI_Handler with the stack frame.
+ *
+ * __attribute__((used)) is load-bearing: the only reference to this function is
+ * the `b flashg4_ll_nmi_dispatch` inside NMI_Handler's inline asm, which the
+ * compiler cannot see. Under -flto the definition would otherwise be discarded
+ * as unreferenced and the link would fail with an undefined symbol.
+ */
+extern "C" __attribute__((used)) void flashg4_ll_nmi_dispatch(uint32_t stacked_ctx) {
     FlashG4_LL::nmi_ecc_recover(stacked_ctx);
 }
 

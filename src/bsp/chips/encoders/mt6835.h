@@ -24,6 +24,7 @@
 #define HARDWARE_MT6835_H
 
 #include <stdint.h>
+#include "lib/math/crc.h"  // Crc::crc8: the one CRC implementation of the firmware
 
 namespace MT6835 {
 
@@ -118,6 +119,27 @@ inline constexpr uint32_t Angle(uint8_t b0, uint8_t b1, uint8_t b2) {
 
 /** Extract STATUS[2:0] from the third burst payload byte. */
 inline constexpr uint8_t Status(uint8_t b2) { return (uint8_t)(b2 & 0x7U); }
+
+/**
+ * CRC-8 of one angle burst frame, as the sensor computes it for REG_ANGLE4.
+ *
+ * Polynomial x^8 + x^2 + x + 1 (0x07), initial value 0x00, no reflection and
+ * no final XOR, over the 24 payload bits ANGLE[20:0] + STATUS[2:0] in wire
+ * order (b0, b1, b2) - the firmware's standard CRC-8 (Crc::POLY8 / INIT8).
+ * Deliberately the software one-shot: three bytes are 24 shift steps, cheap
+ * enough for a 20 kHz interrupt, and the acquisition ISR must never touch the
+ * shared hardware unit a stream in thread mode may be using.
+ *
+ * @param b0 First payload byte  (ANGLE[20:13])
+ * @param b1 Second payload byte (ANGLE[12:5])
+ * @param b2 Third payload byte  (ANGLE[4:0] << 3 | STATUS[2:0])
+ * @return CRC-8 to compare with the fourth burst byte (REG_ANGLE4)
+ */
+inline constexpr uint8_t Crc8(uint8_t b0, uint8_t b1, uint8_t b2) {
+    const uint8_t payload[3] = {b0, b1, b2};                            // Wire order
+    return Crc::crc8(payload, 3);                                       // POLY8 / INIT8
+}
+static_assert(Crc8(0x00, 0x00, 0x00) == 0x00, "CRC-8 of an all-zero frame is zero");
 
 
 

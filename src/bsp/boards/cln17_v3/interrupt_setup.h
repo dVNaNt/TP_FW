@@ -66,18 +66,53 @@ inline void ADC_READY_Callback() {  // Define inline callback for ADC DMA comple
 
 }  // End of ADC_READY_Callback function
 
+/**
+ * Control-pass timing, in CPU cycles from the DWT cycle counter (enabled in
+ * NVIC_Init()). The pass runs on the encoder frame's completion, so its start
+ * is the SPI transfer time after the CH4 match, and it MUST end before the
+ * next match: the duty it computes is latched there, and a pass that ends
+ * after it is latched one period later. A pass end that wanders across that
+ * boundary from one pass to the next makes the current-loop delay jitter
+ * between one and two periods, which destabilised the loop on long profiled
+ * moves before the encoder clock was raised (spi_setup.h). PASS_LATE counts
+ * the passes that ended after the boundary; it must stay at zero. Read these
+ * over the protocol's direct register access (0x00, SRAM window) by symbol
+ * address when a build needs checking - no register carries them.
+ */
+inline volatile uint32_t PASS_T_CC4 = 0;        ///< CYCCNT at the TIM1 CH4 match (ISR entry).
+inline volatile uint32_t PASS_OFFSET_LAST = 0;  ///< Cycles from the CH4 match to the pass start (the encoder frame).
+inline volatile uint32_t PASS_CYCLES_LAST = 0;  ///< Duration of the last pass.
+inline volatile uint32_t PASS_CYCLES_MAX = 0;   ///< Longest pass since boot.
+inline volatile uint32_t PASS_LATE = 0;         ///< Passes that ended after the next CH4 match.
+
 inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA completion
+    const uint32_t t_cc4 = PASS_T_CC4;                 // Match this frame was started at
+    const uint32_t t0 = DWT->CYCCNT;
+    PASS_OFFSET_LAST = t0 - t_cc4;
     TP.encoder.set_raw_position(Encoder_GetAngle());  // Fetch raw mechanical angle from SPI and inject it into the FOC core
     TP.tick();
-
+    const uint32_t t1 = DWT->CYCCNT;
+    PASS_CYCLES_LAST = t1 - t0;
+    if (PASS_CYCLES_LAST > PASS_CYCLES_MAX) {
+        PASS_CYCLES_MAX = PASS_CYCLES_LAST;
+    }
+    if (PASS_T_CC4 != t_cc4) {
+        PASS_LATE++;                                   // The next match fired while this pass ran
+    }
 }  // End of POSITION_Callback function
 
 inline void NVIC_Init() {  // Define the initialization function for the Nested Vectored Interrupt Controller
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;  // Cycle counter for the pass timing (POSITION_Callback)
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     NVIC_SetPriority(SPI1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 6, 0));  // Set SPI1 interrupt to priority level 6
     NVIC_EnableIRQ(SPI1_IRQn);  // Enable the SPI1 interrupt in the NVIC hardware
 
-    NVIC_SetPriority(TIM1_CC_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 3,
-                                                       0));  // Set TIM1 Capture/Compare interrupt to high priority level 3
+    // TIM1 CH4 match: starts the encoder transfer and latches the next
+    // duty vector. Priority 0, above the USB stack (1) and the ADC DMA (1):
+    // at 3 it waited behind every USB transfer, which shifted the encoder
+    // sample and delayed the duty push by the USB handler's duration.
+    NVIC_SetPriority(TIM1_CC_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
     NVIC_EnableIRQ(TIM1_CC_IRQn);                            // Enable the TIM1 Capture/Compare interrupt in the NVIC hardware
 }  // End of NVIC_Init function
 
@@ -87,8 +122,10 @@ inline void NVIC_Init() {  // Define the initialization function for the Nested 
  * This function bypasses HAL entirely. It must be called directly from TIM1_CC_IRQHandler.
  */
 inline void FOC_TimTrig_Callback() {  // Define custom inline callback for the timer trigger event
-    ADC1_StartDMAConversion();        // Trigger hardware dual ADC conversion (ADC1 and ADC2 start synchronously)
-
+    PASS_T_CC4 = DWT->CYCCNT;         // Timestamp of the CH4 match (pass timing, see POSITION_Callback)
+    // The ADC is NOT started here any more: TIM1 triggers it in hardware at
+    // this same CH4 match (adc_setup.h), so the sampling instant no longer
+    // depends on how long this interrupt took to be entered.
     Encoder_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading
 
     TP.driver_phy.tick_icr();  // Request new duty cycles from FOC core and write them to hardware registers

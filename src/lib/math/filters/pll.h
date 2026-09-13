@@ -8,7 +8,7 @@
  *   |e|>gate -> e = 0 (coast); 1 ms run -> snap to input, drop velocity
  *   integ  = clamp(integ + Ki*dt*e)       // anti-windup
  *   omega  = Kp*e + integ
- *   theta += omega*dt;  theta -= rintf(theta)
+ *   theta += omega*dt;  theta -= lrintf(theta)
  *
  *   wn = 2*pi*Fc, Kp = sqrt(2)*wn, Ki = wn^2   (zeta = 1/sqrt(2))
  *   discrete stability: wn*dt < 1.035 -> Fc < 0.164*Fs (clamped in set_fc)
@@ -73,7 +73,7 @@ public:
     int16_t tick(int16_t angle) {
         const float a = (float)angle * (1.0f / 65536.0f);
         float e = a - theta_;
-        e -= rintf(e);                       // wrap to [-0.5, 0.5]
+        e -= (float)lrintf(e);               // wrap to [-0.5, 0.5]; lrintf is one vcvtr, rintf is a libm call (no VRINT on M4F)
 
         // Glitch gate: huge residual = corrupt sample -> coast on the
         // prediction. If it persists, snap to the input and drop velocity.
@@ -92,9 +92,9 @@ public:
         integral_ = clampf(integral_ + ki_dt_ * e, imax_);
         omega_    = kp_ * e + integral_;
 
-        // NCO: single rintf() wrap is correct for any omega*dt.
+        // NCO: single lrintf() wrap is correct for any omega*dt.
         theta_ += omega_ * dt_;
-        theta_ -= rintf(theta_);
+        theta_ -= (float)lrintf(theta_);     // same round-to-nearest-even as rintf, inlined
 
         return get_angle();
     }

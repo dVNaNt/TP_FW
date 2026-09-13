@@ -95,7 +95,8 @@ enum {
     ANGLE_CAL_CAL_SETTLING_TIME_US = 1000,  // Settling time in microseconds
     ANGLE_CAL_CAL_SPEED_US = 2500,           // Speed in angle increments per microsecond
     ANGLE_CAL_CAL_OVERSEMPLING = 128,        // Number of samples per oversampling period
-    ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 8      // Number of test steps in Pass0
+    ANGLE_CAL_CAL_FIRST_STEP_USTEPS = 8,     // Number of test steps in Pass0
+    ANGLE_CAL_MIN_STEP_COUNTS = 8            // Pass0: smallest credible encoder travel per test step (counts of 65536/turn)
 };
 
 /**
@@ -267,6 +268,16 @@ public:
                 break;
         }
 
+        // A motor-profile flash transfer (the save that follows an
+        // identification, the boot restore) makes the control loop command
+        // zero current for its duration, so a sweep that starts underneath
+        // it steps the field with the rotor de-energized: Pass0 then sees no
+        // motion, reads that as "direction +1", and Pass1 waits forever for a
+        // full turn that never comes. Hold in Setup until the transfer is over.
+        if ((calibration_stage == CalStage_Setup) && motor.is_flash_busy()) {
+            return angle_el;                                                     // Not energized yet: wait
+        }
+
         int32_t stable_pos = run_sampling_cycle(ang_el_step);  // Perform calibration cycle and get stable position
 
         if (stable_pos != INT32_MIN) {
@@ -274,6 +285,15 @@ public:
             switch (calibration_stage) {
                 case CalStage_Setup:
                     TP_LOG("CALIBRATION: Starting calibration process");         // Log calibration start
+                    // Every cycle starts from electrical angle zero. The table
+                    // records the sweep's angle relative to its start, and the
+                    // control loop assumes that start was zero; a cycle that
+                    // was aborted part way (Pass0 inconsistency, a fault) left
+                    // the angle wherever it stopped, so the next cycle's table
+                    // would carry that leftover as a constant phase error - up
+                    // to half a period, which inverts the torque sign. Reset's
+                    // settling iterations absorb the small snap this causes.
+                    angle_el = 0;                                                // Sweep frame starts at zero
                     cal_idx = 10;                                                // Set initial iteration count
                     calibration_stage = CalStage_Reset;                          // Move to Reset stage
                     speed = calculate_speed(frequency, ANGLE_CAL_CAL_SPEED_US);  // Calculate speed in ticks
@@ -312,6 +332,19 @@ public:
                         int32_t avg_step = (travel * direction) / ANGLE_CAL_CAL_FIRST_STEP_USTEPS;  // Calculate average step size
                         int32_t deviation = dif_max - dif_min;  // Calculate step deviation range
 
+                        // The rotor has to have followed the field. One electrical
+                        // period is 65536 / pole-pairs encoder counts (1311 for a
+                        // 50 pole-pair stepper), so a whole period of steps that
+                        // moved the encoder by less than a few counts means the
+                        // rotor was not driven (de-energized, disconnected, jammed).
+                        // Without this check a zero travel decoded as direction +1
+                        // and Pass1 waited forever for a turn that never came.
+                        if (avg_step < ANGLE_CAL_MIN_STEP_COUNTS) {
+                            TP_LOG_VAL("CALIBRATION: ERROR - rotor did not follow the field, travel = ", (long)travel);
+                            calibration_stage = CalStage_Error;                  // Move to Error stage
+                            return angle_el;                                     // Return current angle
+                        }
+
                         if (avg_step < deviation) {
                             // Motion too inconsistent, calibration failed
                             TP_LOG("CALIBRATION: ERROR - Motion too inconsistent");  // Log calibration error
@@ -347,7 +380,16 @@ public:
                         speed = -speed;       // Reverse speed for backward rotation
                         return angle_el;      // Return current angle
                     }
-                    ptab->fill_first(cal_idx, (uint16_t)stable_pos);  // Store position in calibration table
+                    // A pass that has taken far more samples than a turn holds
+                    // is not going to complete: the rotor is turning the wrong
+                    // way (a wrong direction call), slipping, or not turning at
+                    // all. Stop rather than step the field forever.
+                    if (!ptab->fill_first(cal_idx, (uint16_t)stable_pos)) {  // Store position in calibration table
+                        TP_LOG_VAL("CALIBRATION: ERROR - no full turn after samples = ", (long)cal_idx);
+                        calibration_stage = CalStage_Error;                   // Move to Error stage
+                        angle_el = 0;                                         // Leave the frame at zero for the next cycle
+                        return angle_el;                                      // Return current angle
+                    }
                     cal_idx += 1;                                         // Increment calibration index
                     break;
                 }
@@ -475,8 +517,9 @@ public:
      * @brief "load_calibration" command: bind a memory region and restore
      *
      * Receives the flash driver pointer and restarts the non-blocking scan.
-     * When a valid table is found at the profile's Cal-ID chunk (FA3E marker,
-     * sane sample count, samples strictly monotonic), is_calibrated() starts
+     * When a valid table is found at the profile's Cal-ID chunk (FA3E marker with the
+     * current format version, sane sample count, samples strictly monotonic, CRC-32
+     * matching), is_calibrated() starts
      * returning true - unless calibrate() has been triggered meanwhile.
      */
     void load_calibration(FlashEEPROM* mem) {
@@ -492,8 +535,8 @@ public:
     /**
      * @brief "dump_calibration" command: persist the RAM table into flash
      *
-     * Serializes {FA3E marker, sample count, packed monotonic samples,
-     * metadata}. Checks free space first: appends there when the record fits,
+     * Serializes {FA3E marker + format version, sample count, packed monotonic samples,
+     * metadata, CRC-32}. Checks free space first: appends there when the record fits,
      * otherwise erases the whole region and rewrites from offset zero.
      */
     void dump_calibration() {
@@ -537,6 +580,61 @@ public:
 
     bool is_idle() const {
         return calibration_stage == CalStage_Reset;  // Check if in Ready stage
+    }
+
+    /**
+     * @brief True while a calibration cycle is in progress (protocol status).
+     *
+     * Covers the physical passes, the settling scan and the flash save, plus
+     * the parking stage once a cycle has been requested but not yet started.
+     * A cycle that ended in CalStage_Error is NOT running: it is finished,
+     * unsuccessfully, and a new one may be requested.
+     */
+    bool is_running() const {
+        if ((calibration_stage >= CalStage_Setup) && (calibration_stage <= CalStage_Check)) {
+            return true;                                            // A physical pass is under way
+        }
+        if ((calibration_stage == CalStage_CheckMemory) || (calibration_stage == CalStage_Save)) {
+            return true;                                            // Flash scan or save in progress
+        }
+        return (calibration_stage == CalStage_Reset) && calibration_requested;  // Armed, waiting to start
+    }
+
+    /** @brief True when the last calibration cycle ended in an error. */
+    bool is_failed() const {
+        return calibration_stage == CalStage_Error;                 // Terminal error stage
+    }
+
+    /** @brief True while parked in Reset with no cycle requested (no table, nothing to do). */
+    bool is_parked() const {
+        return (calibration_stage == CalStage_Reset) && !calibration_requested;  // Waiting for calibrate()
+    }
+
+    /** @brief The current CalStage value, for diagnostics. */
+    uint8_t stage() const { return (uint8_t)calibration_stage; }
+
+    /**
+     * @brief Coarse progress of the physical sweep, 0..255.
+     *
+     * Reset and Pass0 are short and count as the first eighth; Pass1 and
+     * Pass2 each cover a full mechanical turn of samples against the expected
+     * count (pole pairs x steps per period), so the bar moves with the rotor.
+     */
+    uint8_t progress_255() const {
+        const uint32_t expected = (uint32_t)((motor.get_pole_pairs() > 0 ? motor.get_pole_pairs() : 50) * cal_step());
+        const uint32_t done = (cal_idx > expected) ? expected : (uint32_t)cal_idx;  // Samples so far, clamped
+        switch (calibration_stage) {
+            case CalStage_Setup:
+            case CalStage_Reset:
+            case CalStage_Pass0:       return 16u;                                          // Getting started
+            case CalStage_Pass1:       return (uint8_t)(32u + (done * 96u) / expected);     // 32 .. 128
+            case CalStage_Pass2:       return (uint8_t)(128u + ((expected - done) * 96u) / expected);  // 128 .. 224
+            case CalStage_Check:
+            case CalStage_Save:
+            case CalStage_CheckMemory: return 240u;                                         // Validating / storing
+            case CalStage_Ready:       return 255u;                                         // Done
+            default:                   return 0u;                                           // Idle or error
+        }
     }
 
     /**

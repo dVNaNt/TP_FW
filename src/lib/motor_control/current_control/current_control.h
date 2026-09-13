@@ -91,6 +91,72 @@ public:
 
     MotorStatus get_motor_calibration_status() const { return motor_calib_status; }
 
+    /**
+     * @brief True while the electrical identification owns the bridge.
+     *
+     * Covers every stage of MotorCalibration, including a terminal CalibError:
+     * in that state the routine still answers every tick and the FOC loop is
+     * not to be trusted, so the caller keeps routing passes here rather than
+     * to closed-loop control.
+     */
+    bool is_identifying() const { return motor_calib_status != MotorStatus::Success; }
+
+    /**
+     * @brief Re-derive the FOC current-loop gains from the Motor profile.
+     *
+     * The loop is tuned from the winding resistance and inductance once, when
+     * the identification finishes. A profile edited afterwards - R or L
+     * written through the register map - would otherwise leave the loop on
+     * its old gains until the next identification. Refused while an
+     * identification is running, because that routine re-tunes on completion
+     * from the values it measures itself.
+     *
+     * Thread-mode callers must hold the drive disabled: the controller object
+     * is rebuilt in place, and a pass that regulated with a half-built one
+     * would command garbage.
+     *
+     * @return true when the loop was re-tuned.
+     */
+    bool retune() {
+        if (is_identifying()) {
+            return false;                    // The identification will tune on its own completion
+        }
+        init_foc_controller();
+        return true;
+    }
+
+    /**
+     * @brief Leave the CalibError state a failed identification parked the
+     *        drive in, keeping the last known motor parameters.
+     *
+     * A failed runtime identification reports Success for nothing afterwards:
+     * is_identifying() stays true, the closed loop is locked out and every
+     * enable is refused until a reboot. The operator's fault reset calls this
+     * to make the drive usable again with the parameters it already had (the
+     * routine only publishes a value once its own pass has measured it, so a
+     * failure leaves the previous ones in place). The current controller is
+     * re-initialised from those parameters. A new identification may be
+     * requested afterwards. No effect unless the drive is in CalibError.
+     */
+    void recover_identification() {
+        if (motor_calib_status != MotorStatus::CalibError) {
+            return;                                   // Nothing to recover from
+        }
+        motor_calib_status = MotorStatus::Success;    // Identification no longer owns the bridge
+        motor.set_status(MotorStatus::Success);       // Profile reports a usable motor again
+        init_foc_controller();                        // Gains from the parameters we still have; status Ready
+    }
+
+    /**
+     * @brief Abort a running identification (see MotorCalibration::abort()).
+     * @param reason Short reason for the console dump.
+     */
+    void abort_identification(const char* reason, uint8_t fault_bits = 0) {
+        if (is_identifying() && (motor_calib_status != MotorStatus::CalibError)) {
+            motor_calib.abort(motor_calib_status, motor, setup_status, reason, fault_bits);
+        }
+    }
+
 private:
     void init_foc_controller() {
         // All control constants come from the Motor parameter structure
@@ -114,8 +180,13 @@ public:
     float fc_pll = PLL_FC_DEFAULT;
     float fc_pll_prev = PLL_FC_DEFAULT;
     Vec2D_f32 tick_control_foc(int16_t angle, float target_current) {
-        // Taking control over angle to perform electric test
-        if (motor.get_status() == MotorStatus::Success)
+        // The electrical identification steers the angle itself (a fixed test
+        // vector, then a slow rotation), so the caller's angle is only adopted
+        // while no identification is running. Keyed on the identification
+        // state rather than on the Motor status: after boot the Motor reports
+        // Success for good, so an identification started later was handed the
+        // encoder angle every pass and measured against a moving vector.
+        if (!is_identifying())
             angle_ = angle;
 
         // Track the angle with the second-order PLL. It provides a smooth,

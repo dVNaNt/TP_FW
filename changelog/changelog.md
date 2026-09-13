@@ -675,4 +675,567 @@ RAM: 11660 bytes (35.58% of 32768 bytes): +3328 bytes
 FLASH: 99520 bytes (75.93% of 131072 bytes): +0 bytes
 RAM: 11660 bytes (35.58% of 32768 bytes): +0 bytes
 
+## 2026-09-11 - USB-to-CAN gateway: one USB cable reaches every node on the bus
+**Changes:**
+- tp_can.h: gateway section between the transport callbacks and the multiplexer - relays every master->bus frame a USB host sends onto CAN (except frames directed at the USB node itself) and every node->master frame received from CAN back to both USB transports, withholding those from the local engine
+- Gateway arms itself on the first protocol frame heard over HID or serial, latched until reset, and never arms under TP_BENCH_LOOPBACK
+- tp_can_bind_filters() keeps the promiscuous slot open while the gateway is armed, whatever the stored flag says
+- tp_mux_read() relays at most TP_GATEWAY_UP_BUDGET (8) bus frames per call so a bus storm cannot starve the engine's poll budget
+- Relay counters tp_gateway_down / up / lost, shown in the console heartbeat as gw[on= down= up= lost=]
+- tools/tpcp_host.py HidLink.recv(): return when the wait window has elapsed instead of calling hid.read(timeout_ms=0), which the hidapi binding treats as a blocking read - this is what hung the MCP scan and connect tools against a silent drive
+- CAN_PROTOCOL.md Transports section and CLAUDE.md describe the gateway
+
+**Reasoning:**
+- A USB host could only ever talk to the drive on the cable: the multiplexer answers from the local engine and nothing reaches the bus, so a second drive on the USB node's CAN connector was unreachable without a separate CAN adapter
+- Auto-arming on the first USB frame needs no address and no register write first, so the discovery sweep that finds the bus nodes is itself what arms it, and a deployed node that never hears USB pays nothing
+- Only master->bus classes go down and only node->master classes come up, so the two directions cannot form a loop and responses still return on the transport that asked
+- Discovery needs no host change because cmd_scan already takes the minimum of the replies it collects per step - the bus arbitrates its own nodes, the USB node adds its own while unaddressed
+
+**Notes:**
+- Verified on hardware: USB node (UID dae8172daab933, node 1) relayed a sweep that found and addressed the bus node (UID a5491e4b82efe1, node 2)
+- status, identity and comm_status of node 2 read through the gateway, TEC/REC 0 on both
+- Frames go down with DLC 8 and are dropped (counted in tp_gateway_lost) when the 8-deep CAN TX ring is full - a HID-speed burst can outrun a classic 1 Mbit/s bus, pacing is the host's job
+- Pre-existing, not fixed here: the text heartbeat in run.h never prints because tp_log_room(200) can never pass against the 128-byte CDC TX queue (2 x 64)
+- it has been dead since 9d3b7f2
+
+FLASH: 98976 bytes (75.51% of 131072 bytes): +544 bytes
+RAM: 10780 bytes (32.90% of 32768 bytes): +16 bytes
+
+
+## 2026-09-11 - MotionExecutor: leaving HALT no longer swallows the first queued segments
+**Changes:**
+- motion_executor.h do_forward_transition(): after entering the first segment out of HALT, return unless needs_forward_transition() says it finishes on the spot (ANCHOR, or a hold with a queued successor) - previously the loop fell straight into the segment-complete branch
+- Host simulation of the executor (scratch, not committed) reproduced the fault and confirmed the fix for a pre-queued leg, a trickle-fed leg, a second leg after HALT and an ANCHOR basis shift
+
+**Reasoning:**
+- The segment just started was treated as complete in the same pass: its displacement was folded into the anchor untravelled and its successor started with a start time one duration in the future, so the wrapped elapsed time completed every following segment one tick apart
+- With a whole leg pre-queued the target jumped to the end of the trajectory within a few ticks
+- With a leg trickling in over a HID burst the chain ate the 2-3 segments already queued, then halted, re-anchored to the measured position and played the rest at the right pace - a full-revolution leg came out 2 segments short (14/16, 6/8) with no visible jump, which looks exactly like lost frames and was chased through the HID ring, the mailbox and the gateway before the executor was suspected
+
+**Notes:**
+- Verified on hardware: 1 rev over 6 s as 12 PVT segments lands at +0.9995 rev on the reflashed node
+- A board still on the old firmware can be worked around by queuing one zero-displacement 10 ms hold before the leg - the executor halts with an active segment and later arrivals take the normal path (validated against the old executor on the host, +0.9963 rev on hardware)
+- Only the USB-attached board was reflashed - the second drive sits on CAN with no ST-Link or USB, so it still runs the old executor
+
+FLASH: 99192 bytes (75.68% of 131072 bytes): +216 bytes
+RAM: 10780 bytes (32.90% of 32768 bytes): +0 bytes
+
+
+## 2026-09-11 - Runtime electrical identification runs; R/L edits re-tune the loop; measured currents and sense offsets exposed
+**Changes:**
+- lib.h tick(): a pass with CurrentControl::is_identifying() true bypasses the drive front end (serviced inhibited) and falls through to tick_control_foc() with a zero target, so an identification started over the protocol actually runs
+- on its completion the front end is re-armed from the measured position (the slow-rotation stage moves the shaft)
+- current_control.h: tick_control_foc() adopts the caller's angle only while no identification is running (keyed on motor_calib_status, not Motor::status_), new is_identifying() and retune()
+- tp_register_table.h: resistance / inductance_d / inductance_q are TP_RF_DISABLED and apply through retune(), guarded by tp_reg_can_retune() (no identification, angle table present)
+- MOTOR_PROPERTIES write applies the same guard and re-tunes
+- New read-only registers 0x050D-0x0513: measured d/q current, measured alpha/beta current, per-phase zero-current ADC offsets (CurrentSense::get_zero_offset())
+- CAN_PROTOCOL.md: kind-1 semantics, RW D on R/L, new register rows
+- tpcp_host.py REGS
+- CLAUDE.md register count corrected to 79
+
+**Reasoning:**
+- TP_CALIB_ELECTRICAL was ACKed but never ran: handle_calibration() disables the drive, so tick() took the Freewheel early return and tick_control_foc() - where MotorCalibration is advanced - was never reached
+- the routine stayed armed and ran inside whatever mode was next enabled, with the encoder angle overwriting its test vector every pass, and ended in CalibError plus a phase fault (seen on hardware)
+- Writing R or L only changed the profile: nothing called init_foc_controller() again, so the loop kept its old gains until the next identification
+- No chunk or register reported a measured current - electric_status.current is the commanded value - so a sense offset or gain fault could not be diagnosed over the link
+
+**Notes:**
+- Motivation: two identical motors, one drive identifies R=1.1-1.6 ohm / L~1.9 mH at boot, the other 7 ohm then 29 ohm with L->0 on successive boots and vibrates on the resulting gains
+- the new registers and the working runtime identification let that board be measured and re-tuned without reflashing or rebooting
+- Not yet flashed: the ST-Link is off the target
+- Untested on hardware until then
+
+FLASH: 99756 bytes (76.11% of 131072 bytes): +564 bytes
+RAM: 10780 bytes (32.90% of 32768 bytes): +0 bytes
+
+
+## 2026-09-12 - Build at -Os: PlatformIO's debug build type was silently discarding -O0 and compiling at -Og
+**Changes:**
+- platformio.ini: debug_build_flags = -Os -g2 -ggdb2 in cln17_v3_release and cln234_release (comment explains why it must live there)
+- the inert -O0 lines removed from both build_flags
+
+**Reasoning:**
+- build_type = debug makes PlatformIO strip every -O*/-g* flag - the ini's -O0 AND the framework's default -Os - and inject -Og -g2 -ggdb2, confirmed from the DWARF producer string of board.cpp.o
+- the firmware is one translation unit of header-only C++ templates, where -Og vs -Os is worth 18.6 KiB
+- a true -O0 image overflows flash by 68484 B and -O2 by 1180 B, so neither is an option
+
+**Notes:**
+- Measured baseline on this exact tree before the change: 102008 B flash / 11152 B RAM (the previous entry predates later uncommitted edits)
+- pio debug keeps full DWARF, debug info costs no flash
+- first step of the flash-size series (next: unused UART, dev-log gating, soft-double, LTO)
+- needs a bench pass - heartbeat tick/s ~20000, a calibration run, TPCP over USB HID and CAN
+
+FLASH: 83412 bytes (63.64% of 131072 bytes): -16344 bytes
+RAM: 11152 bytes (34.03% of 32768 bytes): +372 bytes
+
+
+## 2026-09-12 - Drop the unused HardwareSerial / UART stack from the image
+**Changes:**
+- platformio.ini: -D HAL_UART_MODULE_ONLY next to the TIM/ADC _ONLY flags in both live envs, with a comment explaining what it removes
+
+**Reasoning:**
+- Nothing in src/ opens a UART - the console is USB CDC (SerialUSB) - but the Arduino core's serialEventRun() constructs SerialLP1 and keeps HAL UART, uart.c, HardwareSerial and the Stream/String parsers linked: 5.5 KiB of flash and 372 B of RAM for a port that never runs
+
+**Notes:**
+- mapdiff against the -Os map: 279 symbols removed, all UART / USART IRQ stubs, HardwareSerial, Stream, String and the libc string/float parsers they pulled in, nothing added
+- PIO_FRAMEWORK_ARDUINO_SERIAL_DISABLED measures identically, the _ONLY spelling matches the existing flags
+- the HAL UART driver still compiles, only the Arduino wrapper is gone
+- native_tpcp: 15/15 pass
+
+FLASH: 77836 bytes (59.38% of 131072 bytes): -5576 bytes
+RAM: 10780 bytes (32.90% of 32768 bytes): -372 bytes
+
+
+## 2026-09-12 - Console output is a build flag: DEV_LOG_ENABLE off in cln17_v3_release, new cln17_v3_dev env keeps it
+**Changes:**
+- dev_log.h: the hard-coded #define DEV_LOG_ENABLE 1 removed, the switch is -D DEV_LOG_ENABLE=1 from platformio.ini
+- platformio.ini: new [env:cln17_v3_dev] = release + DEV_LOG_ENABLE, cln17_v3_bench also defines it (its loopback check reads the heartbeat)
+- run.h: heartbeat (constants, statics, print_heartbeat and its call), the boot banner and the wait for the host to open the CDC port sit inside #ifdef DEV_LOG_ENABLE, the two remaining status lines use TP_LOG
+- tunepulse.h: five bring-up messages through TP_LOG
+- board.cpp: irq_log() body inside #ifdef DEV_LOG_ENABLE
+- comp_dac.h: the four threshold echoes through TP_LOG_VAL
+- file headers and comments updated
+
+**Reasoning:**
+- Logging was hard-enabled in the header, so no build could ever drop it: 71 TP_LOG call sites, 26 _tp_print_args template instantiations, print_heartbeat (70 raw prints, the only float print), the banner and ~5 KiB of string literals shipped in every image
+- turning the flag off did not even compile because run.h and board.cpp called tp_log_room() outside the macros
+
+**Notes:**
+- cln17_v3_release 65760 B, cln17_v3_dev 77976 B, cln17_v3_bench 77972 B, all warning-free
+- printable strings in the release image 5614 -> 777 B
+- the release image no longer waits up to 5 s for a CDC host at boot (that wait only served the banner) - TPCP over CDC, HID and CAN is unchanged
+- native_tpcp 15/15
+
+FLASH: 65760 bytes (50.17% of 131072 bytes): -12076 bytes
+RAM: 10772 bytes (32.87% of 32768 bytes): -8 bytes
+
+
+## 2026-09-12 - No more soft-double: float literals, an int32 velocity step, lrintf instead of rintf/lroundf, -fno-math-errno
+**Changes:**
+- voltage.h: 1000.0 -> 1000.0f and 0.001 -> 0.001f (the only double arithmetic in the firmware)
+- ema.h set_cutoff(): 6.283185307f instead of Arduino's double TWO_PI macro
+- drive_control.h Velocity mode: the per-pass position step is converted float -> int32_t and widened, instead of a direct float -> int64_t cast
+- pll.h: e -= (float)lrintf(e) in place of rintf() (twice)
+- hermite_interpolator.h: __builtin_lrintf instead of __builtin_lroundf for the two coefficient roundings
+- platformio.ini: -fno-math-errno in both live envs
+
+**Reasoning:**
+- A float -> int64_t cast is __aeabi_f2lz, which libgcc implements with double arithmetic, so that one cast in DriveControl::tick kept _arm_muldivdf3 and _arm_addsubdf3 (2 KiB) alive together with the two double literals in voltage.h
+- the M4F has no VRINT, so rintf() is always a libm call while lrintf() inlines to vcvtr
+- sqrtf() inlines to vsqrt only when it need not set errno, and nothing here reads errno
+
+**Notes:**
+- nm: no __aeabi_d*, __adddf3, __muldf3, __divdf3, __aeabi_f2lz, __ieee754_sqrtf or rintf left in the image
+- a -Wdouble-promotion build of src/ reports nothing
+- the int32 step covers |v| < 10000 rev/s (vel_to_pos_q32_ = 2^32 / 20 kHz)
+- lrintf vs lroundf differ only on exact .5 ties of the Hermite coefficients
+- __udivmoddi4 (746 B) remains for hermite_interpolator.h's one 64-bit reciprocal - left alone, optional
+- RAM -392 B is the errno / reent plumbing
+
+FLASH: 63356 bytes (48.34% of 131072 bytes): -2404 bytes
+RAM: 10380 bytes (31.68% of 32768 bytes): -392 bytes
+
+
+## 2026-09-12 - Link-time optimisation on: -flto=auto, NMI trampoline marked used
+**Changes:**
+- platformio.ini: -flto=auto in both live envs
+- nvm_flash.h: __attribute__((used)) on flashg4_ll_nmi_dispatch with a comment explaining why it is load-bearing
+
+**Reasoning:**
+- With one firmware TU plus 20 KiB of separately compiled HAL and USB code, cross-object inlining and dead-code removal at -Os are worth 2.2 KiB
+- the trampoline is referenced only from the naked NMI_Handler's inline asm, which LTO cannot see, so without the attribute the link fails with an undefined reference
+- plain -flto emits an lto-wrapper warning about serial LTRANS jobs, =auto does not
+
+**Notes:**
+- Verified in the image: NMI vector -> NMI_Handler -> b.w flashg4_ll_nmi_dispatch
+- the set of strongly defined interrupt vectors (TIM1_CC, DMA1_Channel1/5, FDCAN1_IT0, COMP1_2_3, COMP4, EXTI9_5, EXTI15_10, USB_LP/HP/WakeUp, SysTick, NMI) is identical to the pre-LTO build - only HAL-internal PCD_EP_ISR_Handler was inlined
+- cln17_v3_dev 72112 B, cln17_v3_bench 71904 B
+- LTO is the one change here that can alter cross-TU inlining, so it went in last and needs its own bench pass
+
+FLASH: 61140 bytes (46.65% of 131072 bytes): -2216 bytes
+RAM: 10264 bytes (31.32% of 32768 bytes): -116 bytes
+
+
+## 2026-09-12 - platformio.ini hygiene, changelogger budget, CLAUDE.md build-flag notes
+**Changes:**
+- platformio.ini: removed -D ARM_MATH_CM4 and -D __FPU_PRESENT=1U (arm_math.h is never included
+- the device header defines __FPU_PRESENT), -D USBCON (the framework script adds it with USBD_USE_CDC when CDC is enabled), -D HAL_Module_Enabled (no such symbol anywhere in the framework) and lib_deps = migration (no such library
+- .pio/libdeps holds only Unity)
+- changelogger.py: MAX_FLASH = 114688 so its percentage matches PlatformIO's
+- CLAUDE.md: environments, reference build, the build flags that decide the size, and the DEV_LOG_ENABLE rule in the Logging section
+
+**Reasoning:**
+- Each of these knobs suggested a dependency or a capability that does not exist and would mislead the next size investigation
+- the two percentage bases disagreeing was documented as a known wart
+
+**Notes:**
+- mapdiff against the previous map: 0 added, 0 removed, 0 resized - a pure no-op for the image
+- envdump confirms USBCON, USBD_USE_CDC and HAL_PCD_MODULE_ENABLED are still injected by the framework
+- cln17_v3_dev 72112 B, cln17_v3_bench 71904 B
+- native_tpcp 15/15
+- flash series total 102008 -> 61140 B (-40868 B, 53.3 percent of the 114688 B budget), RAM 11164 -> 10264 B
+
+FLASH: 61140 bytes (53.31% of 114688 bytes): +0 bytes
+RAM: 10264 bytes (31.32% of 32768 bytes): +0 bytes
+
+
+## 2026-09-12 - cln17_v3_release is a real release build type; debug symbols and pio debug move to cln17_v3_dev
+**Changes:**
+- platformio.ini: cln17_v3_release and cln234_release use build_type = release (the framework's default -Os applies and nothing strips it), their debug_build_flags removed
+- cln17_v3_dev is build_type = debug with debug_build_flags = -Os -g2 -ggdb2 and is the environment for pio debug
+- CLAUDE.md: build commands, environment paragraph and the optimisation-level note updated
+
+**Reasoning:**
+- A shipping image must not come out of the debug build type
+- the earlier step kept build_type = debug only to preserve DWARF for pio debug, which the dev environment now provides on the same -Os code
+
+**Notes:**
+- mapdiff between the debug-type and the release-type -Os images: 0 added, 0 removed, 0 resized - the same code byte for byte
+- the release ELF shrinks from 900 KB to 102 KB because it carries no DWARF (flash is unchanged)
+- cln17_v3_dev 72112 B, cln17_v3_bench 71904 B, cln234_release 50420 B of 520192
+- the release image has no source-level debug symbols by design
+
+FLASH: 61140 bytes (53.31% of 114688 bytes): +0 bytes
+RAM: 10264 bytes (31.32% of 32768 bytes): +0 bytes
+
+
+## 2026-09-12 - Rewrite the CAN API to the api_final.md register design (TPCP v1)
+**Changes:**
+- Identifier map: 0x100 emergency, 0x300 commands, 0x400 responses, 0x500 PulseBeat/telemetry
+- node 0 broadcast, 255 unassigned
+- FDCAN filters reprogrammed (own+broadcast dual slot, three master mask slots for the gateway)
+- CMD byte with group bits: RW registers 0x00-0x3F (write = +0x80, answered with the read form), RO 0x40-0x7F, write-only 0xC0-0xDF, burst 0xE0-0xFF
+- every register of the design implemented as a packed 8-byte layout (direct access, 0x01 axis/LED/gearbox/IO map/encoders/homing/limits sub-space, bus settings, discovery, system control, motor props, power/thermal/supply/current protection, motion and error limits, watchdog, calibration table, currents, device/system/motor/driver/motion status, encoder position, PulseBeat)
+- added 0x02 telemetry slots, a 0x43 diagnostics sub-space and ACK/NACK at 0x5E/0x5F
+- Driver Status moved from 0x45 (inside the sub-space block) to 0x58
+- discovery as a binary HashUID search (48-bit identity) whose replies echo the matched prefix so competing nodes never collide
+- multi-frame motion tasks assembled by SegmentID with AxisID filtering, single-frame setpoints (CSP/CSV/CST) that select their control mode, PVT time-tagged and PVcTF burst streams with masked absolute positions, S-curve/hold/freerun/anchor/limit/reset modes
+- save config keywords (save, defaults, erase), MIDI control with attack/decay envelope, sequenced electrical-then-angle calibration, comm-mode response policy, FaultBeat escalation
+- DriveControl: PushSegmentAbs and queue-tail tracking
+- AngleCalibrator: is_running()/is_failed()
+- CalibrationTable: get_sample()
+- node config record grown to 256 B (version 2) serialized through a byte cursor
+- tools/tpcp_host.py and tools/tpcp_mcp.py rewritten with a generic register field model (get/set by field name)
+- test_wire.cpp rewritten (21 tests)
+- CAN_PROTOCOL.md rewritten from the design with every gap marked [decision]
+- CLAUDE.md updated
+
+**Reasoning:**
+- The api_final.md design replaces the opcode-based v1 with a register map that reads back on write, batches reads, streams synchronous motion and discovers nodes by HashUID
+- the design's +1-bit discovery reply would collide in the CAN data field, which CAN does not arbitrate, so replies echo the matched prefix instead
+- the fine-homing record overflowed a frame, so its trigger bit lives in the quick-homing flags
+- 0x45 lies in the SubCMD block, so Driver Status is 0x58
+
+**Notes:**
+- cln17_v3_dev 79564 B, cln17_v3_bench 79284 B
+- native_tpcp 21/21
+- a -Wall -Wextra build of the dev env reports nothing in src/api
+- the bench env now sets TP_DEFAULT_BUS_TYPE=0 instead of the removed TP_DEFAULT_LINK_FLAGS=4
+- not bench-tested on hardware yet: discovery walk, burst timing and the axis inversion path need a bus/USB session
+- stored config records of the old version 1 are ignored (the node comes back on defaults, unaddressed)
+
+FLASH: 68948 bytes (60.12% of 114688 bytes): +7808 bytes
+RAM: 11200 bytes (34.18% of 32768 bytes): +936 bytes
+
+
+## 2026-09-12 - Identity read-modify-write no longer refused; CLN Studio ported to TPCP v1
+**Changes:**
+- tp_engine_regwrite_impl.h: Motor Properties 1 counts a type / wiring / direction / pole field as an identity write only when it differs from the current value, and Motor Properties 2 re-tunes the loop only when R or L differ from the reported bfloat16 - a read-modify-write that touches the mode or the thermal rating alone is accepted on an enabled drive
+- CAN_PROTOCOL.md §5.8 / §5.9 say so
+- CLN Studio (AndroidStudioProjects/CLNStudio) protocol layer, client, repository, view model, tests and the register / calibration / motion / tone / control / connection screens rewritten for the register map, binary HashUID discovery, batch reads, motion-task setpoints and MIDI control
+
+**Reasoning:**
+- Found on hardware from the Studio client: a mode change through Motor Properties 1 sent the identity back unchanged and the firmware refused it as an identity write, which made the mode unreachable on an enabled drive
+
+**Notes:**
+- Bench pass over USB HID against CLN17 v3 (motor supply absent, UV fault latched): broadcast ping finds the unassigned node and reports its HashUID, direct assignment confirmed on the new address, reset to 255 and the 48-probe tree walk recover the identity in 3.4 s, register read-modify-write of the watchdog reads back, the seven-register batch read completes, the mode change lands, enable / MIDI refused with not-calibrated, setpoints accepted silently and an S-curve segment queued, emergency PulseBeat on the fault edge
+- observed: with the boot identification stalled by the UV fault no NVM window opens, so the assigned address is not persisted and the node comes back unassigned after a reset - not addressed here
+- Studio: jvmTest 17/17, Android / WasmJs / iOS-simulator targets compile
+- cln17_v3_dev 79964 B
+
+FLASH: 69796 bytes (60.86% of 114688 bytes): +848 bytes
+RAM: 11200 bytes (34.18% of 32768 bytes): +0 bytes
+
+
+## 2026-09-12 - Ping inventory keyed by HashUID; overcurrent on the bench traced to calibration, not the protocol
+**Changes:**
+- tools/tpcp_host.py, tools/tpcp_mcp.py and CLN Studio TpcpClient.ping() key the broadcast identity replies by HashUID instead of node address
+
+**Reasoning:**
+- Two unassigned drives both answer on 0x4FF and collapsed into one inventory entry
+
+**Notes:**
+- Bench: a 0.05 rev position setpoint on the USB drive (node 1, NEMA17, 23 V) runs the rotor away against the target and trips the overcurrent comparator
+- the pre-rewrite firmware (current tree with the old src/api swapped back in, built in a scratch copy) does exactly the same, and its forced angle sweep never completes, so the fault is the stored angle table / direction not matching this motor plus the sweep not converging - outside the protocol layer
+- a runtime identification on the new firmware returned Ld 0.20 mH / Lq 0.44 mH against a stored 2.0 mH and the following sweep failed in 2.5 s
+- a failed sweep leaves the drive holding 0.5 A at a fixed angle with no NVM window, so saves and erases are refused until reboot
+- second drive (node 2) reached through the USB-to-CAN gateway is healthy and idle
+- sizes unchanged
+
+FLASH: 69796 bytes (60.86% of 114688 bytes): +0 bytes
+RAM: 11200 bytes (34.18% of 32768 bytes): +0 bytes
+
+
+## 2026-09-13 - Rotor electrical angle derived from the sweep direction; Hermite position widened to 64 bits
+**Changes:**
+- lib.h derives the FOC angle as -direction * table angle + a quarter period, replacing the fixed -90 degree shift inside CalibrationTable::correct_el_angle (which now returns the plain sweep-frame angle) and the bare -direction multiply in the control loop
+- calibration_table.h documents why the alignment is direction dependent
+- HermiteInterpolator::eval outputs the relative position as int64 Q32.32 and MotionExecutor adds it with a saturating add
+- diag:calibration reports the angle sweep's CalStage (0x80 | stage) and a 0..255 progress whenever the electrical identification is not running (AngleCalibrator::stage / progress_255 / is_running / is_failed added)
+- CalibrationTable::get_sample exposes stored samples to the 0x2F table read
+
+**Reasoning:**
+- The sweep holds the rotor with a q-axis current at the commanded angle in whichever sense makes the encoder count up, so the rotor angle in the FOC frame is a direction-dependent function of the table and the old fixed shift was 180 degrees off for direction = -1 motors
+- the 32-bit Q0.32 Hermite output wrapped at half a revolution so any longer segment folded back on itself mid-way
+- a bench needs to follow a sweep by stage and progress, not only by flag bits
+
+**Notes:**
+- Bench (NEMA17, 23 V, direction -1): with this build a position setpoint no longer trips the overcurrent comparator and 1 rev S-curves track for the first half revolution, but every queued move still ran away in the other direction - see the next entry for the actual root cause
+- cln17_v3_dev 80276 B
+
+FLASH: 70132 bytes (61.15% of 114688 bytes): +336 bytes
+RAM: 11200 bytes (34.18% of 32768 bytes): +0 bytes
+
+
+## 2026-09-13 - Position-loop torque sign follows the detected motor direction; queue holds when dry; encoder frames validated by CRC
+**Changes:**
+- lib.h multiplies the position / velocity / torque loop's current command by TunePulseHeart::torque_sign() (the sweep-detected direction, +1 when unknown) at the closed-loop dispatch only, keeps last_current_a_ in encoder units, and the 0x42/0x00 q current is reported with the same sign
+- MotionExecutor::init starts in the HALT state and tick() reports halt whenever the executor is halted, so DriveControl keeps the full torque envelope on an empty or exhausted queue
+- AngleCalibrator resets the sweep's electrical angle to zero at Setup
+- Encoder::accept_frame keeps CRC pass / fail counters, drops failing frames once 256 consecutive frames have proven the check, and latches the encoder fault after 64 consecutive failures
+- the CLN17 DMA handler checks each MT6835 burst frame against MT6835::Crc8 before publishing it
+- diagnostics records 0x43/0x06 (FOC angle in use, u_d, u_q) and 0x43/0x07 (encoder link: check proven, fault, longest failure run, frames failed / passed) added
+- CAN_PROTOCOL.md 6.3, tools/tpcp_host.py, tools/tpcp_mcp.py and CLN Studio (TpRegisters, CalibrationStatus sweep stage names, calibration screen) updated
+
+**Reasoning:**
+- With the electrical angle correct, a positive q current always advances the rotor in the sense the table's angle grows, which is the sense the encoder counts UP for a direction = -1 motor - and real_pos is -encoder, so the hard-coded sign made the position loop positive feedback: measured on the bench through the new 0x43/0x06 record, the FOC angle at the identification's d-axis alignment was within 6 degrees of zero yet every setpoint ran the rotor away at the voltage-limited speed with a small measured current
+- a HALTed executor reported a zero torque limit so the axis went limp the moment its last segment finished, and a fresh queue started open-loop for the same reason
+- a sweep that was aborted part way left its start angle behind for the next cycle
+- a run of corrupted SPI frames (idle-high MISO decodes as the top of the range) walked the turn counter hundreds of turns from a stationary rotor and the position loop chased it
+
+**Notes:**
+- Bench (NEMA17, 23 V, direction -1, USB HID): hold, 0.05 rev position step (settles in 100 ms, error 0.0002 rev), S-curves 0.5 / 1 / 1 / 3 rev at 0.5 / 1 / 2 / 2 rev/s and -3 rev back all track within 0.002 rev and hold at the target in HALT, jog +-1 rev/s, absolute S-curve, verified again after a reboot and after a fresh sweep
+- a forced angle sweep completes in 10 s, redetects direction -1 and its table matches the stored one within 28 counts (1.7 degrees electrical) - the stored calibration was never at fault
+- runtime identification aligns the rotor at FOC angle 0 and the table then reads 930 counts, 5 degrees electrical
+- the CRC check proves itself at boot and 4-7 isolated failures per boot are dropped
+- unexplained: the previous build tracked correctly for one boot and ran away on every later boot with the same code, table and direction, which only a 180 degree change of the rotor-to-encoder relation between those boots accounts for - watch 0x43/0x06 at the identification alignment if it recurs
+- still open: a runtime identification failed once while the encoder link was corrupted and leaves the drive in the error state until reboot
+- the default motion limits (50 rev/s, 200 rev/s^2) let an absolute S-curve without a cruise velocity run at the voltage-limited speed
+- cln17_v3_dev 80748 B
+
+FLASH: 70388 bytes (61.37% of 114688 bytes): +256 bytes
+RAM: 11216 bytes (34.23% of 32768 bytes): +16 bytes
+
+
+## 2026-09-13 - Encoder link loss is a fault and heals itself; a fault reset recovers a failed identification
+**Changes:**
+- DriverPWM gains FAULT_ENCODER (bit 7, Hi-Z, priority below external) with enc_cb / encoder(bool)
+- lib.h raises it every pass while Encoder::is_fault() reports the link down and the protocol's fault reset releases it
+- Encoder::accept_frame declares the link DOWN after 64 consecutive failures, ingests nothing (not even CRC-passing frames) until 256 consecutive valid frames prove the recovery, and hands the owner a relink request once per 64 failures
+- CLN17 Encoder_StartTransfer skips a period whose previous transfer is still in flight (CS still asserted) instead of cutting it, counting the overrun, and Encoder_Relink() disables the SPI, drains its receive FIFO and re-enables it when the encoder asks
+- 0x43/0x07 now carries the sensor's own overspeed / weak-field / undervoltage bits and the relink count instead of the longest failure run
+- CurrentControl::recover_identification() leaves CalibError with the last known parameters and is called from the fault reset
+- service_calibration checks CalibError before is_identifying() so a failed identification no longer leaves the queued sweep pending forever
+- fault bit 0x80 named encoder in CAN_PROTOCOL.md, tools/tpcp_host.py and CLN Studio
+
+**Reasoning:**
+- After the operator's full calibration plus save the drive was found with the encoder link dead (failure run saturated, 65535 failed frames), the turn counter at -1789 turns from a stationary rotor and the identification in CalibError: a loop chasing that position at full current is where the reported overcurrent comes from, and the CalibError state refused every enable until a reboot
+- one corrupted frame in 256 passes the CRC by chance, enough on a persistently broken link to keep walking the turn counter
+- restarting a transfer that is still in flight leaves a partial byte in the SPI FIFO and shifts every later frame, which is the most plausible origin of the persistent corruption
+- a failed identification reporting itself as still identifying hid the queued sweep and locked the drive
+
+**Notes:**
+- Bench (NEMA17, 23 V, USB HID): after a reflash the boot identification recorded R = 3.0 ohm and a runtime identification aborts within 30 ms because the 45 degree pass reads Ia 0.67 A / Ib 0.49 A at 1.12 V (phase B about 0.45 ohm higher than phase A, balanced yesterday) - an intermittent motor phase connection, to be checked on the hardware
+- with those gains a fault reset recovers the drive, and hold, 0.05 rev step, velocity +-1 / +-3 rev/s and S-curves up to 3 rev at 2 rev/s run clean with zero frame failures and no relink
+- the relink path could not be provoked on demand and is verified by construction only
+- cln17_v3_dev 81612 B
+
+FLASH: 70764 bytes (61.70% of 114688 bytes): +376 bytes
+RAM: 11224 bytes (34.25% of 32768 bytes): +8 bytes
+
+
+## 2026-09-13 - Phase-balance tolerance scales with the current; identification failures and the current-sum residual are readable over the protocol
+**Changes:**
+- MotorControl::abc2ab_tick allows |sum| up to epsilon_abs + 8 % of |ia|+|ib|+|ic| (set_current_epsilon_relative, default BALANCE_REL_DEFAULT_PERCENT) instead of a fixed 0.13 A
+- MotorCalibration records the reason, stage, driver fault byte, injected voltage and phase currents of its last abort (IdentFailure codes), abort() takes the fault byte from lib.h
+- new diagnostics record 0x43/0x08 exposes that abort and 0x42/0x02 exposes the third sensed channel plus the Kirchhoff residual the supervision trips on (CurrentSense::channels_amps)
+- CAN_PROTOCOL.md, tools/tpcp_host.py and CLN Studio register tables updated
+
+**Reasoning:**
+- With the console unavailable the identification kept aborting within 15 ms and nothing said why
+- the new record showed reason 4 stage 1 fault 0x40 at 2.9 V with Ia 1.85 A and Ib 1.70 A: the phase-stage fault, i.e. the balance supervision, because 3.5 A on the shared channel with a few percent of amplifier and shunt gain mismatch exceeds a tolerance sized for standstill
+- three shunts and three amplifiers each carry gain error, so a healthy motor's residual grows with the current and the tolerance has to follow it
+
+**Notes:**
+- Bench (NEMA17 rewired to J4 pin 4 BLK, 3 GRN, 2 RED, 1 BLU): with the fixed tolerance every runtime identification aborted and partial R values of 2.5 to 4.3 ohm were left behind, while a 110 Hz tone showed a residual of at most 0.1 A at 1.2 A
+- with the relative tolerance the identification completes (R 1.078 ohm, Ld 2.1 mH, Lq 1.9 mH, identical to the day before), the angle sweep completes (direction -1, table 14), position step, +-1 and +-3 rev/s velocity and a 3 rev S-curve run clean with zero encoder frame failures, and address plus profile survive a reboot after a save
+- the earlier suspicion of a bad phase B crimp was wrong - the unbalanced snapshots were taken during the current rise and the imbalance the identification reported never existed
+- cln17_v3_dev 82100 B
+
+FLASH: 71156 bytes (62.04% of 114688 bytes): +392 bytes
+RAM: 11248 bytes (34.33% of 32768 bytes): +24 bytes
+
+
+## 2026-09-13 - Angle sweep waits for flash, refuses a motionless Pass0 and a never-ending Pass1; a failed or unrequested sweep releases the rotor
+**Changes:**
+- AngleCalibrator holds in Setup while Motor::is_flash_busy() (the profile save that follows an identification de-energizes the sweep)
+- Pass0 reports an error when the encoder travelled less than ANGLE_CAL_MIN_STEP_COUNTS per step instead of decoding a zero travel as direction +1
+- Pass1 stops with an error when the table would overflow without a full turn
+- lib.h commands zero current and opens the NVM window while the calibrator is in Error or parked without a request (AngleCalibrator::is_parked)
+
+**Reasoning:**
+- On a second CLN17 (HashUID EF824B1EE5E8) a runtime full calibration ran its sweep underneath the pending profile save: the rotor was not driven during Pass0, the zero travel became direction +1, Pass1 rotated the encoder the wrong way and waited forever for a full positive turn with the calibration flagged running - only a reboot got out
+- a sweep that had failed used to hold 0.5 A at a frozen angle until reboot
+
+**Notes:**
+- Bench (second board, same NEMA17 wiring): boot table healthy (200 monotonic samples, deviation -23..+113), identification R 1.06 ohm Ld 2.09 mH Lq 1.85 mH
+- with the guards a runtime FULL calibration completes (identification, then sweep with direction -1, table 14, profile saved), position step, +-1 / +-3 rev/s and a 3 rev S-curve track within 0.001 rev with no faults and zero encoder frame failures, and node address, profile and table survive a reboot
+- the frame check via diag:foc after a runtime identification is only indicative (+80 deg once, -13 deg after boot) because the HFI stages do not park the rotor exactly on the d axis
+- cln17_v3_dev 82348 B
+
+FLASH: 71196 bytes (62.08% of 114688 bytes): +40 bytes
+RAM: 11248 bytes (34.33% of 32768 bytes): +0 bytes
+
+
+## 2026-09-13 - Rebase onto main: sensor-status encoder fault kept beside the CRC link check; HFI spread abort classified
+**Changes:**
+- board.cpp: an accepted MT6835 frame with any sensor status bit (overspeed, weak field, undervoltage) raises the encoder fault, as main does, inside the CRC-validated path so it never clears the fault accept_frame() holds while the link is down
+- IdentFailure code 5 (IDENT_FAIL_INDUCTANCE) for main's HFI spread abort, reported through 0x43/0x08 and documented in CAN_PROTOCOL.md
+- platformio.ini: main's build cache, monitor timestamps and 16-packet CDC queue kept, the legacy commented environments dropped, release build type / -flto / -fno-math-errno / HAL_UART_MODULE_ONLY and the cln17_v3_dev environment kept
+- .llm/CLAUDE.md follows main's move of CLAUDE.md and changelog/, and no longer describes the removed upload hook, suggestions.md and old/ tree
+
+**Reasoning:**
+- The branch that carried this work (bsp_layer_shared_stm32g4) was merged as PR #5 and deleted, so the work is re-based onto main to keep the pull request diff to its own changes
+- main's encoder fault setter and HFI validation landed in the same files
+
+**Notes:**
+- Behaviour change inherited from main: an identification whose HFI estimates disagree by more than 30 percent ends in CalibError (reason 5) instead of committing an averaged inductance. cln17_v3_dev 83192 B
+- cln234_release 51332 B / 9184 B. RAM +512 B is the CDC queue (8 -> 16 packets)
+
+FLASH: 71444 bytes (62.29% of 114688 bytes): +248 bytes
+RAM: 11760 bytes (35.89% of 32768 bytes): +512 bytes
+
+
+## 2026-09-13 - Review: encoder validation moves to the BSP, the encoder fault leaves the driver, current_sense.h and 0x42 back to the spec
+**Changes:**
+- current_sense.h restored to main: the 0x42/0x02 current-sum record is gone (0x42 is DQ and AB only, as the design says) from tp_cmds.h, the reader, CAN_PROTOCOL.md, tpcp_host.py and CLN Studio
+- the relative phase-balance tolerance in motor_control.h is untouched, it never depended on the sensor class
+- encoder.h restored to main: the frame accept / drop policy, link-down detection, bus reset requests and counters now live in EncoderLink (cln17_v3 spi_setup.h), driven by the DMA completion ISR, which sets the encoder's fault flag when the link is down and, as main does, when the sensor reports a status bit
+- driver_pwm.h restored to main: no FAULT_ENCODER, no callback, no trigger
+- PWM_Set_All_HiZ is registered as the encoder's own fault action, TunePulseHeart latches the encoder flag (encoder_fault_latched_), holds the bridge released and refuses closed loop while it is set, and fault_byte() composes the driver's seven bits with the latch as bit 7 - every engine guard, status register and the beat read that
+- a fault reset clears the latch through clear_encoder_fault()
+- diag 0x43/0x07 reads a TpEncoderLinkInfo snapshot through a board-registered probe (TpProtocol::bind_encoder_link, run.h) and answers NOT_IMPLEMENTED on a board that registers none
+
+**Reasoning:**
+- Review of the branch: data validity is a BSP concern - what a valid frame is, how the bus is reset and what the status bits mean belong to the SPI link and the chip, the generic encoder driver only tracks position and carries a flag
+- the PWM driver's fault byte is power-stage only, sensorless operation is planned
+- 0x42 is defined as DQ / AB currents
+
+**Notes:**
+- Wire format of 0x43/0x07 and fault bit 0x80 unchanged, host tool and Studio decode as before. Behaviour unchanged on the bench path: link down -> Hi-Z at once from the ISR, latched until a fault reset, bus reset every 64 failed frames, recovery after 256 good ones. cln17_v3_dev 82700 B
+- cln234_release 51392 B
+
+FLASH: 71288 bytes (62.16% of 114688 bytes): -156 bytes
+RAM: 11752 bytes (35.86% of 32768 bytes): -8 bytes
+
+
+## 2026-09-13 - CRC module with an STM32G4 hardware backend; the calibration table record carries a CRC-32
+**Changes:**
+- src/lib/math/helpers/crc.h: MSB-first CRC-8 (0x07) / CRC-16/CCITT-FALSE / CRC-32/MPEG-2 as constexpr one-shots (static_asserts on the published check values) plus Crc::Stream for data that arrives in pieces
+- src/bsp/stm32g4/crc.h: the stream on the G4 CRC unit (programmable POL / INIT, byte-wise DR feed) behind -D TP_CRC_HW=1, now set for cln17_v3 and cln234
+- MT6835::Crc8 is Crc::crc8 over the three payload bytes (software on purpose: 20 kHz ISR, shared unit)
+- calibration_table.h: record marker 0xFA3E0001 (format version in the low half), a fourth trailer word = CRC-32 over every preceding word as little-endian bytes, checked on load before a candidate is committed, a record of another version is refused
+- native_tpcp gains test_crc_module (22 tests): check values, stream == one-shot for any split and width, little-endian word feed
+
+**Reasoning:**
+- Review: one CRC implementation for the whole firmware, hardware-selectable at compile time through the BSP, and a stored calibration table that cannot be committed with a flipped bit - a corrupted sample passes the monotonicity check and steers the electrical angle for the life of the record
+
+**Notes:**
+- Bench (node 2, B9AA2D17E4E5): the version-0 record was refused at boot, the drive swept and stored a version-1 record at chunk 14 whose hardware-computed CRC matches an independent Python CRC-32/MPEG-2 over the 420 record bytes
+- a reboot loads it (no resweep), moves track within 0.002 rev, encoder link 0 bad frames
+- boot identification passed main's HFI spread check (R 1.06 ohm, Ld 2.09 mH, Lq 1.84 mH). Every board carrying an old record sweeps once on its first boot with this firmware. Software-CRC build measures 71592 B. cln17_v3_dev 83080 B
+- cln234_release 51696 B / 9168 B
+
+FLASH: 71480 bytes (62.33% of 114688 bytes): +192 bytes
+RAM: 11760 bytes (35.89% of 32768 bytes): +8 bytes
+
+
+## 2026-09-13 - Encoder fault action restores the link; the bridge is the control loop's decision; CRC module at lib/math/crc.h
+**Changes:**
+- Encoder::fault_cb is now Encoder_FaultAction (cln17_v3 spi_setup.h): a bus reset when the link is down, nothing else
+- the PWM safe state is no longer wired to the encoder at all - lib.h alone decides what the machine does without its position feedback (release + refuse closed loop today, a sensorless estimator or a second encoder later)
+- Encoder_Relink consumes the supervisor's pending request and counts itself, so the first reset comes from the fault action and the retries from the ISR without a double reset
+- EncoderLink::take_relink_request removed
+- crc.h moved from lib/math/helpers to lib/math, include guard and backend selection expressed as #ifndef (software is the default branch, TP_CRC_HW the override)
+
+**Reasoning:**
+- Review: the encoder failure callback is the hook for restore actions (bus re-init and the like) while PWM control is handled in lib, which keeps the option of switching to sensorless FOC or an external encoder when the primary one is inactive
+- the CRC math belongs in src/lib/math with an ifndef switch
+
+**Notes:**
+- Bench (node 2): table loads, moves track, encoder link clean. cln17_v3_dev 83096 B
+- cln234_release 51696 B
+
+FLASH: 71576 bytes (62.41% of 114688 bytes): +96 bytes
+RAM: 11760 bytes (35.89% of 32768 bytes): +0 bytes
+
+
+## 2026-09-13 - ANCHOR changes the axis offset instead of the target; the queue tail follows the live target
+**Changes:**
+- 0xC0 ANCHOR: the engine sets config_.axis_offset_q16 so the reported position becomes the requested value and the rotor stays put (it used to post the value as a position TARGET, so 'set position 25 rev' became a 25 rev move at full speed)
+- DriveReq::Anchor removed
+- DriveControl keeps queue_tail_q32_ equal to the target whenever nothing is queued (non-Motion modes every pass, a halted executor, the inhibit and safe-state paths), so a profiled move planned after a velocity run or a setpoint is sized from where the rotor is - it was sized from a stale tail, a 25 rev S-curve got a ~0 s duration and collapsed into a step the loop chased at the voltage limit
+
+**Reasoning:**
+- Bench report: a move to 1 deg from 9000 deg at 1 rev/s 'hangs, shows the full distance as following error, then corrects itself'
+
+**Notes:**
+- The S-curve now runs its 25 s profile with a following error under 0.002 rev. CAN_PROTOCOL.md updated
+
+FLASH: 71652 bytes (62.48% of 114688 bytes): +76 bytes
+RAM: 11788 bytes (35.97% of 32768 bytes): +28 bytes
+
+
+## 2026-09-13 - Black box: the last 512 control passes around a fault, readable over the protocol
+**Changes:**
+- src/lib/flight_recorder.h: FlightRecorder<N> ring of 24-byte records (electrical angle, measured d/q current, commanded d/q and alpha/beta voltage, commanded q current, coil currents, supply, position error) fed at the end of every closed-loop pass in lib.h, frozen N/8 passes after the fault byte becomes non-zero, thawed by the fault reset
+- register 0x44 reads it in six parts (part 0 = ring state)
+- compiled only with TP_TRACE_DEPTH, set to 512 in cln17_v3_dev (12 KiB RAM), a release image answers NOT_IMPLEMENTED
+- tools/tpcp_host.py trace <node> dumps the ring as CSV
+
+**Reasoning:**
+- Every register a bench can read is a snapshot a few hundred times a second, while a current-loop excursion lives and dies in a handful of 50 us passes
+- the overcurrent trips on long profiled moves could not be diagnosed from the HID polls (the last recorded currents before the trip were 3.8 A on the d axis with the loop commanding 1 A on q - only the ring showed the loop losing its current response over 2 ms first)
+
+**Notes:**
+- cln17_v3_dev 84104 B / 24100 B RAM. Release +28 B for the NOT_IMPLEMENTED handler
+
+FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
+RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
+
+
+## 2026-09-13 - Deterministic control-pass timing: hardware-triggered ADC, encoder SPI at 10.6 MHz, USB below the control interrupts
+**Changes:**
+- adc_setup.h (both boards): the dual ADC is triggered by TIM1 TRGO2 = OC4REF (falling edge at the CCR4 match, ADC_DELAY_TICKS before the counter peak) instead of a software ADSTART from the CH4 interrupt, armed once in ADC_Init()
+- ADC_CCR_DMACFG set - in dual mode the DMA circular / one-shot choice lives in the COMMON register, and with it clear the pair stopped after its first sequence (the per-period software restart had hidden that for the whole life of the driver)
+- the slave ADC carries the same trigger
+- tim1_pwm.h routes OC4REF to TRGO2
+- spi_setup.h (cln17_v3): encoder SPI BR 5 -> 3 (2.66 -> 10.6 MHz, the MT6835 takes 16), the frame drops from ~20 us to ~5 us so the pass starts ~15 us into the period and ends ~30 us in
+- interrupt priorities: TIM1_CC 3 -> 0, control pass (DMA1 ch1) 5 -> 2, USB HP/LP 1 -> 4 (set in run.h after tp_hid_begin, the core hard-codes 1), both boards
+- interrupt_setup.h keeps PASS_OFFSET_LAST / PASS_CYCLES_LAST / PASS_CYCLES_MAX / PASS_LATE from the DWT cycle counter
+
+**Reasoning:**
+- Root cause of the overcurrent trips on long profiled moves (and of their dependence on build, control mode and host polling): the pass started ~21 us into the 50 us period (the 2.66 MHz encoder frame) and took ~27 us, so its end sat within a microsecond of the period boundary
+- the duty vector is latched at the boundary, so a pass that ended just after it reached the bridge a period later than one that ended just before, and the extra executor work of a profiled move (or a USB interrupt preempting the pass) moved the end across that line on some passes only - a loop delay jittering between one and two periods, which the current loop does not tolerate (a 500 Hz oscillation grew over ~2 ms until the 4 A comparator tripped). The same build with a slightly longer pass (the black box compiled in) was stable because its end sat consistently on the far side
+
+**Notes:**
+- Bench (node 1, release build): eight 10/25 rev S-curves at 1 rev/s, velocity runs and the 25 rev -> 1 deg case all clean (coil currents under 0.23 A, following error under 0.002 rev)
+- PASS_LATE stays at its boot value (2, flash stalls) through moves under full HID polling, where it grew by ~1000 per move before the priority change
+- encoder link 0 bad frames at 10.6 MHz
+- boot identification unchanged (R 1.055 ohm, Ld 2.09 mH, Lq 1.89 mH). One run in the series showed an undervoltage + DRV fault with coil currents under 0.3 A - the bench supply, not the loop
+- worth a look. cln234 builds (51688 B) but is untested on hardware. cln17_v3_dev 84104 B
+
+FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
+RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
+
 

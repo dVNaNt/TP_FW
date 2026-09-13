@@ -2,111 +2,96 @@
 
 /**
  * @file tp_discovery.h
- * @brief TPCP v1 - the byte-by-byte UID search participant.
+ * @brief TPCP v1 - the binary HashUID search a node takes part in.
  *
- * The master isolates one node at a time by walking the UID tree: for step i
- * it broadcasts the prefix resolved so far, and every matching node answers
- * with a DATA-LESS frame whose identifier is 0x500 | UID[i]. CAN arbitrates
- * bit by bit and a dominant bit wins, so the frame that survives is the one
- * carrying the LOWEST byte - the bus itself performs the minimum search at
- * zero software cost. Seven steps yield a full UID and an address is assigned.
+ * The master finds unaddressed nodes by walking the 48-bit HashUID space as a
+ * binary tree: it broadcasts a prefix of `depth` bits on 0x300, and every
+ * unaddressed node whose HashUID starts with that prefix answers on 0x4FF.
+ *
+ * Every matching node answers with the SAME frame - the prefix it matched
+ * and the incremented depth - so when several nodes answer at once their
+ * frames are bit-identical and CAN merges them into one. Had the reply
+ * carried the next bit of each node's own HashUID, two nodes disagreeing on
+ * it would collide in the data field, which CAN does not arbitrate: both
+ * frames are destroyed and the master learns nothing. Echoing the prefix
+ * turns a reply into a pure "this subtree is populated" and lets the master
+ * descend by probing prefix|0 and prefix|1 at the next depth. A probe at depth
+ * 48 is answered by exactly one node, whose full HashUID the master then owns.
+ *
+ * An addressed node ignores broadcast searches - a running system is never
+ * disturbed by a sweep - but answers a search sent to its OWN address, which
+ * is how a master checks two drives have not been given the same number.
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
 
-#include "../tp_wire.h"     // TP_ID_DISCOVERY_BASE, TP_UID_BYTES
-#include "tp_node_identity.h"  // TpNodeIdentity, whose UID is being searched
+#include "../tp_wire.h"        // TP_UID_BITS, TP_NODE_UNASSIGNED
+#include "tp_node_identity.h"  // TpNodeIdentity, whose HashUID is being searched
+
 // ============================================================================
-// UID discovery engine
+// HashUID search participant
 // ============================================================================
 
 /**
  * @class TpDiscovery
- * @brief Answers the master's byte-by-byte UID search.
- *
- * The master isolates one node at a time by walking the UID tree. For search
- * step i it broadcasts the prefix it has already resolved; every node whose
- * UID starts with that prefix replies with a DATA-LESS frame whose identifier
- * is 0x500 | UID[i]. Because a CAN identifier is arbitrated bit by bit and a
- * dominant bit wins, the frame that survives arbitration is automatically the
- * one carrying the LOWEST byte value - the bus itself performs the minimum
- * search, at zero cost in software. The master records that byte and moves to
- * step i+1. After seven steps it holds a complete UID and assigns an address.
- *
- * A node that loses arbitration must not let the controller re-send its stale
- * reply into the next round, where it would answer a question that was never
- * asked. Two independent defences cover that: every new prefix request aborts
- * whatever is still pending in the transmitter, and a node only ever replies
- * once per request. Disabling automatic retransmission (DAR) on the link makes
- * the first defence unnecessary, but the protocol does not require it.
+ * @brief Answers the master's binary HashUID search.
  */
 class TpDiscovery {
 public:
-    /** @brief Enter discovery mode and reset the search state. */
-    void begin() {
-        active_ = true;      // Answer prefix requests from now on
-        isolated_ = false;   // Not yet singled out by the master
-    }
-
-    /** @brief Leave discovery mode. */
-    void end() {
-        active_ = false;     // Ignore prefix requests again
-        isolated_ = false;   // Clear any isolation
-    }
-
-    /** @brief true while the node participates in a UID search. */
-    bool is_active() const { return active_; }
-
     /**
-     * @brief Decide whether to answer one prefix request.
+     * @brief Decide whether to answer one search frame and build the reply.
      *
-     * A node that has already been isolated in this search round stays quiet so
-     * the master can find the remaining devices without it winning every
-     * arbitration again.
-     *
-     * @param id         Node identity (source of the UID).
-     * @param prefix     Prefix bytes received from the master.
-     * @param len        Prefix length in bytes (0 .. TP_UID_BYTES-1).
-     * @param[out] reply Identifier to transmit with DLC 0 when the answer is yes.
+     * @param id           Node identity (source of the HashUID).
+     * @param node_id      This node's current address.
+     * @param directed     true when the frame was addressed to this node alone.
+     * @param depth        Prefix length in bits the master sent.
+     * @param prefix       Prefix bits the master sent.
+     * @param[out] reply_depth  Depth to answer with (depth + 1, capped at 48).
+     * @param[out] reply_prefix Prefix bits to answer with (the matched prefix).
      * @return true when this node must reply.
      */
-    bool on_prefix(const TpNodeIdentity& id, const uint8_t* prefix, uint8_t len, uint16_t& reply) {
-        if (!active_ || isolated_) {
-            return false;                             // Not searching, or already found
+    static bool on_search(const TpNodeIdentity& id, uint8_t node_id, bool directed, uint8_t depth,
+                          uint64_t prefix, uint8_t& reply_depth, uint64_t& reply_prefix) {
+        if ((node_id != TP_NODE_UNASSIGNED) && !directed) {
+            return false;                             // Addressed nodes ignore broadcast searches
         }
-        if (len >= TP_UID_BYTES) {
-            return false;                             // Nothing left to disclose
+        if (depth > TP_UID_BITS) {
+            return false;                             // Malformed: deeper than a HashUID
         }
-        if (!id.prefix_matches(prefix, len)) {
-            return false;                             // This node is not in the master's subtree
+        if (!id.prefix_matches(prefix, depth)) {
+            return false;                             // Not in the master's subtree
         }
-        reply = (uint16_t)(TP_ID_DISCOVERY_BASE | id.bytes()[len]);  // Next UID byte rides the identifier
+        reply_depth = (uint8_t)((depth < TP_UID_BITS) ? (depth + 1u) : TP_UID_BITS);
+        reply_prefix = id.raw() & TpNodeIdentity::prefix_mask(depth);  // Echo what was matched
         return true;
     }
 
     /**
-     * @brief Test whether an assignment frame addresses this node.
+     * @brief Interpret one assignment frame (0x11 write).
      *
-     * The frame carries the full 7-byte UID plus the address to assign, so an
-     * assignment can never land on the wrong drive even if two UIDs share
-     * their first six bytes.
-     *
-     * @param id      Node identity.
-     * @param payload The 8 frame bytes: UID[0..6] followed by the node address.
-     * @param[out] assigned Address to adopt when the UID matches.
-     * @return true when this node is the addressee.
+     * @param id        Node identity.
+     * @param uid       HashUID carried by the frame (0 = wildcard).
+     * @param addr      Address carried by the frame.
+     * @param broadcast true when the frame reached every node.
+     * @param[out] assign Address to adopt when the frame applies to this node.
+     * @return true when this node must adopt @p assign.
      */
-    bool on_assign(const TpNodeIdentity& id, const uint8_t* payload, uint8_t& assigned) {
-        if (!id.prefix_matches(payload, TP_UID_BYTES)) {
-            return false;                             // Meant for a different drive
+    static bool on_assign(const TpNodeIdentity& id, uint64_t uid, uint8_t addr, bool broadcast, uint8_t& assign) {
+        if (uid == id.raw()) {
+            assign = addr;                            // Directed at this very drive
+            return true;
         }
-        assigned = payload[TP_UID_BYTES];             // Byte 7 carries the address
-        isolated_ = true;                             // Stay quiet for the rest of the search
-        return true;
+        if (uid == 0ull) {
+            // Wildcard: only a reset to the unassigned address is permitted,
+            // whether broadcast (reset the whole bus) or directed (reset every
+            // node that answers to this address - the collision case).
+            if (addr == TP_NODE_UNASSIGNED) {
+                assign = TP_NODE_UNASSIGNED;
+                return true;
+            }
+            (void)broadcast;                          // A wildcard assignment is never allowed
+        }
+        return false;
     }
-
-private:
-    bool active_ = false;    ///< Discovery mode entered.
-    bool isolated_ = false;  ///< Already isolated in this search round.
 };

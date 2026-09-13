@@ -4,10 +4,10 @@
  * @file tp_node_store.h
  * @brief TPCP v1 - the flash-backed store that loads and persists TpNodeConfig.
  *
- * Records are appended in 64-byte units so a save never has to erase; the
- * newest valid record wins the boot scan, and the partition is erased only
- * when it fills up. Reads are memory-mapped and free, so the boot scan runs to
- * completion in one call.
+ * Records are appended in 256-byte units (eight 32-byte flash blocks) so a
+ * save never has to erase; the newest valid record wins the boot scan, and
+ * the partition is erased only when it fills up. Reads are memory-mapped and
+ * free, so the boot scan runs to completion in one call.
  *
  * Programming is incremental - one block per service() call - and only ever
  * advances while the control loop reports a de-energized bridge, because
@@ -15,12 +15,77 @@
  * only file in node/ that touches hardware, which is why it is separated: the
  * config record, the identity and the discovery engine stay host-testable.
  *
+ * The record is serialized through a byte cursor rather than hand-packed
+ * words: with sixty-odd fields the offsets are what an edit gets wrong, and a
+ * cursor cannot get them wrong.
+ *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
 
 #include "../../lib/drivers/flash_eeprom.h"  // FlashEEPROM + tp_flash_programming_window
 #include "tp_node_config.h"                   // TpNodeConfig and the record layout constants
+
+// ============================================================================
+// Record cursor
+// ============================================================================
+
+/**
+ * @class TpRecordCursor
+ * @brief Sequential little-endian reader / writer over a fixed-size record buffer.
+ *
+ * Every accessor advances the cursor by the width it moved; a cursor that
+ * runs past the end stops moving and reads zeros, so a layout mistake can
+ * corrupt nothing beyond the record itself.
+ */
+class TpRecordCursor {
+public:
+    /** @brief Bind to a buffer of @p size bytes. */
+    TpRecordCursor(uint8_t* buf, uint32_t size) : buf_(buf), size_(size) {}
+
+    /** @brief Write one byte. */
+    void u8(uint8_t v) {
+        if (pos_ < size_) {
+            buf_[pos_++] = v;                        // Store and advance
+        }
+    }
+    /** @brief Write a little-endian 16-bit word. */
+    void u16(uint16_t v) { u8((uint8_t)v); u8((uint8_t)(v >> 8)); }
+    /** @brief Write a little-endian 32-bit word. */
+    void u32(uint32_t v) { u16((uint16_t)v); u16((uint16_t)(v >> 16)); }
+    /** @brief Write a signed 32-bit word. */
+    void i32(int32_t v) { u32((uint32_t)v); }
+    /** @brief Write the low 48 bits of a signed 64-bit value. */
+    void i48(int64_t v) { u32((uint32_t)v); u16((uint16_t)((uint64_t)v >> 32)); }
+    /** @brief Write a float as bfloat16. */
+    void bf16(float v) { u16(tp_pack_bf16(v)); }
+
+    /** @brief Read one byte. */
+    uint8_t get_u8() { return (pos_ < size_) ? buf_[pos_++] : 0u; }
+    /** @brief Read a little-endian 16-bit word. */
+    uint16_t get_u16() { const uint16_t lo = get_u8(); return (uint16_t)(lo | ((uint16_t)get_u8() << 8)); }
+    /** @brief Read a little-endian 32-bit word. */
+    uint32_t get_u32() { const uint32_t lo = get_u16(); return lo | ((uint32_t)get_u16() << 16); }
+    /** @brief Read a signed 32-bit word. */
+    int32_t get_i32() { return (int32_t)get_u32(); }
+    /** @brief Read a sign-extended 48-bit value. */
+    int64_t get_i48() {
+        const uint64_t lo = get_u32();                                 // Bits 0-31
+        const uint64_t hi = get_u16();                                 // Bits 32-47
+        return (int64_t)((lo | (hi << 32)) << 16) >> 16;               // Sign-extend from bit 47
+    }
+    /** @brief Read a bfloat16 as float. */
+    float get_bf16() { return tp_unpack_bf16(get_u16()); }
+
+    /** @brief Bytes consumed so far. */
+    uint32_t position() const { return pos_; }
+
+private:
+    uint8_t* buf_;      ///< Record bytes.
+    uint32_t size_;     ///< Record size.
+    uint32_t pos_ = 0;  ///< Cursor.
+};
+
 // ============================================================================
 // Persistent configuration store
 // ============================================================================
@@ -28,15 +93,6 @@
 /**
  * @class TpNodeStore
  * @brief Loads and persists TpNodeConfig in the dedicated flash partition.
- *
- * Records are appended in 64-byte units (two 32-byte flash blocks) so a save
- * never has to erase; the newest valid record wins the boot scan. When the
- * partition fills up it is erased once and the record restarts at offset zero.
- *
- * Reads are memory-mapped and cost nothing, so the boot scan runs to
- * completion in one call. Programming is incremental - one block per
- * service() call - and only ever happens while the control loop reports a
- * de-energized bridge.
  */
 class TpNodeStore {
 public:
@@ -45,8 +101,7 @@ public:
         Idle = 0,   ///< Nothing in progress.
         Space,      ///< Looking for a free record slot.
         Erase,      ///< Partition full: erasing before restarting at zero.
-        Write0,     ///< Programming the first block of the record.
-        Write1,     ///< Programming the second block of the record.
+        Write,      ///< Programming block block_ of the record.
         Verify      ///< Reading the record back to confirm it took.
     };
 
@@ -85,13 +140,23 @@ public:
                 addr += 32u;                                // Not a record header: step one block
                 continue;
             }
-            if (!flash_->read_block(addr + 32u, &words[8])) {
-                break;                                      // Truncated record at the tail
+            bool ok = true;                                 // Whole record readable
+            for (uint32_t b = 1; b < TP_CONFIG_BLOCKS; ++b) {
+                if (!flash_->read_block(addr + (b * 32u), &words[b * 8u])) {
+                    ok = false;                             // Truncated record at the tail
+                    break;
+                }
+            }
+            if (!ok) {
+                break;
             }
             if (crc32(words, TP_CONFIG_WORDS - 1u) == words[TP_CONFIG_WORDS - 1u]) {
-                unpack(words, cfg);                         // Newer record overwrites the older
-                stored_version_ = (uint8_t)((words[0] >> 16) & 0xFFu);
-                found = true;
+                const uint8_t ver = (uint8_t)((words[0] >> 16) & 0xFFu);  // Layout version
+                if (ver == TP_CONFIG_VERSION) {
+                    unpack(words, cfg);                     // Newer record overwrites the older
+                    found = true;
+                }
+                stored_version_ = ver;                      // Report even a foreign version
             }
             addr += TP_CONFIG_BYTES;                        // Step over the whole record
         }
@@ -118,6 +183,7 @@ public:
         pack(cfg, buf_);                                    // Serialize + CRC now
         state_ = State::Space;                              // Start by finding a slot
         addr_ = 0;                                          // Scan cursor
+        block_ = 0;                                         // First block
         save_ok_ = false;                                   // Result not known yet
         save_attempted_ = true;                             // Distinguishes "failed" from "never ran"
         return true;
@@ -147,7 +213,7 @@ public:
                     return true;
                 }
                 if (probe[0] == 0xFFFFFFFFu) {
-                    state_ = State::Write0;                  // Erased slot found
+                    state_ = State::Write;                   // Erased slot found
                     return false;
                 }
                 addr_ += TP_CONFIG_BYTES;                    // Step over the occupied record
@@ -168,27 +234,25 @@ public:
                     state_ = State::Idle;                    // Erase refused: abandon the save
                     return true;
                 }
-                state_ = State::Write0;                      // Partition is blank now
+                state_ = State::Write;                       // Partition is blank now
                 return false;
-            case State::Write0:
-                if (!flash_->write(addr_, &buf_[0])) {
+            case State::Write:
+                if (!flash_->write(addr_ + (block_ * 32u), &buf_[block_ * 8u])) {
                     state_ = State::Idle;                    // Program fault: abandon the save
                     return true;
                 }
-                state_ = State::Write1;                      // First block committed
-                return false;
-            case State::Write1:
-                if (!flash_->write(addr_ + 32u, &buf_[8])) {
-                    state_ = State::Idle;                    // Program fault: abandon the save
-                    return true;
+                block_++;                                    // Next block of the record
+                if (block_ >= TP_CONFIG_BLOCKS) {
+                    state_ = State::Verify;                  // Whole record committed
                 }
-                state_ = State::Verify;                      // Whole record committed
                 return false;
             case State::Verify: {
                 uint32_t back[TP_CONFIG_WORDS];              // Read-back buffer
-                save_ok_ = flash_->read_block(addr_, &back[0]) &&
-                           flash_->read_block(addr_ + 32u, &back[8]) &&
-                           (crc32(back, TP_CONFIG_WORDS - 1u) == back[TP_CONFIG_WORDS - 1u]);
+                bool ok = true;                              // Every block read back
+                for (uint32_t b = 0; b < TP_CONFIG_BLOCKS; ++b) {
+                    ok = ok && flash_->read_block(addr_ + (b * 32u), &back[b * 8u]);
+                }
+                save_ok_ = ok && (crc32(back, TP_CONFIG_WORDS - 1u) == back[TP_CONFIG_WORDS - 1u]);
                 state_ = State::Idle;                        // Done either way
                 return true;
             }
@@ -216,13 +280,7 @@ public:
     /** @brief true when the last completed save verified successfully. */
     bool is_saved() const { return save_ok_; }
 
-    /**
-     * @brief true when a save has been attempted at all since boot.
-     *
-     * Distinguishes "no save has happened" from "a save failed". Without it a
-     * freshly booted node reports a write failure it never suffered, because
-     * is_saved() is false in both cases.
-     */
+    /** @brief true when a save has been attempted at all since boot. */
     bool save_attempted() const { return save_attempted_; }
 
     /** @brief true when the boot scan restored a stored record. */
@@ -231,9 +289,7 @@ public:
     /** @brief Layout version of the restored record (0 when none was found). */
     uint8_t stored_version() const { return stored_version_; }
 
-    /**
-     * @brief Bytes still free in the partition, for the persistence status chunk.
-     */
+    /** @brief Bytes still free in the partition, for the persistence diagnostics. */
     uint32_t free_bytes() {
         if (flash_ == nullptr) {
             return 0u;                                       // Nothing bound
@@ -256,7 +312,7 @@ public:
     /**
      * @brief Erase the whole configuration partition.
      *
-     * Used by the factory-reset command. Stalls the CPU for the erase, so the
+     * Used by the factory-reset keyword. Stalls the CPU for the erase, so the
      * caller must have an open programming window.
      *
      * @return true when the partition was erased.
@@ -272,91 +328,216 @@ public:
 
 private:
     /**
-     * @brief Serialize a configuration into the 16-word record layout.
+     * @brief Serialize a configuration into the record layout.
      *
-     * Physical values are stored as bfloat16 pairs, the same encoding the motor
-     * profile uses, so one word holds two limits.
+     * Physical values are stored as bfloat16, the same encoding the motor
+     * profile uses, so a value read over CAN is bit-identical to what is in
+     * flash. Word 0 keeps the magic / version / address header the boot scan
+     * recognizes; the CRC of everything before it is the last word.
      *
      * @param c Source configuration.
      * @param w Destination word array (TP_CONFIG_WORDS entries).
      */
     static void pack(const TpNodeConfig& c, uint32_t* w) {
-        w[0] = (uint32_t)TP_CONFIG_MAGIC                       // Bits 0-15: record marker
-             | ((uint32_t)TP_CONFIG_VERSION << 16)             // Bits 16-23: layout version
-             | ((uint32_t)c.node_id << 24);                    // Bits 24-31: node address
-        w[1] = (uint32_t)c.flags                               // Bits 0-7: behaviour flags
-             | ((uint32_t)c.safe_state << 8)                   // Bits 8-15: de-energized policy
-             | ((uint32_t)c.heartbeat_ms << 16);               // Bits 16-31: heartbeat period
-        w[2] = (uint32_t)c.watchdog_ms                         // Bits 0-15: watchdog timeout
-             | ((uint32_t)c.watchdog_action << 16);            // Bits 16-23: watchdog reaction
-        w[3] = (uint32_t)c.arb_kbps                            // Bits 0-15: arbitration rate
-             | ((uint32_t)c.data_kbps << 16);                  // Bits 16-31: data-phase rate
-        for (uint32_t i = 0; i < TP_TELEMETRY_SLOTS; ++i) {    // One word per telemetry slot
-            w[4 + i] = (uint32_t)c.telemetry[i].opcode
-                     | ((uint32_t)c.telemetry[i].flags << 8)
-                     | ((uint32_t)c.telemetry[i].period_ms << 16);
+        uint8_t* bytes = (uint8_t*)w;                          // Little-endian byte view of the words
+        for (uint32_t i = 0; i < TP_CONFIG_BYTES; ++i) {
+            bytes[i] = 0u;                                     // Reserved bytes read back as zero
         }
-        w[8]  = pair(c.oc_limit_a, c.oc_limit_b);              // Phase A / phase B overcurrent
-        w[9]  = pair(c.oc_limit_c, c.ov_limit_v);              // Phase C overcurrent / overvoltage
-        w[10] = pair(c.uv_limit_v, c.ot_limit_c);              // Undervoltage / overtemperature
-        w[11] = pair(c.ot_hyst_c, c.op_limit_w);               // Thermal hysteresis / overpower
-        w[12] = pair(c.op_limit_a, c.current_limit_a);         // Bus current / control envelope
-        w[13] = pair(c.vel_limit_rps, c.accel_limit);          // Velocity / acceleration envelope
-        w[14] = pair(c.jerk_limit, 0.0f);                      // Jerk envelope / reserved
-        w[15] = crc32(w, TP_CONFIG_WORDS - 1u);                // Integrity of everything above
+        TpRecordCursor s(bytes, TP_CONFIG_BYTES - 4u);         // Everything but the CRC word
+        s.u16(TP_CONFIG_MAGIC);                                // Record marker
+        s.u8(TP_CONFIG_VERSION);                               // Layout version
+        s.u8(c.node_id);                                       // Node address
+        s.u8(c.flags);                                         // Behaviour flags
+        s.u8(c.safe_state);                                    // De-energized policy
+        s.u8(c.watchdog_action);                               // Watchdog reaction
+        s.u8(c.bus_type);                                      // Frame format
+        s.u8(c.comm_mode);                                     // Response policy
+        s.u8(c.burst_step);                                    // Burst period
+        s.u16(c.arb_kbps);                                     // Arbitration rate
+        s.u16(c.data_kbps);                                    // Data-phase rate
+        s.bf16(c.heartbeat_s);                                 // PulseBeat period
+        s.bf16(c.heartbeat_delay_s);                           // PulseBeat delay
+        s.bf16(c.watchdog_s);                                  // Watchdog timeout
+        s.u8(c.hb_retry);                                      // FaultBeat retries
+        s.u8(c.hb_retry_force);                                // Retry mode
+        for (uint32_t i = 0; i < TP_TELEMETRY_SLOTS; ++i) {    // Telemetry slots
+            s.u8(c.telemetry[i].reg);
+            s.u8(c.telemetry[i].flags);
+            s.u16(c.telemetry[i].period_ms);
+        }
+        s.bf16(c.oc_limit_a);                                  // Overcurrent A
+        s.bf16(c.oc_limit_b);                                  // Overcurrent B
+        s.bf16(c.oc_limit_c);                                  // Overcurrent C
+        s.bf16(c.peak_current_a);                              // Peak current
+        s.u8(c.oc_disbalance);                                 // Disbalance
+        s.u8(c.oc_alpha);                                      // Disbalance filter
+        s.u8(c.oc_recovery);                                   // OC recovery
+        s.bf16(c.ov_limit_v);                                  // Overvoltage
+        s.bf16(c.uv_limit_v);                                  // Undervoltage
+        s.bf16(c.supply_hyst_v);                               // Supply hysteresis
+        s.u8(c.supply_recovery);                               // Supply recovery
+        s.bf16(c.ot_limit_c);                                  // Overtemperature trip
+        s.bf16(c.ot_hyst_c);                                   // Overtemperature hysteresis
+        s.bf16(c.ot_warn_c);                                   // Overtemperature warning
+        s.bf16(c.op_limit_w);                                  // Overpower trip
+        s.bf16(c.op_limit_a);                                  // Bus overcurrent trip
+        s.bf16(c.pt_baseline_w);                               // Power baseline
+        s.bf16(c.pt_capacity_j);                               // Energy budget
+        s.u8(c.pt_overdrive_s);                                // Overdrive duration
+        s.u8(c.motor_temp_base_c);                             // Motor thermal baseline
+        s.bf16(c.motor_derating);                              // Motor derating
+        s.bf16(c.motor_rth);                                   // Motor thermal resistance
+        s.bf16(c.current_limit_a);                             // Control envelope
+        s.bf16(c.vel_limit_rps);                               // Velocity envelope
+        s.bf16(c.accel_limit);                                 // Acceleration envelope
+        s.bf16(c.jerk_limit);                                  // Jerk envelope
+        s.bf16(c.err_vel_rps);                                 // Fault velocity limit
+        s.bf16(c.err_accel);                                   // Fault acceleration limit
+        s.bf16(c.err_jerk);                                    // Fault jerk limit
+        s.u8(c.axis_id);                                       // Axis id
+        s.u8(c.axis_inverted);                                 // Axis direction
+        s.i32(c.axis_offset_q16);                              // Axis offset
+        s.u8(c.led_mode);                                      // LED mode
+        s.u8(c.led_on_off);                                    // LED timing
+        s.u8(c.led_id);                                        // LED element
+        s.u8(c.led_r);                                         // LED red
+        s.u8(c.led_g);                                         // LED green
+        s.u8(c.led_b);                                         // LED blue
+        s.bf16(c.gear_backlash);                               // Backlash
+        s.u16((uint16_t)c.gear_ratio_mul);                     // Ratio numerator
+        s.u16(c.gear_ratio_div);                               // Ratio denominator
+        for (uint32_t i = 0; i < TP_IO_FUNCTIONS; ++i) {       // IO map
+            s.u8(c.io_map[i].on_pin);
+            s.u8(c.io_map[i].off_pin);
+            s.u8(c.io_map[i].flags);
+        }
+        for (uint32_t i = 0; i < 2u; ++i) {                    // Encoders
+            s.u8(c.encoder[i].type_iface);
+            s.u8(c.encoder[i].flags);
+            s.u32(c.encoder[i].ppr);
+        }
+        s.u16(c.homing_flags);                                 // Homing flags
+        s.bf16(c.homing_quick_vel);                            // Coarse speed
+        s.bf16(c.homing_quick_torque);                         // Coarse torque
+        s.bf16(c.homing_fine_retract);                         // Fine retract
+        s.bf16(c.homing_fine_vel);                             // Fine speed
+        s.bf16(c.homing_fine_torque);                          // Fine torque
+        s.bf16(c.ref_offset_cw);                               // CW reference offset
+        s.bf16(c.ref_offset_ccw);                              // CCW reference offset
+        s.u32(c.ref_ang_cw);                                   // CW reference angle
+        s.u32(c.ref_ang_ccw);                                  // CCW reference angle
+        s.u32(c.ref_ang_zero);                                 // Zero reference angle
+        s.i48(c.zero_offset_cw_q32);                           // Zero to CW endstop
+        s.i48(c.zero_offset_ccw_q32);                          // Zero to CCW endstop
+        s.i48(c.field_cw_q32);                                 // CW travel
+        s.i48(c.field_ccw_q32);                                // CCW travel
+        s.i48(c.internal_offset_q32);                          // Internal offset
+        w[TP_CONFIG_WORDS - 1u] = crc32(w, TP_CONFIG_WORDS - 1u);  // Integrity of everything above
     }
 
     /**
      * @brief Deserialize a validated record into a configuration.
-     * @param w Source word array (CRC already checked).
+     * @param w Source word array (CRC and version already checked).
      * @param c Destination configuration.
      */
     static void unpack(const uint32_t* w, TpNodeConfig& c) {
-        c.node_id = (uint8_t)((w[0] >> 24) & 0xFFu);
-        c.flags = (uint8_t)(w[1] & 0xFFu);
-        c.safe_state = (uint8_t)((w[1] >> 8) & 0xFFu);
-        c.heartbeat_ms = (uint16_t)((w[1] >> 16) & 0xFFFFu);
-        c.watchdog_ms = (uint16_t)(w[2] & 0xFFFFu);
-        c.watchdog_action = (uint8_t)((w[2] >> 16) & 0xFFu);
-        c.arb_kbps = (uint16_t)(w[3] & 0xFFFFu);
-        c.data_kbps = (uint16_t)((w[3] >> 16) & 0xFFFFu);
+        TpRecordCursor s((uint8_t*)w, TP_CONFIG_BYTES - 4u);   // Byte view, CRC excluded
+        (void)s.get_u16();                                     // Magic
+        (void)s.get_u8();                                      // Version
+        c.node_id = s.get_u8();
+        c.flags = s.get_u8();
+        c.safe_state = s.get_u8();
+        c.watchdog_action = s.get_u8();
+        c.bus_type = s.get_u8();
+        c.comm_mode = s.get_u8();
+        c.burst_step = s.get_u8();
+        c.arb_kbps = s.get_u16();
+        c.data_kbps = s.get_u16();
+        c.heartbeat_s = s.get_bf16();
+        c.heartbeat_delay_s = s.get_bf16();
+        c.watchdog_s = s.get_bf16();
+        c.hb_retry = s.get_u8();
+        c.hb_retry_force = s.get_u8();
         for (uint32_t i = 0; i < TP_TELEMETRY_SLOTS; ++i) {
-            c.telemetry[i].opcode = (uint8_t)(w[4 + i] & 0xFFu);
-            c.telemetry[i].flags = (uint8_t)((w[4 + i] >> 8) & 0xFFu);
-            c.telemetry[i].period_ms = (uint16_t)((w[4 + i] >> 16) & 0xFFFFu);
+            c.telemetry[i].reg = s.get_u8();
+            c.telemetry[i].flags = s.get_u8();
+            c.telemetry[i].period_ms = s.get_u16();
         }
-        c.oc_limit_a = lo(w[8]);
-        c.oc_limit_b = hi(w[8]);
-        c.oc_limit_c = lo(w[9]);
-        c.ov_limit_v = hi(w[9]);
-        c.uv_limit_v = lo(w[10]);
-        c.ot_limit_c = hi(w[10]);
-        c.ot_hyst_c = lo(w[11]);
-        c.op_limit_w = hi(w[11]);
-        c.op_limit_a = lo(w[12]);
-        c.current_limit_a = hi(w[12]);
-        c.vel_limit_rps = lo(w[13]);
-        c.accel_limit = hi(w[13]);
-        c.jerk_limit = lo(w[14]);
+        c.oc_limit_a = s.get_bf16();
+        c.oc_limit_b = s.get_bf16();
+        c.oc_limit_c = s.get_bf16();
+        c.peak_current_a = s.get_bf16();
+        c.oc_disbalance = s.get_u8();
+        c.oc_alpha = s.get_u8();
+        c.oc_recovery = s.get_u8();
+        c.ov_limit_v = s.get_bf16();
+        c.uv_limit_v = s.get_bf16();
+        c.supply_hyst_v = s.get_bf16();
+        c.supply_recovery = s.get_u8();
+        c.ot_limit_c = s.get_bf16();
+        c.ot_hyst_c = s.get_bf16();
+        c.ot_warn_c = s.get_bf16();
+        c.op_limit_w = s.get_bf16();
+        c.op_limit_a = s.get_bf16();
+        c.pt_baseline_w = s.get_bf16();
+        c.pt_capacity_j = s.get_bf16();
+        c.pt_overdrive_s = s.get_u8();
+        c.motor_temp_base_c = s.get_u8();
+        c.motor_derating = s.get_bf16();
+        c.motor_rth = s.get_bf16();
+        c.current_limit_a = s.get_bf16();
+        c.vel_limit_rps = s.get_bf16();
+        c.accel_limit = s.get_bf16();
+        c.jerk_limit = s.get_bf16();
+        c.err_vel_rps = s.get_bf16();
+        c.err_accel = s.get_bf16();
+        c.err_jerk = s.get_bf16();
+        c.axis_id = s.get_u8();
+        c.axis_inverted = s.get_u8();
+        c.axis_offset_q16 = s.get_i32();
+        c.led_mode = s.get_u8();
+        c.led_on_off = s.get_u8();
+        c.led_id = s.get_u8();
+        c.led_r = s.get_u8();
+        c.led_g = s.get_u8();
+        c.led_b = s.get_u8();
+        c.gear_backlash = s.get_bf16();
+        c.gear_ratio_mul = (int16_t)s.get_u16();
+        c.gear_ratio_div = s.get_u16();
+        for (uint32_t i = 0; i < TP_IO_FUNCTIONS; ++i) {
+            c.io_map[i].on_pin = s.get_u8();
+            c.io_map[i].off_pin = s.get_u8();
+            c.io_map[i].flags = s.get_u8();
+        }
+        for (uint32_t i = 0; i < 2u; ++i) {
+            c.encoder[i].type_iface = s.get_u8();
+            c.encoder[i].flags = s.get_u8();
+            c.encoder[i].ppr = s.get_u32();
+        }
+        c.homing_flags = s.get_u16();
+        c.homing_quick_vel = s.get_bf16();
+        c.homing_quick_torque = s.get_bf16();
+        c.homing_fine_retract = s.get_bf16();
+        c.homing_fine_vel = s.get_bf16();
+        c.homing_fine_torque = s.get_bf16();
+        c.ref_offset_cw = s.get_bf16();
+        c.ref_offset_ccw = s.get_bf16();
+        c.ref_ang_cw = s.get_u32();
+        c.ref_ang_ccw = s.get_u32();
+        c.ref_ang_zero = s.get_u32();
+        c.zero_offset_cw_q32 = s.get_i48();
+        c.zero_offset_ccw_q32 = s.get_i48();
+        c.field_cw_q32 = s.get_i48();
+        c.field_ccw_q32 = s.get_i48();
+        c.internal_offset_q32 = s.get_i48();
     }
-
-    /** @brief Pack two floats into one word as a bfloat16 pair (low, high). */
-    static uint32_t pair(float a, float b) {
-        return (uint32_t)tp_pack_bf16(a) | ((uint32_t)tp_pack_bf16(b) << 16);
-    }
-
-    /** @brief Unpack the low bfloat16 half of a word. */
-    static float lo(uint32_t w) { return tp_unpack_bf16((uint16_t)(w & 0xFFFFu)); }
-
-    /** @brief Unpack the high bfloat16 half of a word. */
-    static float hi(uint32_t w) { return tp_unpack_bf16((uint16_t)(w >> 16)); }
 
     /**
      * @brief CRC-32 (IEEE 802.3, reflected) over a word array.
      *
-     * Table-less: 32 shifts per word. The record is 15 words and is checked
-     * only at boot and after a save, so a 512-byte lookup table would cost more
-     * flash than the loop ever costs in time.
+     * Table-less: 32 shifts per word. The record is checked only at boot and
+     * after a save, so a 512-byte lookup table would cost more flash than the
+     * loop ever costs in time.
      *
      * @param w Words to cover.
      * @param n Number of words.
@@ -378,6 +559,7 @@ private:
     FlashEEPROM* flash_ = nullptr;        ///< Configuration partition driver.
     State    state_ = State::Idle;        ///< Write-engine state.
     uint32_t addr_ = 0;                   ///< Byte offset of the record being written.
+    uint32_t block_ = 0;                  ///< Block of the record being programmed.
     uint32_t buf_[TP_CONFIG_WORDS] = {0}; ///< Serialized record awaiting programming.
     bool     save_ok_ = false;            ///< Last save verified.
     bool     save_attempted_ = false;     ///< A save has been armed since boot.

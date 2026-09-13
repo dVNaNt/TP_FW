@@ -109,6 +109,7 @@ struct DriveOutput {
 struct DriveTelemetry {
     int32_t  position_q16;      ///< Measured position [rev], Q16.16.
     int32_t  target_pos_q16;    ///< Active position target [rev], Q16.16.
+    int32_t  queue_tail_q16;    ///< Position the last queued segment ends at [rev], Q16.16.
     float    target_vel_rps;    ///< Active velocity target [RPS].
     float    applied_current_a; ///< Current commanded to the FOC loop [A].
     uint8_t  mode;              ///< Active DriveMode.
@@ -142,9 +143,9 @@ enum class DriveReq : uint8_t {
     VelocityLimit,   ///< f32 = velocity envelope [RPS].
     AccelLimit,      ///< f32 = acceleration envelope [RPS^2].
     JerkLimit,       ///< f32 = jerk envelope [RPS^3].
-    Anchor,          ///< i64 = value the current position takes on, Q16.16.
     Stop,            ///< u32 = TpStopMode value.
     PushSegment,     ///< seg = one trajectory segment for the executor queue.
+    PushSegmentAbs,  ///< seg = segment whose displacement field is an ABSOLUTE target, Q16.16.
     QueueClear,      ///< Drop every queued segment and hold.
     QueuePause,      ///< u32 = 0 resume / 1 pause.
     TimeScale,       ///< i32 = playback rate, Q10 (1024 = 1.0x).
@@ -278,11 +279,17 @@ public:
         return post(r);
     }
 
-    /** @brief Convenience wrapper: queue one trajectory segment. */
-    bool post_segment(const MotionCommandTM& seg) {
-        DriveRequest r;              // Request under construction
-        r.op = DriveReq::PushSegment;  // Opcode
-        r.arg.seg = seg;             // Whole segment by value
+    /**
+     * @brief Convenience wrapper: queue one trajectory segment.
+     * @param seg      Segment; its displacement is relative to the queue tail.
+     * @param absolute true when the displacement field holds an ABSOLUTE
+     *                 target instead: the ISR converts it against the tail
+     *                 of the queue, which only it knows exactly.
+     */
+    bool post_segment(const MotionCommandTM& seg, bool absolute = false) {
+        DriveRequest r;                                                 // Request under construction
+        r.op = absolute ? DriveReq::PushSegmentAbs : DriveReq::PushSegment;  // Opcode
+        r.arg.seg = seg;                                                // Whole segment by value
         return post(r);
     }
 
@@ -378,6 +385,7 @@ public:
         // existed, so the published window keeps describing the real vector.
         if (inhibit) {
             target_pos_q32_ = (int64_t)measured_pos_q16 << 16;
+            queue_tail_q32_ = target_pos_q32_;             // A move planned now starts from here
             exec_.update_real_pos(target_pos_q32_);
             out.action = DriveAction::RunTorque;
             out.target_pos_q16 = measured_pos_q16;
@@ -395,6 +403,7 @@ public:
             // Keep every target glued to the measured position so that
             // re-enabling the drive can never produce a step command.
             target_pos_q32_ = (int64_t)measured_pos_q16 << 16;
+            queue_tail_q32_ = target_pos_q32_;             // A move planned while parked starts from here
             exec_.update_real_pos(target_pos_q32_);
             out.target_pos_q16 = measured_pos_q16;
             switch (safe_state_) {
@@ -443,7 +452,12 @@ public:
                 // slewed towards the request by the acceleration envelope, so
                 // a step in the velocity command never becomes a torque step.
                 ramp_velocity();
-                target_pos_q32_ += (int64_t)(active_vel_rps_ * vel_to_pos_q32_);
+                // The per-pass step is converted through int32_t on purpose: a direct
+                // float -> int64_t cast is __aeabi_f2lz, which libgcc implements with
+                // double arithmetic (2 KiB of soft-float). vel_to_pos_q32_ is 2^32 / f_ctrl
+                // (214748 per rev/s at 20 kHz), so int32_t covers |v| < 10000 rev/s.
+                const int32_t step_q32 = (int32_t)(active_vel_rps_ * vel_to_pos_q32_);  // Q32.32 increment, one vcvt
+                target_pos_q32_ += step_q32;                                              // Sign-extended into the Q32.32 basis
                 exec_.update_real_pos(target_pos_q32_);
                 out.action = DriveAction::RunPosition;
                 out.target_pos_q16 = (int32_t)(target_pos_q32_ >> 16);
@@ -494,6 +508,18 @@ public:
             }
         }
 
+        // The queue tail is where the NEXT queued segment starts, and the
+        // thread side sizes a profiled move from it before the segment even
+        // reaches this ISR. Outside Motion mode the target moves without the
+        // queue (a velocity ramp, a setpoint, a torque command tracking the
+        // rotor), and a drained queue holds wherever it stopped; in both
+        // cases the tail must follow the target, or the first S-curve after a
+        // jog is sized from a stale point (a 25 rev move planned as a 0 rev
+        // one collapses into a step the loop chases at full speed).
+        if ((mode_ != DriveMode::Motion) || exec_halted_) {
+            queue_tail_q32_ = target_pos_q32_;             // Nothing queued: the tail is the target
+        }
+
         publish(measured_pos_q16, out, applied_current_a);
         return out;
     }
@@ -513,6 +539,7 @@ public:
         active_vel_rps_ = 0.0f;                             // No residual ramp
         target_vel_rps_ = 0.0f;                             // No pending velocity request
         exec_.init(now_us, target_pos_q32_);                // Rebase the trajectory queue
+        queue_tail_q32_ = target_pos_q32_;                  // Nothing queued: the tail is the target
         exec_halted_ = false;                               // Fresh queue is not halted
         exec_starving_ = false;                             // ... and not starving
     }
@@ -566,9 +593,11 @@ private:
                 break;
             case DriveReq::TargetPosAbs:
                 target_pos_q32_ = r.arg.i64 << 16;         // Q16.16 command -> Q32.32 basis
+                queue_tail_q32_ = target_pos_q32_;         // A fresh setpoint is where a queue would start
                 break;
             case DriveReq::TargetPosRel:
                 target_pos_q32_ += r.arg.i64 << 16;        // Displace the existing target
+                queue_tail_q32_ = target_pos_q32_;         // Keep the queue tail on the target
                 break;
             case DriveReq::TargetVel:
                 target_vel_rps_ = clamp_velocity(r.arg.f32);  // Envelope-limited velocity request
@@ -596,23 +625,24 @@ private:
                     jerk_limit_rps3_ = r.arg.f32;          // Stored for the profile generators
                 }
                 break;
-            case DriveReq::Anchor:
-                // Redefine the coordinate system: the executor basis and the
-                // position target both shift by the same amount, so the rotor
-                // does not move even though its reported position changes.
-                target_pos_q32_ = r.arg.i64 << 16;
-                exec_.init(now_us(), target_pos_q32_);
-                break;
             case DriveReq::Stop:
                 apply_stop((uint8_t)r.arg.u32);            // Controlled stop with an end state
                 break;
             case DriveReq::PushSegment:
-                if (!exec_.push(r.arg.seg)) {
-                    segments_dropped_++;                   // Executor queue full: count it
-                }
+                push_segment(r.arg.seg);                   // Relative to the queue tail
                 break;
+            case DriveReq::PushSegmentAbs: {
+                // The wire carried an absolute target; the queue works in
+                // displacements from wherever the previous segment ends, and
+                // only this side knows that point exactly.
+                MotionCommandTM seg = r.arg.seg;           // Copy: the displacement gets rewritten
+                seg.motion.displacement = seg.motion.displacement - (int32_t)(queue_tail_q32_ >> 16);
+                push_segment(seg);
+                break;
+            }
             case DriveReq::QueueClear:
                 exec_.init(now_us(), target_pos_q32_);     // Drop the queue, hold where we are
+                queue_tail_q32_ = target_pos_q32_;         // Nothing queued: the tail is the target
                 exec_halted_ = false;                      // Fresh queue is not halted
                 exec_starving_ = false;                    // ... and not starving
                 break;
@@ -659,6 +689,7 @@ private:
                 // Rebase the trajectory queue onto the present target so the
                 // first segment starts exactly where the drive already is.
                 exec_.init(now_us(), target_pos_q32_);
+                queue_tail_q32_ = target_pos_q32_;
                 exec_halted_ = false;
                 exec_starving_ = false;
                 break;
@@ -687,6 +718,7 @@ private:
      */
     void apply_stop(uint8_t stop_mode) {
         exec_.init(now_us(), target_pos_q32_);  // Always drop the pending trajectory
+        queue_tail_q32_ = target_pos_q32_;      // Nothing queued: the tail is the target
         exec_halted_ = false;                   // Fresh queue is not halted
         exec_starving_ = false;                 // ... and not starving
         target_vel_rps_ = 0.0f;                 // Cancel any velocity request
@@ -711,6 +743,28 @@ private:
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    /**
+     * @brief Queue one segment and advance the queue tail by its displacement.
+     *
+     * The tail is where the LAST queued segment ends: the origin every later
+     * relative segment and every absolute-to-relative conversion measures
+     * from. A FREERUN segment ends on a trigger rather than at its
+     * displacement, so the tail is an estimate for those; a master that
+     * streams absolute targets after a triggered segment re-anchors it with
+     * the next absolute push anyway.
+     *
+     * @param seg Segment with a RELATIVE displacement.
+     */
+    void push_segment(const MotionCommandTM& seg) {
+        if (!exec_.push(seg)) {
+            segments_dropped_++;                                   // Executor queue full: count it
+            return;
+        }
+        if (seg.mode.getMode() != MotionMode::ANCHOR) {
+            queue_tail_q32_ += (int64_t)seg.motion.displacement << 16;  // The segment ends here
+        }
+    }
 
     /** @brief Slew the tracked velocity towards the request under the accel limit. */
     void ramp_velocity() {
@@ -786,6 +840,7 @@ private:
 
         tlm_.position_q16 = measured_pos_q16;                // Where the rotor actually is
         tlm_.target_pos_q16 = out.target_pos_q16;            // Where it is being told to be
+        tlm_.queue_tail_q16 = (int32_t)(queue_tail_q32_ >> 16);  // Where the queue currently ends
         tlm_.target_vel_rps = out.target_vel_rps;            // Velocity reference in force
         tlm_.applied_current_a = applied_current_a;          // Torque commanded last pass
         tlm_.mode = (uint8_t)mode_;                          // Active control mode
@@ -866,6 +921,7 @@ private:
     bool           paused_ = false;                         ///< Trajectory playback paused.
 
     int64_t target_pos_q32_ = 0;        ///< Position target [rev], Q32.32 (the executor's basis).
+    int64_t queue_tail_q32_ = 0;        ///< Position the last queued segment ends at [rev], Q32.32.
     float   target_vel_rps_ = 0.0f;     ///< Requested velocity [RPS].
     float   active_vel_rps_ = 0.0f;     ///< Velocity actually being tracked after the ramp [RPS].
     float   target_current_a_ = 0.0f;   ///< Direct q-axis current command [A].

@@ -32,6 +32,7 @@
 
 #include "../../common.h" // Include common project definitions, utilities, and macros
 #include "../../drivers/flash_eeprom.h" // EEPROM-emulation driver used for calibration-table persistence
+#include "../../math/crc.h"         // Crc::Stream: CRC-32 over the stored record
 
 #ifndef CAL_TABLE_CAPACITY // Check if CAL_TABLE_CAPACITY is not defined externally
 #define CAL_TABLE_CAPACITY 400 // Maximum number of calibration points allocated in memory
@@ -78,16 +79,29 @@ public: // Make the following methods public for external module access
     //
     // Stored-record word stream (records append upward, forming a chain; the
     // LAST fully valid record is the actual one):
-    //   w0     : 0xFA3E0000 - table marker
+    //   w0     : 0xFA3E0001 - table marker (high half) + record format version (low half)
     //   w1     : sample_count
     //   w2..wN : samples packed 2 x uint16_t per word (odd tail padded 0xFFFF)
-    //   tail   : {el_angle_div, offst_val | max_deviation << 16, offst_idx}
+    //   tail   : {el_angle_div, offst_val | max_deviation << 16, offst_idx, crc32}
+    //
+    // crc32 is CRC-32/MPEG-2 (Crc::POLY32 / INIT32) over every preceding word
+    // of the record, each fed as its four little-endian bytes, marker
+    // included. A record whose CRC does not match is never committed: a
+    // single flipped bit in a sample would otherwise pass the monotonicity
+    // check and steer the electrical angle by a fraction of a period for the
+    // life of the record. Format version 1 introduced the CRC word; a record
+    // with another version is refused, so a board carrying an older record
+    // sweeps once at its first boot on this firmware and stores a new one.
     //
     // The record ID is NOT stored inside the record: it IS the start address
     // of the marker word expressed in 32-byte chunks (offset / 32). This ID
     // is handed over to the motor parameter profile after a successful dump,
     // so the table can be addressed directly on the next boot.
     // --------------------------------------------------------------------------
+
+    static constexpr uint32_t RECORD_MARKER = 0xFA3E0000ul;  ///< High half of word 0.
+    static constexpr uint32_t RECORD_VERSION = 1ul;          ///< Low half of word 0: format with the CRC word.
+    static constexpr uint32_t RECORD_TRAILER_WORDS = 4ul;    ///< div, offst | maxdev, offst_idx, crc32.
 
     /**
      * @brief Injects the flash driver used for load/dump transfers
@@ -155,7 +169,7 @@ public: // Make the following methods public for external module access
     void begin_dump() {
         store_ok = false;                                           // Clear the previous outcome
         if (!flash || cal_size == 0) return;                        // Nothing to persist
-        f_total = 2 + (cal_size + 1) / 2 + 3;                       // Marker + count + samples + trailer words
+        f_total = 2 + (cal_size + 1) / 2 + RECORD_TRAILER_WORDS;    // Marker + count + samples + trailer words
         if ((f_total + 7) / 8 * 32 > flash->get_max_size()) return; // Record can never fit: fail fast
         f_free = flash->get_max_size();                             // Assume no free tail yet
         f_addr = 0;                                                 // Space scan starts at zero
@@ -172,6 +186,15 @@ public: // Make the following methods public for external module access
      * @brief Number of samples currently collected in the RAM table
      */
     uint16_t get_sample_count() const { return (uint16_t)cal_size; }
+
+    /**
+     * @brief Read one stored calibration sample by index (protocol table access).
+     * @param index Sample index, 0 .. get_sample_count()-1.
+     * @return The sample value; 0 when the index is out of range.
+     */
+    uint16_t get_sample(size_t index) const {
+        return (index < cal_size) ? get_val_by_idx(index) : 0u;  // Bounds-checked read of the table
+    }
 
     /**
      * @brief Truncates the RAM table to exactly @p n samples
@@ -246,6 +269,9 @@ public: // Make the following methods public for external module access
                 TP_LOG("CALIBRATION: Flash full - erasing region"); // stalls the ISR for tens of ms)
                 f_wri0 = 0; f_wri = 0; f_word = 0; f_mode = MODE_WRITE;
             }                                                      // Erase failed: stays IDLE = fail
+            if (f_mode == MODE_WRITE) {
+                f_crc.begin(32, Crc::POLY32, Crc::INIT32);         // The record's CRC accumulates as it streams out
+            }
             return f_mode != MODE_WRITE;
         }
         if (f_mode == MODE_WRITE) {                                // Phase 2: stream the record out
@@ -256,7 +282,15 @@ public: // Make the following methods public for external module access
             for (int r = 0; r < 1 && f_word < f_total; ++r) {      // 1 record = 8 words per tick
                 uint32_t rec[8];
                 uint32_t n = f_total - f_word < 8 ? f_total - f_word : 8; // Words left in this record
-                for (uint32_t i = 0; i < n; ++i) rec[i] = stream_word(f_word + i);
+                for (uint32_t i = 0; i < n; ++i) {
+                    const uint32_t idx = f_word + i;               // Absolute index in the record stream
+                    if (idx == f_total - 1) {
+                        rec[i] = f_crc.value();                    // Last word: the CRC of everything before it
+                    } else {
+                        rec[i] = stream_word(idx);                 // Serialized word, fed into the CRC
+                        f_crc.feed_word(rec[i]);
+                    }
+                }
                 for (uint32_t i = n; i < 8; ++i) rec[i] = 0xFFFFFFFFul;   // Pad with erased value
                 if (!flash->write(f_wri, rec)) { f_mode = MODE_IDLE; return true; } // HW fault: fail
                 f_wri += 32;                                       // Advance record address
@@ -563,13 +597,22 @@ public: // Make the following methods public for external module access
             idl_pos1 = idl_pos2; // Left bound ideal becomes old right bound
         } // End of bounded segment search
 
-        // Compute mechanical angle mapped into one electrical period safely
-    uint16_t el = (uint16_t)(((uint32_t)result * (uint32_t)cal_size) / (uint32_t)el_angle_div);
-
-    // Compensate for the first calibration sample being taken after +1 electrical step
-    const uint16_t phase_shift = (uint16_t)(0x10000u / (uint32_t)el_angle_div);
-
-    return (uint16_t)(el - phase_shift);    } // End of correct_el_angle() method
+        // Map the mechanical angle into one electrical period. This is the
+        // angle the SWEEP commanded when the rotor sat at this encoder value,
+        // measured from the sweep's start, in the sweep's own rotation sense.
+        // It is deliberately NOT the rotor's electrical angle: the sweep holds
+        // the rotor with a q-axis current, so the rotor sits a quarter period
+        // ahead of the commanded angle, and the sweep runs in whichever sense
+        // makes the encoder count up. Both corrections depend on the detected
+        // direction, which this table does not know - the control loop applies
+        // them (see TunePulseHeart::tick), so that a motor whose encoder counts
+        // up with a positive field rotation and one whose encoder counts down
+        // land on the same rotor angle. A fixed quarter-period shift applied
+        // here was right for one direction and 180 degrees off for the other,
+        // which turned the position loop into positive feedback on every
+        // direction = -1 motor.
+        return (uint16_t)(((uint32_t)result * (uint32_t)cal_size) / (uint32_t)el_angle_div);
+    } // End of correct_el_angle() method
 
     /**
      * @brief Fast O(1) raw-angle correction using the ECC table
@@ -622,7 +665,8 @@ private: // Restrict direct access to internal state memory and helper routines
     uint32_t f_cnt = 0;           // Items remaining (candidate samples / trailer words)
     uint32_t f_sidx = 0;          // Sample index inside the current candidate
     uint16_t f_prev = 0;          // Previous sample kept for the monotonicity check
-    uint32_t f_m[3] = {0, 0, 0};  // Staging buffer for the metadata trailer
+    uint32_t f_m[3] = {0, 0, 0};  // Staging buffer for the metadata trailer (div, offst | maxdev, offst_idx)
+    Crc::Stream f_crc;            // CRC-32 of the record being read or written
     uint32_t f_total = 0;         // Total word count of the record being written
     uint32_t f_wri = 0;           // Byte address of the next 32-byte record
     uint32_t f_word = 0;          // Stream index of the next serialized word
@@ -640,19 +684,27 @@ private: // Restrict direct access to internal state memory and helper routines
      */
     bool scan_word(uint32_t w) {
         if (f_cnt == 0 && !f_meta) {                           // Expecting the two-word header
-            if (!f_hdr) {                                      // Word 1: FA3E marker
+            if (!f_hdr) {                                      // Word 1: FA3E marker + format version
                 if (w == 0xFFFFFFFFul) { f_mode = MODE_IDLE; return false; } // Erased: end of chain
-                if ((w & 0xFFFF0000ul) != 0xFA3E0000ul) { f_mode = MODE_IDLE; return false; } // Corrupt
+                if ((w & 0xFFFF0000ul) != RECORD_MARKER) { f_mode = MODE_IDLE; return false; } // Corrupt
+                if ((w & 0xFFFFul) != RECORD_VERSION) {        // Another format (no CRC word): refuse,
+                    TP_LOG_VAL("CAL: stored table has an unsupported record version", (long)(w & 0xFFFFul));
+                    f_mode = MODE_IDLE; return false;          // the drive sweeps and stores a new one
+                }
+                f_crc.begin(32, Crc::POLY32, Crc::INIT32);     // The CRC covers the record from its marker
+                f_crc.feed_word(w);
                 f_hdr = true;                                  // Marker ok: count word follows
                 return true;
             }
             f_hdr = false;                                     // Word 2: sample count
             uint32_t n = w;
             if (n == 0 || n > CAL_TABLE_CAPACITY) { f_mode = MODE_IDLE; return false; } // Bad size
+            f_crc.feed_word(w);
             f_cnt = n; f_sidx = 0; f_seq = true;               // Start collecting samples
             return true;
         }
         if (!f_meta) {                                         // Two packed samples per word
+            f_crc.feed_word(w);                                // Exactly the word that was written, pad included
             for (int h = 0; h < 2 && f_sidx < f_cnt; ++h) {
                 uint16_t s = (uint16_t)(w >> (16 * h));        // Unpack one half-word sample
                 if (f_sidx > 0 && (int16_t)(s - f_prev) <= 0)  // Strict circular monotonicity
@@ -660,14 +712,22 @@ private: // Restrict direct access to internal state memory and helper routines
                 cal_table[f_sidx++] = s;                       // Stage the sample in RAM
                 f_prev = s;
             }
-            if (f_sidx >= f_cnt) { f_meta = true; f_cnt = 3; } // Samples done: expect trailer
+            if (f_sidx >= f_cnt) { f_meta = true; f_cnt = RECORD_TRAILER_WORDS; } // Samples done: expect trailer
             return true;
         }
-        f_m[3 - f_cnt] = w;                                    // Stage one metadata word
-        if (--f_cnt == 0) {                                    // Trailer complete
-            f_meta = false;
-            if (f_seq) commit_candidate();                     // Promote only valid candidates
+        if (f_cnt > 1) {                                       // Metadata words: stage and cover by the CRC
+            f_m[RECORD_TRAILER_WORDS - f_cnt] = w;
+            f_crc.feed_word(w);
+            --f_cnt;
+            return true;
         }
+        f_cnt = 0;                                             // Last trailer word: the stored CRC
+        f_meta = false;
+        if (w != f_crc.value()) {                              // Any corruption between here and the marker
+            TP_LOG_VALS("CAL: stored table CRC mismatch: stored,computed", (long)w, (long)f_crc.value());
+            f_seq = false;                                     // Never promote a damaged record
+        }
+        if (f_seq) commit_candidate();                         // Promote only valid candidates
         return true;
     }
 
@@ -706,7 +766,7 @@ private: // Restrict direct access to internal state memory and helper routines
      */
     uint32_t stream_word(uint32_t i) const {
         uint32_t sw = (cal_size + 1) / 2;                      // Packed-sample word count
-        if (i == 0) return 0xFA3E0000ul;                       // Word 1: FA3E table marker
+        if (i == 0) return RECORD_MARKER | RECORD_VERSION;     // Word 1: FA3E table marker + format version
         if (i == 1) return (uint32_t)cal_size;                 // Word 2: sample count
         if (i <= sw + 1) {                                     // Packed sample pairs
             uint32_t j = (i - 2) * 2;                          // Index of the pair's first sample
@@ -716,7 +776,7 @@ private: // Restrict direct access to internal state memory and helper routines
         i -= sw + 2;                                           // Metadata trailer follows samples
         if (i == 0) return (uint32_t)el_angle_div;
         if (i == 1) return (uint32_t)offst_val | ((uint32_t)max_deviation << 16);
-        return (uint32_t)offst_idx;
+        return (uint32_t)offst_idx;                            // The CRC word is supplied by dump_tick()
     }
 
     /**

@@ -105,8 +105,10 @@ inline void POSITION_Callback() {  // Define inline callback for SPI encoder DMA
 }  // End of POSITION_Callback function
 
 inline void NVIC_Init() {  // Define the initialization function for the Nested Vectored Interrupt Controller
-    NVIC_SetPriority(TIM1_CC_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 3,
-                                                       0));  // Set TIM1 Capture/Compare interrupt to high priority level 3
+    // TIM1 CH4 match: starts the encoder transfer and latches the next duty
+    // vector. Priority 0, above the USB stack (1) and the ADC DMA (1), so no
+    // USB transfer can delay the encoder sample or the duty push.
+    NVIC_SetPriority(TIM1_CC_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
     NVIC_EnableIRQ(TIM1_CC_IRQn);                            // Enable the TIM1 Capture/Compare interrupt in the NVIC hardware
 
     // DRV8353 fault line (EXTI1) is armed by DRV_ERR_Init(); the encoder DMA
@@ -121,8 +123,8 @@ inline void NVIC_Init() {  // Define the initialization function for the Nested 
 inline void FOC_TimTrig_Callback() {  // Define custom inline callback for the timer trigger event
     LED_Update();                     // Pump the WS2812 non-blocking frame stream (IRQ-safe, ~5 cycles hot path)
 
-    ADC1_StartDMAConversion();        // Trigger hardware dual ADC conversion (ADC1 and ADC2 start synchronously)
-
+    // The ADCs are NOT started here any more: TIM1 triggers all three in
+    // hardware at this same CH4 match (adc_setup.h).
     Encoder_StartTransfer();  // Initiate non-blocking SPI DMA transfer to request the next encoder reading
 
     TP.driver_phy.tick_icr();  // Request new duty cycles from FOC core and write them to hardware registers

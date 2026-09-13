@@ -2,253 +2,225 @@
 
 /**
  * @file tp_chunk_motion.h
- * @brief TPCP v1 - real-time control and motion frame layouts (opcodes 0x10 - 0x1F).
+ * @brief TPCP v1 - write-only command layouts (0xC0 - 0xDF) and the burst frame (0xE0 - 0xFF).
  *
- * The write half of the hot path: mode selection, the three target kinds,
- * envelope limits, stop / anchor, and the trajectory queue.
- * 
- * The bit-packed motion burst (TpMotionBurst) is the one exception to every
- * other layout rule in the protocol. It is a 64-bit bit field rather than a
- * struct of integers, and it is laid out MSB-first so that its two format flags
- * land in byte 0 with bit 7 set - which no opcode ever has. That is what lets a
- * burst frame share the request channel with opcode frames and still be told
- * apart by inspecting a single byte. Its accessors live here beside it.
+ * The write half of the hot path. A motion segment is described by up to four
+ * Motion Task frames sharing one SegmentID: the header (mode, flags, time),
+ * the position, the torque / velocity pair and the acceleration / jerk / IO
+ * masks. SegmentID 0 marks a single-frame setpoint that is applied at once.
  *
- * Every struct is followed immediately by its own static_assert on sizeof: the
- * bitfield and padding rules that make these layouts land exactly on eight
- * bytes are compiler behaviour, so the assertion is the only thing standing
- * between a careless edit and a silent wire-format break. Keep them adjacent.
+ * The bit-packed burst frame is the one exception to every other layout rule
+ * in the protocol. It is a 64-bit bit field rather than a struct of integers,
+ * and it is laid out MSB-first: its three group bits land at the top of byte
+ * 0 (0xE0 - 0xFF), which no register address ever occupies. Its accessors
+ * live here beside it.
+ *
+ * Every struct is followed immediately by its own static_assert on sizeof.
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
 
-#include "../tp_wire.h"  // Opcodes, identifier map and the fixed-point codecs
+#include "tp_chunk_config.h"  // TP_PACKED and the wire definitions
 
 // ============================================================================
-// Real-time control frames (opcodes 0x10 - 0x1F)
+// 0xC0 - 0xC3 Motion tasks
 // ============================================================================
-
-/** @brief 0x10 Control Mode (W): select the control mode and the output state. */
-struct TpControlModeCmd {
-    uint8_t cmd;       ///< Byte 0: TP_OP_CONTROL_MODE.
-    uint8_t mode;      ///< Byte 1: requested TpControlMode.
-    uint8_t enable;    ///< Byte 2: 0 = leave disabled, 1 = enable the output stage.
-    uint8_t reserved;  ///< Byte 3: reserved, write as zero.
-    uint32_t pad;      ///< Bytes 4-7: reserved, write as zero.
-};
-static_assert(sizeof(TpControlModeCmd) == 8, "TpControlModeCmd must fill one frame");
-
-/** @brief 0x11 Target Position (W): absolute or relative position command. */
-struct TpTargetPosition {
-    uint8_t cmd;      ///< Byte 0: TP_OP_TARGET_POSITION.
-    uint8_t flags;    ///< Byte 1: bit0 relative (0 = absolute), bit1 also switch to POSITION mode.
-    uint8_t pos[6];   ///< Bytes 2-7: target position, Q1.31.16 LE (revolutions).
-};
-static_assert(sizeof(TpTargetPosition) == 8, "TpTargetPosition must fill one frame");
-
-/** Flag bits of TpTargetPosition::flags and TpAnchorCmd::flags. */
-#define TP_POS_FLAG_RELATIVE  (1u << 0)  ///< Interpret the payload as a displacement.
-#define TP_POS_FLAG_SET_MODE  (1u << 1)  ///< Switch to POSITION mode as part of the command.
-
-/** @brief 0x12 Target Velocity (W): velocity command plus its acceleration limit. */
-struct TpTargetVelocity {
-    uint8_t  cmd;          ///< Byte 0: TP_OP_TARGET_VELOCITY.
-    uint8_t  velocity[3];  ///< Bytes 1-3: target velocity [RPS], float24 (signed).
-    uint16_t accel;        ///< Bytes 4-5: acceleration limit [RPS^2], bfloat16 (0 = unchanged).
-    uint8_t  flags;        ///< Byte 6: bit1 also switch to VELOCITY mode.
-    uint8_t  reserved;     ///< Byte 7: reserved, write as zero.
-};
-static_assert(sizeof(TpTargetVelocity) == 8, "TpTargetVelocity must fill one frame");
-
-/** @brief 0x13 Target Torque (W): direct q-axis current command with its envelope. */
-struct TpTargetTorque {
-    uint8_t  cmd;       ///< Byte 0: TP_OP_TARGET_TORQUE.
-    uint8_t  flags;     ///< Byte 1: bit1 also switch to TORQUE mode.
-    uint16_t current;   ///< Bytes 2-3: q-axis current target [A], bfloat16 (signed).
-    uint16_t limit;     ///< Bytes 4-5: current magnitude limit [A], bfloat16 (0 = unchanged).
-    uint16_t reserved;  ///< Bytes 6-7: reserved, write as zero.
-};
-static_assert(sizeof(TpTargetTorque) == 8, "TpTargetTorque must fill one frame");
-
-/** Flag bit shared by the target frames: adopt the matching control mode. */
-#define TP_TGT_FLAG_SET_MODE (1u << 1)  ///< Switch to the mode implied by this command.
 
 /**
- * @brief 0x14 Motion Limits (W): the absolute velocity / acceleration / jerk envelope.
+ * @brief 0xC0 Motion Task 1: segment header.
  *
- * This is the frame the original draft called "Motion ABSOLUTE Limits". It
- * bounds every generated trajectory, including the point-to-point moves of
- * TP_OP_MOTION_SCURVE, which take their ramp shape from here.
+ * The flags word is laid out from the LSB upward exactly as the specification
+ * lists the fields: mode (4), isAbs (1), PosMode (2), TorqMode (2), TimeMode
+ * (2), io_trig (1), isVel (1), isAcc (1), isJrk (1), reserved (1).
  */
-struct TpMotionLimits {
-    uint8_t  cmd;          ///< Byte 0: TP_OP_MOTION_LIMITS.
-    uint8_t  velocity[3];  ///< Bytes 1-3: velocity limit [RPS], float24.
-    uint16_t accel;        ///< Bytes 4-5: acceleration limit [RPS^2], bfloat16.
-    uint16_t jerk;         ///< Bytes 6-7: jerk limit [RPS^3], bfloat16.
+struct TP_PACKED TpMotionTask1 {
+    uint8_t  cmd;         ///< Byte 0: TP_CMD_MOTION_TASK_1.
+    uint8_t  segment_id;  ///< Byte 1: segment identity shared by every part (0 = single frame).
+    uint8_t  axis_id;     ///< Byte 2: axis this segment addresses (0 = this node whatever its axis id).
+    uint16_t flags;       ///< Bytes 3-4: see the TP_MT1_* accessors.
+    uint8_t  time[3];     ///< Bytes 5-7: duration or time trigger [100 us], u24.
 };
-static_assert(sizeof(TpMotionLimits) == 8, "TpMotionLimits must fill one frame");
+static_assert(sizeof(TpMotionTask1) == 8, "TpMotionTask1 must fill one frame");
 
-/** @brief 0x15 Stop (W): controlled stop with a selectable end state. */
-struct TpStopCmd {
-    uint8_t  cmd;       ///< Byte 0: TP_OP_STOP.
-    uint8_t  mode;      ///< Byte 1: TpStopMode.
-    uint16_t reserved;  ///< Bytes 2-3: reserved, write as zero.
-    uint32_t pad;       ///< Bytes 4-7: reserved, write as zero.
-};
-static_assert(sizeof(TpStopCmd) == 8, "TpStopCmd must fill one frame");
+/** Field accessors of TpMotionTask1::flags. */
+#define TP_MT1_MODE(f)      ((uint8_t)((f) & 0x0Fu))          ///< Bits 0-3: TpMotionTaskMode.
+#define TP_MT1_IS_ABS(f)    ((((f) >> 4) & 0x1u) != 0u)       ///< Bit 4: absolute position.
+#define TP_MT1_POS_MODE(f)  ((uint8_t)(((f) >> 5) & 0x3u))    ///< Bits 5-6: TpMtPosMode.
+#define TP_MT1_TORQ_MODE(f) ((uint8_t)(((f) >> 7) & 0x3u))    ///< Bits 7-8: TpMtTorqueMode.
+#define TP_MT1_TIME_MODE(f) ((uint8_t)(((f) >> 9) & 0x3u))    ///< Bits 9-10: TpMtTimeMode.
+#define TP_MT1_IO_TRIG(f)   ((((f) >> 11) & 0x1u) != 0u)      ///< Bit 11: IO trigger used.
+#define TP_MT1_IS_VEL(f)    ((((f) >> 12) & 0x1u) != 0u)      ///< Bit 12: velocity used.
+#define TP_MT1_IS_ACC(f)    ((((f) >> 13) & 0x1u) != 0u)      ///< Bit 13: acceleration used.
+#define TP_MT1_IS_JRK(f)    ((((f) >> 14) & 0x1u) != 0u)      ///< Bit 14: jerk used.
 
-/** @brief 0x16 Anchor (W): redefine the current position without moving the rotor. */
-struct TpAnchorCmd {
-    uint8_t cmd;     ///< Byte 0: TP_OP_ANCHOR.
-    uint8_t flags;   ///< Byte 1: reserved, write as zero.
-    uint8_t pos[6];  ///< Bytes 2-7: value the current position takes on, Q1.31.16 LE.
+/** @brief Build a TpMotionTask1::flags word from its fields. */
+static inline uint16_t tp_mt1_flags(uint8_t mode, bool is_abs, uint8_t pos_mode, uint8_t torq_mode,
+                                    uint8_t time_mode, bool io_trig, bool is_vel, bool is_acc, bool is_jrk) {
+    return (uint16_t)((mode & 0x0Fu) | (is_abs ? 0x10u : 0u) | ((pos_mode & 0x3u) << 5) |
+                      ((torq_mode & 0x3u) << 7) | ((time_mode & 0x3u) << 9) | (io_trig ? 0x800u : 0u) |
+                      (is_vel ? 0x1000u : 0u) | (is_acc ? 0x2000u : 0u) | (is_jrk ? 0x4000u : 0u));
+}
+
+/** @brief 0xC1 Motion Task 2: absolute position or displacement. */
+struct TP_PACKED TpMotionTask2 {
+    uint8_t cmd;         ///< Byte 0: TP_CMD_MOTION_TASK_2.
+    uint8_t segment_id;  ///< Byte 1: same SegmentID as Motion Task 1 (0 = position setpoint, absolute).
+    uint8_t pos[6];      ///< Bytes 2-7: position [rev], q1.23.24 little-endian.
 };
-static_assert(sizeof(TpAnchorCmd) == 8, "TpAnchorCmd must fill one frame");
+static_assert(sizeof(TpMotionTask2) == 8, "TpMotionTask2 must fill one frame");
+
+/** @brief 0xC2 Motion Task 3: segment torque and velocity. */
+struct TP_PACKED TpMotionTask3 {
+    uint8_t  cmd;          ///< Byte 0: TP_CMD_MOTION_TASK_3.
+    uint8_t  segment_id;   ///< Byte 1: same SegmentID as Motion Task 1 (0 = velocity / torque setpoint).
+    uint16_t torque;       ///< Bytes 2-3: torque [N*m] (amperes when Kt is unknown), bfloat16; NaN = unused.
+    uint8_t  reserved;     ///< Byte 4: reserved, write as zero.
+    uint8_t  velocity[3];  ///< Bytes 5-7: velocity [RPS], float24; NaN = unused.
+};
+static_assert(sizeof(TpMotionTask3) == 8, "TpMotionTask3 must fill one frame");
+
+/** @brief 0xC3 Motion Task 4: acceleration, jerk and the IO trigger masks. */
+struct TP_PACKED TpMotionTask4 {
+    uint8_t  cmd;          ///< Byte 0: TP_CMD_MOTION_TASK_4.
+    uint8_t  segment_id;   ///< Byte 1: same SegmentID as Motion Task 1.
+    uint16_t accel;        ///< Bytes 2-3: acceleration [RPS^2], bfloat16.
+    uint16_t jerk;         ///< Bytes 4-5: jerk [RPS^3], bfloat16.
+    uint8_t  io_mask_pos;  ///< Byte 6: probe inputs that end the segment when they go active.
+    uint8_t  io_mask_neg;  ///< Byte 7: probe inputs that end the segment when they go inactive.
+};
+static_assert(sizeof(TpMotionTask4) == 8, "TpMotionTask4 must fill one frame");
+
+// ============================================================================
+// 0xCF Save config, 0xD0 MIDI
+// ============================================================================
+
+/** @brief 0xCF Save Config: persist, restore or erase stored configuration. */
+struct TP_PACKED TpSaveConfig {
+    uint8_t  cmd;         ///< Byte 0: TP_CMD_SAVE_CONFIG.
+    uint8_t  catalog[3];  ///< Bytes 1-3: TP_CATALOG_* bits (0xFFFFFF = everything), u24.
+    uint32_t keyword;     ///< Bytes 4-7: TP_SAVE_KEY / TP_DEFAULTS_KEY / TP_ERASE_KEY.
+};
+static_assert(sizeof(TpSaveConfig) == 8, "TpSaveConfig must fill one frame");
+
+/** @brief 0xD0 MIDI Control: play one note through the motor coils. */
+struct TP_PACKED TpMidi {
+    uint8_t  cmd;        ///< Byte 0: TP_CMD_MIDI.
+    uint8_t  wave_mode;  ///< Byte 1: bits 0-3 TpMidiWaveform, bits 4-7 mode (reserved).
+    uint8_t  tone;       ///< Byte 2: MIDI note number (69 = A4 = 440 Hz); 0 = silence.
+    uint8_t  volume;     ///< Byte 3: 0..255 = 0..100 % of the maximum safe amplitude.
+    uint16_t duration;   ///< Bytes 4-5: note duration [ms], bfloat16; 0 = until the next command.
+    uint8_t  attack;     ///< Byte 6: attack share of the duration, 0..255 = 0..100 %.
+    uint8_t  decay;      ///< Byte 7: decay share of the duration, 0..255 = 0..100 %.
+};
+static_assert(sizeof(TpMidi) == 8, "TpMidi must fill one frame");
+
+// ============================================================================
+// 0xE0 - 0xFF Burst mode
+// ============================================================================
 
 /**
- * @brief Bit-packed motion burst frame (PVT / PVcTF).
- *
- * This is the one frame that is NOT byte-field oriented: the original draft
- * needs 22 + 24 + 16 = 62 payload bits plus two format flags, which is the
- * whole 64-bit frame with nothing left over for an opcode byte. The flags
- * therefore live in the two most significant bits of byte 0, and because every
- * opcode is <= 0x7F, "byte 0 has bit 7 set" unambiguously marks a burst frame.
+ * @brief Bit-packed burst frame (PVT or PVcTF, selected by System Control's burst step).
  *
  * Wire layout, MSB first (the documented exception to the little-endian rule):
  *
- * | Byte | Bits | Field                                                     |
- * |:----:|:----:|:----------------------------------------------------------|
- * | 0    | 7    | burst, always 1                                            |
- * | 0    | 6    | const_t: 0 = PVT (bytes 6-7 are a duration), 1 = PVcTF     |
- * | 0    | 5-0  | displacement bits 21-16                                    |
- * | 1-2  | 7-0  | displacement bits 15-0 (Q1.5.16: 6 signed rev + 16 angle)  |
- * | 3-5  | 7-0  | end velocity, float24 (1.8.15) [RPS]                       |
- * | 6-7  | 7-0  | duration in 100 us units, or normalized force when const_t |
+ * | Byte | Bits | PVT (burst step = 0)                | PVcTF (burst step > 0)              |
+ * |:----:|:----:|:------------------------------------|:------------------------------------|
+ * | 0    | 7-5  | 111                                 | 111                                 |
+ * | 0    | 4-0  | time21 bits 20-16                   | frame counter (5 bits)              |
+ * | 1-2  | 7-0  | time21 bits 15-0                    | segment force [N*m], bfloat16       |
+ * | 3-4  | 7-0  | velocity [RPS], bfloat16            | velocity [RPS], bfloat16            |
+ * | 5-7  | 7-0  | position, q1.7.16 masked absolute   | position, q1.7.16 masked absolute   |
  *
- * Displacement is a 22-bit two's-complement value covering +/-32 revolutions
- * with 1/65536 resolution - the same units the encoder and the executor use.
+ * time21 is (system time [us] / 250) mod 2^21 - an absolute time tag, so a
+ * lost frame shifts nothing. The position is the low 24 bits of the absolute
+ * q1.15.16 position: the node reconstructs the nearest absolute value to its
+ * queue tail, which is unambiguous while segments stay under 128 revolutions.
  */
-struct TpMotionBurst {
+struct TP_PACKED TpBurst {
     uint8_t b[8];  ///< Raw frame bytes; use the helpers below to access fields.
 };
-static_assert(sizeof(TpMotionBurst) == 8, "TpMotionBurst must fill one frame");
+static_assert(sizeof(TpBurst) == 8, "TpBurst must fill one frame");
 
-/** Byte-0 mask marking a frame as a bit-packed motion burst. */
-#define TP_BURST_MARK 0x80u
-
-/** Byte-0 mask selecting the constant-duration (force controlled) variant. */
-#define TP_BURST_CONST_T 0x40u
-
-/**
- * @brief True when a received frame is a bit-packed motion burst.
- * @param b Frame bytes.
- */
+/** @brief True when a received frame is a bit-packed burst (bits 7..5 of byte 0 set). */
 static inline bool tp_burst_is(const uint8_t* b) {
-    return (b[0] & TP_BURST_MARK) != 0u;  // Opcodes are all <= 0x7F, so bit 7 is unambiguous
+    return tp_cmd_is_burst(b[0]);
+}
+
+/** @brief The 21-bit time tag of a PVT burst frame [250 us units]. */
+static inline uint32_t tp_burst_time21(const uint8_t* b) {
+    return ((uint32_t)(b[0] & 0x1Fu) << 16) | ((uint32_t)b[1] << 8) | (uint32_t)b[2];
+}
+
+/** @brief The 5-bit frame counter of a PVcTF burst frame. */
+static inline uint8_t tp_burst_frame(const uint8_t* b) {
+    return (uint8_t)(b[0] & 0x1Fu);
+}
+
+/** @brief The bfloat16 force of a PVcTF burst frame (bytes 1-2, MSB first). */
+static inline uint16_t tp_burst_force_raw(const uint8_t* b) {
+    return (uint16_t)(((uint16_t)b[1] << 8) | (uint16_t)b[2]);
+}
+
+/** @brief The bfloat16 velocity of a burst frame (bytes 3-4, MSB first). */
+static inline uint16_t tp_burst_vel_raw(const uint8_t* b) {
+    return (uint16_t)(((uint16_t)b[3] << 8) | (uint16_t)b[4]);
+}
+
+/** @brief The masked q1.7.16 position of a burst frame, sign-extended (bytes 5-7, MSB first). */
+static inline int32_t tp_burst_pos24(const uint8_t* b) {
+    const uint32_t raw = ((uint32_t)b[5] << 16) | ((uint32_t)b[6] << 8) | (uint32_t)b[7];
+    return (int32_t)(raw << 8) >> 8;  // Sign-extend from bit 23
 }
 
 /**
- * @brief Extract the 22-bit signed displacement of a motion burst frame.
- * @param b Frame bytes.
- * @return Displacement in Q16.16 revolutions, sign-extended to 32 bits.
+ * @brief Reconstruct an absolute q1.15.16 position from its 24-bit masked form.
+ *
+ * The masked value is the low 24 bits of the absolute position. The absolute
+ * position congruent to it that lies nearest to @p reference is returned, so
+ * the result is exact as long as the true position is within 128 revolutions
+ * of the reference.
+ *
+ * @param masked    24-bit masked position (sign-extended, as tp_burst_pos24 returns it).
+ * @param reference Absolute position to resolve against [rev], q1.15.16.
  */
-static inline int32_t tp_burst_disp(const uint8_t* b) {
-    uint32_t raw = ((uint32_t)(b[0] & 0x3Fu) << 16)  // Bits 21-16 from byte 0
-                 | ((uint32_t)b[1] << 8)             // Bits 15-8
-                 | (uint32_t)b[2];                   // Bits 7-0
-    return (int32_t)(raw << 10) >> 10;               // Sign-extend from bit 21
+static inline int32_t tp_burst_unmask(int32_t masked, int32_t reference) {
+    const int32_t delta = (int32_t)(((uint32_t)masked - (uint32_t)reference) << 8) >> 8;  // Nearest, mod 2^24
+    return reference + delta;
 }
 
 /**
- * @brief Extract the float24 end velocity of a motion burst frame.
- * @param b Frame bytes.
- * @return End velocity in revolutions per second.
+ * @brief Pack a PVT burst frame.
+ * @param b       Destination frame bytes.
+ * @param time21  Time tag [250 us], masked to 21 bits.
+ * @param vel_rps Velocity at the point [RPS].
+ * @param pos_q16 Absolute position [rev], q1.15.16 (only the low 24 bits travel).
  */
-static inline float tp_burst_vel(const uint8_t* b) {
-    uint32_t raw = ((uint32_t)b[3] << 16)  // Bits 23-16
-                 | ((uint32_t)b[4] << 8)   // Bits 15-8
-                 | (uint32_t)b[5];         // Bits 7-0
-    return tp_unpack_f24(raw);             // float24 -> float
+static inline void tp_burst_pack_pvt(uint8_t* b, uint32_t time21, float vel_rps, int32_t pos_q16) {
+    const uint16_t v = tp_pack_bf16(vel_rps);                     // Velocity as bfloat16
+    const uint32_t p = (uint32_t)pos_q16 & 0x00FFFFFFu;           // Masked position
+    b[0] = (uint8_t)(TP_CMD_GROUP_BURST | (uint8_t)((time21 >> 16) & 0x1Fu));  // Group bits + time 20-16
+    b[1] = (uint8_t)((time21 >> 8) & 0xFFu);                      // Time bits 15-8
+    b[2] = (uint8_t)(time21 & 0xFFu);                             // Time bits 7-0
+    b[3] = (uint8_t)(v >> 8);                                     // Velocity high byte
+    b[4] = (uint8_t)(v & 0xFFu);                                  // Velocity low byte
+    b[5] = (uint8_t)((p >> 16) & 0xFFu);                          // Position bits 23-16
+    b[6] = (uint8_t)((p >> 8) & 0xFFu);                           // Position bits 15-8
+    b[7] = (uint8_t)(p & 0xFFu);                                  // Position bits 7-0
 }
 
 /**
- * @brief Extract the trailing 16-bit field (duration or force) of a burst frame.
- * @param b Frame bytes.
- * @return Duration in 100 us units, or the normalized force when const_t is set.
- */
-static inline uint16_t tp_burst_tail(const uint8_t* b) {
-    return (uint16_t)(((uint16_t)b[6] << 8) | (uint16_t)b[7]);  // MSB first
-}
-
-/**
- * @brief Build a motion burst frame from its three fields.
+ * @brief Pack a PVcTF burst frame.
  * @param b        Destination frame bytes.
- * @param const_t  false for a PVT segment (tail = duration), true for PVcTF (tail = force).
- * @param disp_q16 Displacement in Q16.16 revolutions (clamped to +/-32 revolutions).
- * @param vel_rps  End velocity in revolutions per second.
- * @param tail     Duration in 100 us units, or the normalized force.
+ * @param frame    5-bit frame counter.
+ * @param force    Segment force [N*m].
+ * @param vel_rps  Velocity at the point [RPS].
+ * @param pos_q16  Absolute position [rev], q1.15.16 (only the low 24 bits travel).
  */
-static inline void tp_burst_pack(uint8_t* b, bool const_t, int32_t disp_q16, float vel_rps, uint16_t tail) {
-    if (disp_q16 > 0x1FFFFF) {
-        disp_q16 = 0x1FFFFF;                                  // Saturate at +32 revolutions
-    }
-    if (disp_q16 < -0x200000) {
-        disp_q16 = -0x200000;                                 // Saturate at -32 revolutions
-    }
-    const uint32_t d = (uint32_t)disp_q16 & 0x003FFFFFu;      // Keep the 22 payload bits
-    const uint32_t v = tp_pack_f24(vel_rps);                  // Velocity as float24
-    b[0] = (uint8_t)(TP_BURST_MARK                            // Burst marker
-                     | (const_t ? TP_BURST_CONST_T : 0u)      // Format flag
-                     | (uint8_t)((d >> 16) & 0x3Fu));         // Displacement bits 21-16
-    b[1] = (uint8_t)((d >> 8) & 0xFFu);                       // Displacement bits 15-8
-    b[2] = (uint8_t)(d & 0xFFu);                              // Displacement bits 7-0
-    b[3] = (uint8_t)((v >> 16) & 0xFFu);                      // Velocity bits 23-16
-    b[4] = (uint8_t)((v >> 8) & 0xFFu);                       // Velocity bits 15-8
-    b[5] = (uint8_t)(v & 0xFFu);                              // Velocity bits 7-0
-    b[6] = (uint8_t)(tail >> 8);                              // Tail high byte
-    b[7] = (uint8_t)(tail & 0xFFu);                           // Tail low byte
+static inline void tp_burst_pack_pvctf(uint8_t* b, uint8_t frame, float force, float vel_rps, int32_t pos_q16) {
+    tp_burst_pack_pvt(b, 0u, vel_rps, pos_q16);                   // Group bits, velocity, position
+    const uint16_t f = tp_pack_bf16(force);                       // Force as bfloat16
+    b[0] = (uint8_t)(TP_CMD_GROUP_BURST | (frame & 0x1Fu));       // Group bits + frame counter
+    b[1] = (uint8_t)(f >> 8);                                     // Force high byte
+    b[2] = (uint8_t)(f & 0xFFu);                                  // Force low byte
 }
-
-/** @brief 0x1A Motion S-curve (W): jerk-limited point-to-point move request. */
-struct TpMotionScurve {
-    uint8_t  cmd;       ///< Byte 0: TP_OP_MOTION_SCURVE.
-    uint8_t  flags;     ///< Byte 1: bit0 relative target, bit2 append instead of replace.
-    uint8_t  target[3]; ///< Bytes 2-4: target or displacement [rev], Q1.7.16 LE.
-    uint16_t velocity;  ///< Bytes 5-6: cruise velocity [RPS], bfloat16 (0 = use the stored limit).
-    uint8_t  reserved;  ///< Byte 7: reserved, write as zero.
-} __attribute__((packed));
-static_assert(sizeof(TpMotionScurve) == 8, "TpMotionScurve must fill one frame");
-
-/** Flag bits of TpMotionScurve::flags. */
-#define TP_SCURVE_RELATIVE (1u << 0)  ///< Target is a displacement from the current position.
-#define TP_SCURVE_APPEND   (1u << 2)  ///< Queue behind the running move instead of replacing it.
-
-/** @brief 0x1B Motion Queue Control (W): queue lifecycle and playback rate. */
-struct TpMotionQueueCtl {
-    uint8_t cmd;         ///< Byte 0: TP_OP_MOTION_QUEUE_CTL.
-    uint8_t action;      ///< Byte 1: TpQueueAction.
-    int16_t time_scale;  ///< Bytes 2-3: playback rate, Q10 (1024 = 1.0x, 0 = pause, negative = reverse).
-    uint32_t reserved;   ///< Bytes 4-7: reserved, write as zero.
-};
-static_assert(sizeof(TpMotionQueueCtl) == 8, "TpMotionQueueCtl must fill one frame");
-
-/** Actions accepted in TpMotionQueueCtl::action. */
-enum TpQueueAction : uint8_t {
-    TP_QUEUE_NOP        = 0x0u,  ///< Apply the time scale only.
-    TP_QUEUE_CLEAR      = 0x1u,  ///< Drop every queued segment and hold the current position.
-    TP_QUEUE_PAUSE      = 0x2u,  ///< Freeze trajectory time (equivalent to time scale 0).
-    TP_QUEUE_RESUME     = 0x3u,  ///< Resume at the configured time scale.
-    TP_QUEUE_TIME_SCALE = 0x4u   ///< Set the time scale explicitly from bytes 2-3.
-};
-
-/** @brief 0x1C Motion Queue Status (R): depth and state of the executor queue. */
-struct TpMotionQueueStat {
-    uint8_t cmd;         ///< Byte 0: TP_OP_MOTION_QUEUE_STAT.
-    uint8_t state;       ///< Byte 1: bit0 enabled, bit1 paused, bit2 halted, bit3 starving.
-    uint8_t queued;      ///< Byte 2: segments waiting to execute (saturating at 255).
-    uint8_t free_slots;  ///< Byte 3: free queue slots (saturating at 255).
-    int16_t time_scale;  ///< Bytes 4-5: active playback rate, Q10.
-    uint16_t dropped;    ///< Bytes 6-7: segments rejected because the queue was full.
-};
-static_assert(sizeof(TpMotionQueueStat) == 8, "TpMotionQueueStat must fill one frame");

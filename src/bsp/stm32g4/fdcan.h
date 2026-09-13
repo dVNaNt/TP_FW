@@ -8,12 +8,13 @@
  *
  * ## Node addressing and filtering
  * The four standard filter slots are bound to one node address by
- * set_node_filters(): network management (0x100-0x10F) is always accepted,
- * the setpoint (0x200+n / 0x2FF) and request (0x300+n / 0x3FF) channels are
- * accepted only once an address has been assigned, and a fourth slot can be
- * opened for promiscuous bus monitoring. Everything else is rejected in
- * hardware, so traffic addressed to other drives costs this node no
- * interrupts at all. See src/api/CAN_PROTOCOL.md for the identifier map.
+ * set_node_filters(): the node's command channel (0x300+n) and the broadcast
+ * (0x300) are always accepted - an unassigned node (255) therefore listens on
+ * 0x3FF, which is what the discovery registers need - and three mask slots
+ * covering the node -> master classes (0x1xx, 0x4xx, 0x5xx) are opened only in
+ * promiscuous mode, for a bus master or the USB gateway. Everything else is
+ * rejected in hardware, so traffic addressed to other drives costs this node no
+ * interrupts at all.
  *
  * ## Bus health
  * update() also drives bus-off recovery: a bus-off event latches CCCR.INIT in
@@ -257,17 +258,18 @@ public:
      * raise an interrupt and can never overflow the chunk ring.
      *
      * Four standard filter slots are used:
-     *  0: range 0x100-0x10F - network management (always accepted).
-     *  1: dual  {0x200+node, 0x2FF} - real-time setpoints + their broadcast.
-     *  2: dual  {0x300+node, 0x3FF} - requests + their broadcast.
-     *  3: range 0x000-0x7FF - promiscuous monitoring, disabled by default.
+     *  0: dual {0x300+node, 0x300} - this node's commands plus the broadcast.
+     *  1: mask 0x1xx - every node's emergency frames    (master / gateway role).
+     *  2: mask 0x4xx - every node's responses           (master / gateway role).
+     *  3: mask 0x5xx - every node's PulseBeat, telemetry (master / gateway role).
      *
-     * An unaddressed node (node_id == 0) leaves slots 1 and 2 disabled and so
-     * listens to network management only, which is exactly what the discovery
-     * protocol requires of a device that has not been given an address yet.
+     * Slot 0 is always active: an unaddressed node (255) listens on 0x3FF and
+     * the broadcast, which is exactly what the discovery registers need. Slots
+     * 1-3 are the "master device" set of the protocol and are opened only in
+     * promiscuous mode - a node relaying the bus to a USB host is a master.
      *
-     * @param node_id     Assigned node address (0 = unassigned).
-     * @param promiscuous true to additionally accept every standard identifier.
+     * @param node_id     Assigned node address (255 = unassigned).
+     * @param promiscuous true to additionally accept every node -> master class.
      * @return true when every filter slot was accepted by the peripheral.
      */
     bool set_node_filters(uint8_t node_id, bool promiscuous = false) {
@@ -431,43 +433,30 @@ private:
         FDCAN_FilterTypeDef flt = {0};                     // Reused slot descriptor
         flt.IdType = FDCAN_STANDARD_ID;                    // 11-bit identifiers only
 
-        // Slot 0: network management block, always accepted.
+        // Slot 0: this node's command channel plus the broadcast address.
         flt.FilterIndex = 0U;
-        flt.FilterType = FDCAN_FILTER_RANGE;
+        flt.FilterType = FDCAN_FILTER_DUAL;
         flt.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-        flt.FilterID1 = 0x100U;
-        flt.FilterID2 = 0x10FU;
-        if (HAL_FDCAN_ConfigFilter(&hfdcan, &flt) != HAL_OK) {
-            return false;
-        }
-
-        // Slot 1: real-time setpoints for this node plus the broadcast address.
-        flt.FilterIndex = 1U;
-        flt.FilterType = FDCAN_FILTER_DUAL;
-        flt.FilterConfig = (node_id_ != 0U) ? FDCAN_FILTER_TO_RXFIFO0 : FDCAN_FILTER_DISABLE;
-        flt.FilterID1 = 0x200U + node_id_;
-        flt.FilterID2 = 0x2FFU;
-        if (HAL_FDCAN_ConfigFilter(&hfdcan, &flt) != HAL_OK) {
-            return false;
-        }
-
-        // Slot 2: request channel for this node plus the broadcast address.
-        flt.FilterIndex = 2U;
-        flt.FilterType = FDCAN_FILTER_DUAL;
-        flt.FilterConfig = (node_id_ != 0U) ? FDCAN_FILTER_TO_RXFIFO0 : FDCAN_FILTER_DISABLE;
         flt.FilterID1 = 0x300U + node_id_;
-        flt.FilterID2 = 0x3FFU;
+        flt.FilterID2 = 0x300U;
         if (HAL_FDCAN_ConfigFilter(&hfdcan, &flt) != HAL_OK) {
             return false;
         }
 
-        // Slot 3: promiscuous monitoring, only for bus analysis / debugging.
-        flt.FilterIndex = 3U;
-        flt.FilterType = FDCAN_FILTER_RANGE;
-        flt.FilterConfig = promiscuous_ ? FDCAN_FILTER_TO_RXFIFO0 : FDCAN_FILTER_DISABLE;
-        flt.FilterID1 = 0x000U;
-        flt.FilterID2 = 0x7FFU;
-        return HAL_FDCAN_ConfigFilter(&hfdcan, &flt) == HAL_OK;
+        // Slots 1-3: the node -> master classes, opened for a bus master or a
+        // gateway only. A classic mask filter: ID1 is the value, ID2 the mask.
+        static const uint32_t master_bases[3] = {0x100U, 0x400U, 0x500U};  // Emergency, response, telemetry
+        for (uint32_t i = 0; i < 3U; i++) {
+            flt.FilterIndex = 1U + i;
+            flt.FilterType = FDCAN_FILTER_MASK;
+            flt.FilterConfig = promiscuous_ ? FDCAN_FILTER_TO_RXFIFO0 : FDCAN_FILTER_DISABLE;
+            flt.FilterID1 = master_bases[i];
+            flt.FilterID2 = 0x700U;                        // Match the class, any node
+            if (HAL_FDCAN_ConfigFilter(&hfdcan, &flt) != HAL_OK) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** @brief Free slots in the TX frame ring. */
@@ -600,7 +589,7 @@ private:
     bool fd_mode = true;                  // Link format (FD-BRS vs classic)
     bool is_initialized = false;
     bool is_enabled = true;
-    uint8_t node_id_ = 0;                 // Node address the filters are bound to
+    uint8_t node_id_ = 0xFF;              // Node address the filters are bound to (255 = unassigned)
     bool promiscuous_ = false;            // Accept every identifier (bus monitoring)
 
     /** Standard filter slots reserved in the FDCAN message RAM. */

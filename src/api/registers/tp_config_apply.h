@@ -18,16 +18,26 @@
 
 #include "../../lib/lib.h"  // TunePulseHeart and the drive mailbox
 #include "../tp_node.h"      // TpNodeConfig: the shadow being applied
+
 // ============================================================================
 // Configuration -> hardware
 // ============================================================================
 
 /**
+ * @brief Watchdog reload in control ticks for a timeout in seconds (0 = disabled).
+ * @param tp        Live firmware state (supplies the control-loop rate).
+ * @param timeout_s Timeout [s]; non-positive or NaN disables the watchdog.
+ */
+static inline uint32_t tp_watchdog_ticks(const TunePulseHeart& tp, float timeout_s) {
+    if (!(timeout_s > 0.0f)) {
+        return 0u;                                                  // Off (also catches NaN)
+    }
+    const float ticks = timeout_s * (float)tp.drive.frequency_hz();  // Seconds -> control passes
+    return (ticks > 4.0e9f) ? 0xFFFFFFFFu : (uint32_t)ticks;        // Saturate absurd values
+}
+
+/**
  * @brief Push the configuration shadow into the live subsystems.
- *
- * Called once at boot after the stored record is restored, and again whenever a
- * register write touches something the hardware caches (a comparator threshold,
- * the control envelope, the watchdog reload).
  *
  * Programming the analog protection thresholds while the stage is energized
  * would move a trip point under a live current, so the registers that reach
@@ -54,16 +64,21 @@ static inline void tp_apply_config(TunePulseHeart& tp, const TpNodeConfig& cfg) 
         .op_lim_amps(cfg.op_limit_a);
 
     // Control envelopes and policy: routed through the mailbox so the ISR
-    // adopts them between passes instead of mid-computation.
-    tp.drive.post_f32(DriveReq::CurrentLimit, cfg.current_limit_a);
+    // adopts them between passes instead of mid-computation. The envelope
+    // can never exceed the configured peak current.
+    const float envelope = (cfg.current_limit_a > cfg.peak_current_a) ? cfg.peak_current_a : cfg.current_limit_a;
+    tp.drive.post_f32(DriveReq::CurrentLimit, envelope);
     tp.drive.post_f32(DriveReq::VelocityLimit, cfg.vel_limit_rps);
     tp.drive.post_f32(DriveReq::AccelLimit, cfg.accel_limit);
     tp.drive.post_f32(DriveReq::JerkLimit, cfg.jerk_limit);
     tp.drive.post_u32(DriveReq::SetSafeState, cfg.safe_state);
 
     // Watchdog reload is expressed in control ticks so the ISR never divides.
-    const uint32_t ticks = (cfg.watchdog_ms == 0u)
-                               ? 0u
-                               : ((uint32_t)cfg.watchdog_ms * tp.drive.frequency_hz()) / 1000u;
-    tp.drive.post_u32(DriveReq::ArmWatchdog, ticks);
+    tp.drive.post_u32(DriveReq::ArmWatchdog, tp_watchdog_ticks(tp, cfg.watchdog_s));
+
+    // Status LED: a steady or blinking colour is applied here; mode 2 leaves
+    // the element to the firmware (the control loop paints faults red).
+    if (cfg.led_mode != 2u) {
+        tp.led.set().led(cfg.led_r, cfg.led_g, cfg.led_b);
+    }
 }

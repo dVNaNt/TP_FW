@@ -14,32 +14,58 @@ almost entirely header-only C++.
 python -m platformio run -e cln17_v3_release            # build
 python -m platformio run -e cln17_v3_release -t upload  # flash via ST-Link
 python -m platformio run -e cln17_v3_release -t clean
-python -m platformio debug -e cln17_v3_release
+python -m platformio debug -e cln17_v3_dev      # symbols + console; the release env has no DWARF
 ```
 
 If `platformio` is not on PATH, use `~/.platformio/penv/bin/pio` (already allow-listed in
 `.claude/settings.local.json`).
 
-**`cln17_v3_release` is the only live environment.** `radix_release` and `cln17_v2_0_release` are
-commented out in `platformio.ini`. `src/target/radix/` still exists (left at the old path deliberately) but does not compile in any
+**`cln17_v3_release` is the shipping environment** (`build_type = release`, no console, no debug
+symbols). `cln17_v3_dev` extends it with the USB console (`-D DEV_LOG_ENABLE=1`, ~11 KiB more
+flash) and DWARF for `pio debug`; `cln17_v3_bench` adds loopback defaults on top of that. `radix_release` and `cln17_v2_0_release` are commented out in `platformio.ini`.
+`src/target/radix/` still exists (left at the old path deliberately) but does not compile in any
 current build — do not assume changes there are covered by a build.
 
-**Upload flashes every connected ST-Link in parallel.** `extra_scripts = post:tools/upload_all_stlinks.py`
+**Parallel upload is opt-in.** `tools/upload_all_stlinks.py` is a PlatformIO post-script that
 replaces the upload target: it enumerates all ST-Link probes and programs each attached board
-concurrently. It detects probes through the Windows PnP subsystem, so `-t upload` is Windows-only;
-on macOS/Linux flash with STM32CubeProgrammer or a manual OpenOCD invocation.
+concurrently. `platformio.ini` no longer registers it (`extra_scripts = post:tools/upload_all_stlinks.py`
+re-enables it); without it `-t upload` is the stock single-probe OpenOCD upload. On macOS a manual
+invocation also works: `openocd -f interface/stlink.cfg -f target/stm32g4x.cfg -c "program
+.pio/build/<env>/firmware.elf verify reset exit"`.
 
 **Flash budget is 114688 bytes, not 131072.** `board_upload.maximum_size` reserves the top of flash
 for the persistent NVM partitions (`nvm_flash.h`: calibration + user + node-config sections, 2 KiB
-each by default = 6 KiB; the 16 KiB reservation leaves 10 KiB of slack). PlatformIO's percentage is
-against 114688; `changelogger.py` computes against 131072, so the two disagree — always quote raw
-byte counts.
+each by default = 6 KiB; the 16 KiB reservation leaves 10 KiB of slack). PlatformIO and `changelogger.py`
+both compute their percentage against 114688 — still quote raw byte counts.
 
 The node-config partition is deliberately separate: the motor-profile engine erases its whole
 partition when it runs out of slots (~60 saves), which would otherwise destroy the stored node
 address.
 
-Reference build (clean `main`): RAM 7420 B, Flash 64664 B.
+Reference build (this branch, 2026-09-13, control timing): `cln17_v3_release` RAM 11788 B,
+Flash 71652 B; `cln17_v3_dev` Flash 84104 B (RAM 24100 B with the black box). (Before the protocol rewrite: 61140 B / 72112 B.)
+
+**Build flags that decide the size** (all in `platformio.ini`, mirrored in `cln234_release`):
+
+- `cln17_v3_release` is `build_type = release`: the framework's default `-Os` applies and nothing
+  strips it. `cln17_v3_dev` is `build_type = debug` for `pio debug`; that type strips every
+  `-O*`/`-g*` flag from `build_flags` and the framework, then injects `debug_build_flags`, which is
+  why the dev env pins `debug_build_flags = -Os -g2 -ggdb2`. An `-O` flag in `build_flags` is
+  ignored in both types (in release the framework's `-Os` comes last). `-O2`/`-O3` overflow the
+  budget; `-Os` and `-Oz` measure the same.
+- `-D DEV_LOG_ENABLE=1` is set only by `cln17_v3_dev`/`cln17_v3_bench`; the release image has no
+  console (see Logging).
+- `-D HAL_UART_MODULE_ONLY`: nothing opens a UART; without it the Arduino core links
+  HardwareSerial + HAL UART (5.5 KiB).
+- `-flto=auto`: anything referenced only from inline asm needs `__attribute__((used))`
+  (`nvm_flash.h`: `flashg4_ll_nmi_dispatch`) or LTO drops it and the link fails.
+- `-D TP_CRC_HW=1`: `Crc::Stream` (`src/lib/math/crc.h`) runs on the STM32G4 CRC unit
+  through `src/bsp/stm32g4/crc.h`; without the flag it shifts in software and the stored records
+  are bit-identical. The one-shot `Crc::crc8/16/32` are always software (constexpr, ISR-safe); the
+  unit is one shared peripheral with no locking, so only one stream may be open at a time.
+- `-fno-math-errno`: `sqrtf`/`lrintf` inline to `vsqrt`/`vcvtr`. Keep float literals `f`-suffixed
+  and never cast `float` straight to `int64_t` (`__aeabi_f2lz` drags in 2 KiB of soft-double);
+  the image currently links no double-precision helper at all.
 
 ### After any code change
 
@@ -63,7 +89,7 @@ byte counts must come from the build you just ran.
 `test/test_tpcp/` holds host-side conformance tests for the CAN protocol wire format (Unity):
 
 ```bash
-python -m platformio test -e native_tpcp    # 15 tests: codecs, frame layouts, identifier map
+python -m platformio test -e native_tpcp    # 22 tests: codecs, layouts, CMD groups, burst, discovery, CRC
 ```
 
 They build nothing from the firmware tree — `tp_wire.h` / `tp_chunks.h` are hardware-independent by
@@ -84,7 +110,8 @@ The control loop does **not** run from `loop()`. It is entirely interrupt-driven
 the drive up and then pumps the CAN protocol and a diagnostic console heartbeat:
 
 ```
-TIM1_CC ISR  → FOC_TimTrig_Callback()   : start ADC DMA, start encoder SPI DMA,
+TIM1 CH4 match (hardware) → ADC conversion starts (TRGO2 = OC4REF, no software in the path)
+TIM1_CC ISR  → FOC_TimTrig_Callback()   : start encoder SPI DMA,
                                           TP.driver_phy.tick_icr() pushes new duties
 ADC DMA done → ADC_READY_Callback()     : range-check phases, feed current / supply / temperature
 SPI DMA done → POSITION_Callback()      : encoder.set_raw_position(), then TP.tick()
@@ -95,6 +122,24 @@ invoke them are defined in `src/bsp/boards/<board>/board.cpp`. `TP.tick()` is th
 pass, gated on `driver_phy.current.is_changed() & driver_phy.supply.is_changed()` — the bitwise `&`
 is deliberate so both freshness flags are cleared every pass. A `std::atomic<bool> is_running`
 re-entrancy guard drops a sample rather than letting an ISR reenter a running pass.
+
+**Timing is part of the design.** The pass runs on the encoder frame's completion and the duty it
+computes is latched at the next CH4 match, so the pass MUST end before that match every time: a pass
+end that wanders across the period boundary makes the loop delay jitter between one and two periods
+and destabilises the current loop (it showed as overcurrent trips on long profiled moves). Three
+things keep it deterministic: the encoder SPI runs at 10.6 MHz (`spi_setup.h`, frame ≈ 5 µs, so
+the pass starts ~15 µs into the 50 µs period and ends ~30 µs in); the ADC is triggered by the timer,
+not by software in an interrupt (`adc_setup.h`, incl. `ADC_CCR_DMACFG` — in dual mode the DMA
+circular/one-shot choice lives in the COMMON register); and the interrupt priorities put every
+control interrupt above USB: COMP 0, TIM1_CC 0, ADC DMA 1, control pass (SPI DMA) 2, USB 4 (moved
+in `run.h`; the core installs it at 1), FDCAN 7. `interrupt_setup.h` keeps `PASS_OFFSET_LAST`,
+`PASS_CYCLES_LAST/MAX` and `PASS_LATE` (passes that ended after the next match; must stay at the
+boot-time value) — read them through direct register access by symbol address when a build changes
+the pass.
+
+**Black box.** `cln17_v3_dev` compiles a `FlightRecorder` (`src/lib/flight_recorder.h`,
+`-D TP_TRACE_DEPTH=512`, 12 KiB RAM) that keeps the last 512 passes and freezes after a fault;
+`tools/tpcp_host.py trace <node>` dumps it (register `0x44`). Use it before theorising about a trip.
 
 ### `TunePulseHeart` (`src/lib/lib.h`)
 
@@ -112,6 +157,13 @@ address is injected into the calibrator's constructor.
 - `Success` → run calibration sweep if not yet calibrated, else hand the pass to `drive`
   (`DriveControl`), which resolves the control mode, the queued trajectory and the master watchdog
   into one action plus its targets; `tick()` only translates that action to the physical layer
+- **Sign conventions.** Positions are encoder units (`real_pos = -raw`, fixed). The FOC frame is
+  physics: the sweep table plus the detected direction give the rotor angle, and a positive q
+  current always advances the rotor in the sense that angle grows. Which way the encoder counts
+  for that is the sweep's `direction`, so the loop's current command is multiplied by
+  `torque_sign()` (= direction) at the closed-loop dispatch and nowhere else. Never fold a sign
+  into the angle table or the calibrator: a 180° angle error looks like a stable loop on one
+  motor and a runaway on the next.
 - `NotCalibrated` → short all phases (`INFINITY` sentinel) until current-sense offsets are known
 - `CalibError` → zero current target
 - default → release the bridge / Hi-Z freewheel (`NAN` sentinel), return early
@@ -155,9 +207,10 @@ flash must run inside this window, or the rotor gets yanked against a frozen vec
   - `motor_control/` — motor params, angle calibration + table, current control (`foc-current.h`, HFI),
     `drive_control.h` (control-mode machine + command mailbox + trajectory front end)
   - `math/` — `filters/` (EMA, median3, PLL), `motion/` (S-curve, Hermite, executor, governor,
-    observer), `helpers/`, `trigonometry.h`
+    observer), `helpers/`, `trigonometry.h`, `crc.h` (CRC-8/16/32, software + optional hardware
+    stream)
 - `src/bsp/` — board support, split three ways by what a thing actually depends on:
-  - `stm32g4/` — peripheral drivers shared by every board on this MCU family: `cordic.h`,
+  - `stm32g4/` — peripheral drivers shared by every board on this MCU family: `cordic.h`, `crc.h`,
     `tim1_pwm.h`, `bootloader.h`, `nvm_flash.h`, `comp_dac.h`, `fdcan.h`. They take their
     board-dependent values from the active board's `target.h`, which the per-environment include
     path resolves, so none of them branches on a board name.
@@ -181,20 +234,34 @@ flash must run inside this window, or the rotor gets yanked against a frozen vec
 - `src/bsp/boards/<board>/tunepulse.h` — board integration: declares `TP`, registers
   LED/fault/limit callbacks, `tunepulse_init()` bring-up sequence
 - `src/api/` — TunePulse CAN Protocol (TPCP) v1, header-only, wired into the build via `main.cpp`
-  - `tp_wire.h` / `tp_chunks.h` — identifier map, opcodes, error codes, fixed-point codecs and the
-    8-byte frame layouts. Hardware-independent: a host tool includes just these two.
-  - `tp_registers.h` — 70-entry typed register map (binary searched, so it MUST stay sorted by id;
-    `TpProtocol::begin()` logs a warning at boot if it is not) plus config → hardware application
-  - `tp_node.h` — 56-bit UID, persistent node configuration record, UID discovery state machine
-  - `tp_engine.h` — dispatch, cyclic telemetry, emergency frames, watchdog, persistence
-  - `tp_can.h` — binds the engine to FDCAN1; owns the config-partition `FlashEEPROM`
-  - `CAN_PROTOCOL.md` — the specification (identifier map, opcodes, registers, worked examples)
-- `old/` — pre-refactor sources kept for reference, excluded from the build
+  - `tp_wire.h` / `tp_chunks.h` — identifier map, the CMD byte (register address + group bits),
+    error codes, fixed-point codecs and the 8-byte register layouts. Hardware-independent: a host
+    tool includes just these two.
+  - `tp_registers.h` — the register map (`TP_REGISTERS`: access rules and sub-space sizes, binary
+    searched so it MUST stay sorted by CMD; `TpProtocol::begin()` logs a warning at boot if it is
+    not) plus config → hardware application. The packing / applying of each register lives in the
+    engine (`engine/tp_engine_regread_impl.h`, `tp_engine_regwrite_impl.h`).
+  - `tp_node.h` — 48-bit HashUID, persistent node configuration record (256 B, versioned), the
+    binary HashUID search
+  - `tp_engine.h` — dispatch by CMD group, batch / range reads, motion-task assembly, the burst
+    stream, PulseBeat and telemetry slots, emergency frames, watchdog, persistence, MIDI
+  - `tp_can.h` — binds the engine to FDCAN1; owns the config-partition `FlashEEPROM`; multiplexes
+    CAN with the two USB transports and, once a USB host is heard, gateways USB↔CAN so one
+    cable reaches every node on the bus (arms on the first USB protocol frame, latched until reset)
+  - `CAN_PROTOCOL.md` — the specification (identifier map, CMD groups, every register, worked
+    examples). Every place the `api_final.md` design left a gap is marked **[decision]** there.
 
-`suggestions.md` tracks known gaps. The `math/motion/` stack and the runtime control-mode switch are
-now wired in through `DriveControl`; `src/api/CAN_PROTOCOL.md` §9 lists what the protocol
-deliberately does not implement yet (calibration abort, full-calibration sequencing, absolute
-S-curve targets, firmware update over CAN).
+  Protocol facts that are easy to get wrong: node 0 is the **broadcast** and 255 the
+  **unassigned** address (an unaddressed node listens on 0x3FF); a write is the read CMD with bit 7
+  set and is answered with the read form; torque fields are N·m only once Kt is known, amperes
+  otherwise; the frame kind selects the control mode (lone position task → POSITION, burst →
+  MOTION); discovery replies echo the matched prefix so competing nodes never collide in the data
+  field.
+
+The `math/motion/` stack and the runtime control-mode switch are
+now wired in through `DriveControl`; `src/api/CAN_PROTOCOL.md` §10 lists what the protocol
+deliberately does not implement yet (homing, step/direction, flux and mechanical calibration,
+writing the calibration table, the stored-but-unenforced protection fields).
 
 ### Adding or changing board code
 
@@ -228,7 +295,10 @@ Use the macros from `src/lib/dev_log.h` — `TP_LOG`, `TP_LOG_VAL`, `TP_LOG_ARRA
 never bare `SerialUSB.print` in ISR-reachable code. `USBSerial::write()` spins on host back-pressure;
 called from the 20 kHz control ISR with the motor energized it latches the last voltage vector on the
 bridge. The macros check free TX room first and drop output instead of blocking. They compile to
-nothing when `DEV_LOG_ENABLE` is undefined.
+nothing when `DEV_LOG_ENABLE` is undefined, which is the case in `cln17_v3_release`; build
+`cln17_v3_dev` to get the console. Console code that cannot go through the macros (the `run.h`
+banner and heartbeat, the board's `irq_log()`) must sit inside `#ifdef DEV_LOG_ENABLE`, because
+`tp_log_room()` only exists when logging is compiled in.
 
 ## Code Style
 

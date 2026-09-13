@@ -57,8 +57,10 @@ extern TunePulseHeart TP;
 #include "bsp/stm32g4/fdcan.h"        // CAN-FD driver + chunk API (CAN_BUS)
 #include "bsp/stm32g4/comp_dac.h"       // Comparator (hardware OC/OV) protection
 #include "bsp/stm32g4/cordic.h"     // CORDIC hardware trigonometry accelerator
+#include "bsp/stm32g4/crc.h"        // CRC unit backend of lib/math/crc.h (active with TP_CRC_HW)
 #include "bsp/stm32g4/nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
 #include "bsp/stm32g4/tim1_pwm.h"  // TIM1 complementary PWM backend
+#include "lib/dev_log.h"      // TP_LOG*: bring-up messages exist only in DEV_LOG_ENABLE builds
 
 /**
  * @brief LED apply callback for the CLN17-v3 tricolor element.
@@ -303,6 +305,15 @@ inline void tunepulse_init() {
         .op_cb(PWM_Set_All_HiZ).phase_cb(PWM_Set_All_HiZ);  // Software overpower: Hi-Z safe state on power/current limit violation
     TP.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
 
+    // The encoder's fault action RESTORES, it does not protect: on the rising
+    // edge of the encoder fault flag the board resets the sensor bus
+    // (Encoder_FaultAction). What the bridge does while the feedback is lost
+    // is the control loop's decision (lib.h releases the phases and refuses
+    // closed loop; a sensorless fallback or a second encoder could take over
+    // there), which is why the encoder is not a driver fault source and no
+    // PWM safe state is wired here.
+    TP.encoder.set_callback().fault_cb(Encoder_FaultAction);
+
     delay(100);
 
     // Current-sense offset calibration:
@@ -310,7 +321,7 @@ inline void tunepulse_init() {
     // end_curnt_cal() ties them to GND (all low-side ON); in both states the
     // differential voltage is zero, so the ADC captures amplifier offsets only.
     TP.driver_phy.current.calibrate();
-    SerialUSB.println("Start current calibration");
+    TP_LOG("Start current calibration");
 
     // Bounded wait for completion. Completion is signalled from the ADC
     // interrupt; if no interrupt ever advances the state machine the drive is
@@ -321,13 +332,13 @@ inline void tunepulse_init() {
     while (TP.driver_phy.current.is_calibrated() == false) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
         if ((millis() - isense_t0) > TP_CURRENT_CAL_TIMEOUT_MS) {
-            SerialUSB.println("Current sensing calibration TIMED OUT - continuing de-energized");
+            TP_LOG("Current sensing calibration TIMED OUT - continuing de-energized");
             break;
         }
     }
 
     if (TP.driver_phy.current.is_calibrated()) {
-        SerialUSB.println("Current sensing setup complete");
+        TP_LOG("Current sensing setup complete");
     }
 
     // Motor (electrical-angle) calibration:
@@ -343,14 +354,14 @@ inline void tunepulse_init() {
     while (TP.current_driver.get_motor_status() != MotorStatus::Success) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
         if (TP.current_driver.get_motor_status() == MotorStatus::CalibError) {
-            SerialUSB.println("Motor calibration Error");
+            TP_LOG("Motor calibration Error");
             break;
         }
         if ((millis() - motor_t0) > TP_MOTOR_CAL_TIMEOUT_MS) {
             // Same reasoning as the current-sense wait: a drive that cannot
             // identify its motor (none connected, open phase, dead encoder) is
             // far more useful reporting that over the protocol than hanging.
-            SerialUSB.println("Motor calibration TIMED OUT - continuing de-energized");
+            TP_LOG("Motor calibration TIMED OUT - continuing de-energized");
             break;
         }
     }

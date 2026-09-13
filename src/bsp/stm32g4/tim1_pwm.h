@@ -53,7 +53,11 @@ inline void MX_TIM1_Init(void) {         // Define an inline function for bare-m
 
     // FIX: TIM_CR1_CMS_1 corresponds to Center-Aligned Mode 2 (Interrupt flags set on counting up)
     TIM1->CR1 = TIM_CR1_CMS_1 | TIM_CR1_ARPE;  // Set Center-aligned mode 2 and enable Auto-Reload Preload
-    TIM1->CR2 = 0;                 // Clear CR2 to keep default states (no master mode TRGO needed if CH4 is used directly)
+    // TRGO2 = OC4REF (MMS2 = 0111): the ADC's hardware trigger. OC4REF falls
+    // at the up-count CCR4 match, ADC_DELAY_TICKS before the counter peak,
+    // and the ADC converts on that falling edge (adc_setup.h) - the sample
+    // point is fixed by the timer, not by interrupt latency.
+    TIM1->CR2 = (7U << TIM_CR2_MMS2_Pos);
     TIM1->PSC = 0;                 // Set prescaler to 0 to run the timer at the absolute maximum 170MHz frequency
     TIM1->ARR = PWM_TIMER_PERIOD;  // Write the carrier period directly to the Auto-Reload Register
 

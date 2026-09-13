@@ -68,6 +68,10 @@ static uint16_t line_len = 0;
 inline void run_setup() {
     SerialUSB.begin();  // USB CDC console (baud ignored by CDC); main.cpp no
                         // longer does this - see the note on setup() there.
+    // The USB stack installs its interrupts at priority 1, above the control
+    // pass; a background service must not preempt the loop (see CLN17 V3).
+    NVIC_SetPriority(USB_HP_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
+    NVIC_SetPriority(USB_LP_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
     BOOT::init_button();  // SW1 (PC14) -> 3 s hold enters the USB DFU bootloader
 
     // Power-rail / USB stack stabilization; SW1 is polled meanwhile, so

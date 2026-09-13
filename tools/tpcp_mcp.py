@@ -3,9 +3,9 @@
 
 This exposes the same drive that tools/tpcp_host.py drives from a shell, but
 as a set of MCP tools an assistant can call directly: connect, read status,
-read and write registers, select a control mode, move the shaft, stream a
-profiled trajectory, calibrate, persist, and play a MIDI file through the
-motor coils.
+read and write registers (by name and field), select a control mode, move the
+shaft, stream a profiled trajectory, calibrate, persist, and play a MIDI file
+through the motor coils - all over TPCP v1 as specified in src/api/CAN_PROTOCOL.md.
 
 Why a second front end rather than shelling out to tpcp_host.py
 ---------------------------------------------------------------
@@ -438,9 +438,10 @@ class Drive:
         with self.lock:
             return self.ensure().request(node, payload, timeout)
 
-    def chunk(self, node, key, timeout=0.5):
-        """Request one status chunk by opcode name and decode it."""
-        reply = self.request(node, bytes([tp.OP[key], 0, 0, 0, 0, 0, 0, 0]), timeout)
+    def chunk(self, node, key, timeout=0.5, selector=None):
+        """Read one register by name (or 'group:record') and decode it."""
+        reg = tp.REGISTERS[key]
+        reply = self.request(node, reg.request(selector), timeout)
         if reply is None:
             return None
         return decode_frame(reply)
@@ -449,157 +450,120 @@ class Drive:
         """Send a request that answers ACK or NACK and report which.
 
         The NACK layout is the one place this protocol is easy to misread: byte
-        1 echoes the opcode that was rejected and the error code is in byte 2.
+        1 echoes the CMD that was rejected and the error code is in byte 2.
         Reading byte 1 as the error turns every rejection into a nonsense
         diagnosis, so it is decoded once, here.
         """
         reply = self.request(node, payload, timeout)
         if reply is None:
             return {"ok": False, "command": what, "error": "no response",
-                    "hint": "the drive did not answer - check the node address and the link"}
-        if reply[0] == tp.OP["nack"]:
+                    "hint": "the drive did not answer - check the node address and the link, "
+                            "and remember accepted setpoints are silent in comm mode 1"}
+        if reply[0] == tp.CMD["nack"]:
             return {"ok": False, "command": what,
-                    "rejected": tp.OP_NAME.get(reply[1], f"0x{reply[1]:02X}"),
+                    "rejected": tp.CMD_NAME.get(reply[1], f"0x{reply[1]:02X}"),
                     "error": tp.ERRORS.get(reply[2], f"0x{reply[2]:02X}"),
                     "detail": reply[3]}
-        return {"ok": True, "command": what, "detail": reply[3] if reply[0] == tp.OP["ack"] else None,
+        return {"ok": True, "command": what, "detail": reply[3] if reply[0] == tp.CMD["ack"] else None,
                 "reply": decode_frame(reply)}
+
+    def fire(self, node, payload, what):
+        """Send a setpoint that is silent when accepted (comm mode 1) and report a NACK if one comes."""
+        reply = self.request(node, payload, timeout=0.05)
+        if reply is not None and reply[0] == tp.CMD["nack"]:
+            return {"ok": False, "command": what,
+                    "rejected": tp.CMD_NAME.get(reply[1], f"0x{reply[1]:02X}"),
+                    "error": tp.ERRORS.get(reply[2], f"0x{reply[2]:02X}"), "detail": reply[3]}
+        return {"ok": True, "command": what, "reply": decode_frame(reply) if reply else None}
 
 
 DRIVE = Drive()
 
 
+
 # ============================================================================
-# Structured chunk decoding
+# Structured frame decoding
 # ============================================================================
 #
-# tpcp_host.decode_chunk renders a chunk as a line of text for a human. A model
-# needs the fields themselves, so each layout is decoded once more into a dict.
-# The text form is carried alongside because it is compact and unambiguous, and
-# because it is what the CLI prints - the two views of one frame always agree.
-
-MOTOR_TYPES = {0: "none", 1: "stepper", 2: "bldc", 3: "error"}
-PHASE_PATTERNS = {0: "none", 1: "ABC", 2: "CAB", 3: "ACB"}
-
-# Calibration stage names, from MotorStatus in the firmware. Stage and progress
-# describe the ELECTRICAL identification machine only: during an angle sweep
-# they keep reporting whatever the last electrical run left behind, so an angle
-# sweep has to be followed through the flag bits instead.
-CALIB_STAGES = {0: "success", 1: "not-calibrated", 2: "calibrating", 3: "hardware-error",
-                4: "motor-error", 5: "config-error", 6: "calibration-error"}
-CALIB_FLAGS = {0x01: "calibrated", 0x02: "settling", 0x04: "persisting", 0x08: "failed"}
-
-
-def _bf16(d, off):
-    """Read a bfloat16 field."""
-    return tp.bf16_to_float(struct.unpack("<H", d[off:off + 2])[0])
+# tpcp_host.decode_frame renders a frame as a line of text for a human. A model
+# needs the fields themselves, so the register model decodes them into a dict
+# and the text form travels alongside - the two views of one frame always agree.
 
 
 def decode_frame(d):
-    """Decode one eight-byte frame into {"chunk", "text", ...fields}."""
+    """Decode one eight-byte frame into {"register", "text", ...fields}."""
     d = bytes(d).ljust(8, b"\x00")
-    op = d[0]
-    out = {"chunk": tp.OP_NAME.get(op, f"0x{op:02X}"), "text": tp.decode_chunk(d),
-           "raw": d.hex(" ")}
-
-    if op & 0x80:                                    # Bit-packed motion burst
-        out.update(chunk="burst",
-                   displacement_rev=tp.signext(((d[0] & 0x3F) << 16) | (d[1] << 8) | d[2], 22) / 65536.0,
-                   velocity_rps=tp.f24_to_float((d[3] << 16) | (d[4] << 8) | d[5]),
-                   tail=(d[6] << 8) | d[7])
+    cmd = d[0]
+    out = {"text": tp.decode_frame(d), "raw": d.hex(" ")}
+    if cmd >= 0xE0:
+        out["register"] = "burst"
         return out
-
-    if op == tp.OP["device_info"]:
-        fw = struct.unpack("<H", d[2:4])[0]
-        out.update(hw_version=d[1], firmware=f"{fw >> 8}.{fw & 0xFF}",
-                   device_code=f"0x{struct.unpack('<I', d[4:8])[0]:08X}")
-    elif op == tp.OP["device_uid"]:
-        out.update(uid=d[1:8].hex())
-    elif op == tp.OP["device_status"]:
-        st = struct.unpack("<I", d[4:8])[0]
-        out.update(uptime_s=int.from_bytes(d[1:4], "little"),
-                   faults=_bits(st & 0xFF, tp.FAULT_BITS),
-                   warnings=_bits((st >> 8) & 0xFF, tp.WARN_BITS),
-                   state=tp.STATES[(st >> 16) & 0xF],
-                   mode=tp.MODES[min((st >> 20) & 0xF, len(tp.MODES) - 1)])
-    elif op == tp.OP["motor_status"]:
-        fl = struct.unpack("<I", d[4:8])[0]
-        out.update(mode=tp.MODES[min(d[1] & 0xF, len(tp.MODES) - 1)],
-                   motor_type=MOTOR_TYPES[(d[1] >> 4) & 3],
-                   phase_pattern=PHASE_PATTERNS[(d[1] >> 6) & 3],
-                   pole_pairs=d[2], temperature_c=d[3],
-                   direction="CCW" if fl & 1 else "CW",
-                   enabled=bool(fl & 2), calibrated=bool(fl & 4))
-    elif op == tp.OP["electric_status"]:
-        out.update(efficiency_pct=None if d[1] == 255 else d[1] * 100 // 254,
-                   power_w=_bf16(d, 2), supply_v=_bf16(d, 4), current_q_a=_bf16(d, 6))
-    elif op == tp.OP["motion1"]:
-        out.update(mode=d[1], position_rev=tp.i48_to_rev(d[2:8]))
-    elif op == tp.OP["motion2"]:
-        out.update(velocity_rps=tp.f24_to_float(d[1] | (d[2] << 8) | (d[3] << 16)),
-                   accel_rps2=_bf16(d, 4), current_q_a=_bf16(d, 6))
-    elif op == tp.OP["motion3"]:
-        qs = struct.unpack("<H", d[6:8])[0]
-        out.update(position_error_rev=tp.i24_to_rev(d[1:4]), velocity_error_rps=_bf16(d, 4),
-                   queued=qs & 0xF, time_scale=tp.signext(qs >> 4, 12) / 256.0)
-    elif op == tp.OP["motor_props"]:
-        out.update(temp_limit_c=d[1], resistance_ohm=_bf16(d, 2),
-                   inductance_uh=_bf16(d, 4) * 1e6, torque_constant_nm_a=_bf16(d, 6))
-    elif op == tp.OP["encoder"]:
-        out.update(health=f"0x{d[1]:02X}", angle=struct.unpack("<H", d[2:4])[0],
-                   turns=struct.unpack("<i", d[4:8])[0])
-    elif op == tp.OP["driver_status"]:
-        out.update(state=tp.STATES[d[1] & 0xF], mode=tp.MODES[min(d[1] >> 4, len(tp.MODES) - 1)],
-                   faults=_bits(d[2], tp.FAULT_BITS), warnings=_bits(d[3], tp.WARN_BITS),
-                   op_status=d[4], motor_status=d[5])
-    elif op == tp.OP["calib_status"]:
-        flags = d[4]
-        out.update(kind=d[1], kind_name={0: "current-offset", 1: "electrical", 2: "angle"}.get(d[1], "idle" if d[1] == 0xFF else str(d[1])),
-                   stage=d[2], stage_name=CALIB_STAGES.get(d[2], f"stage {d[2]}"),
-                   progress_pct=d[3] * 100 // 255, flags=f"0x{flags:02X}",
-                   calibrated=bool(flags & 0x01), settling=bool(flags & 0x02),
-                   persisting=bool(flags & 0x04),
-                   failed=bool(flags & 0x08) or d[2] == 6,
-                   cal_id=d[5], pole_pairs=struct.unpack("<H", d[6:8])[0],
-                   note="stage/progress track the ELECTRICAL identification only; an angle "
-                        "sweep is in progress while calibrated=false or settling/persisting")
-    elif op == tp.OP["comm_status"]:
-        out.update(bus_state=f"0x{d[1]:02X}", tx_errors=d[2], rx_errors=d[3],
-                   dropped=struct.unpack("<H", d[4:6])[0],
-                   nacks=struct.unpack("<H", d[6:8])[0])
-    elif op == tp.OP["power_status"]:
-        out.update(load_pct=struct.unpack("b", d[1:2])[0], bus_current_a=_bf16(d, 2),
-                   bus_power_w=_bf16(d, 4), thermal_headroom_c=d[6])
-    elif op == tp.OP["heartbeat"]:
-        out.update(state=tp.STATES[d[1] & 0xF], mode=tp.MODES[min(d[1] >> 4, len(tp.MODES) - 1)],
-                   faults=_bits(d[2], tp.FAULT_BITS), warnings=_bits(d[3], tp.WARN_BITS),
-                   supply_v=d[4] * 0.25, temperature_c=struct.unpack("b", d[5:6])[0],
-                   load_pct=struct.unpack("b", d[6:7])[0],
-                   seq=d[7] & 0xF, queued=d[7] >> 4)
-    elif op == tp.OP["queue_stat"]:
-        out.update(state=f"0x{d[1]:02X}", queued=d[2], free=d[3],
-                   time_scale=struct.unpack("<h", d[4:6])[0] / 1024.0,
-                   dropped=struct.unpack("<H", d[6:8])[0])
-    elif op == tp.OP["param_status"]:
-        out.update(state=f"0x{d[1]:02X}", config_version=d[2], cal_id=d[3],
-                   config_free_bytes=struct.unpack("<H", d[4:6])[0])
-    elif op == tp.OP["calib_result"]:
-        out.update(flags=f"0x{d[1]:02X}", resistance_ohm=_bf16(d, 2),
-                   inductance_d_uh=_bf16(d, 4) * 1e6, inductance_q_uh=_bf16(d, 6) * 1e6)
-    elif op in (tp.OP["reg_read"], tp.OP["reg_write"], tp.OP["reg_info"]):
-        rid = struct.unpack("<H", d[2:4])[0]
-        rname, _ = tp.REG_BY_ID.get(rid, (f"0x{rid:04X}", "u32"))
-        rtype = tp.TYPE_NAMES[d[1]] if d[1] < len(tp.TYPE_NAMES) else "u32"
-        out.update(register=rname, id=f"0x{rid:04X}", type=rtype,
-                   value=tp.decode_reg(rtype, struct.unpack("<I", d[4:8])[0]))
-    elif op == tp.OP["node_id"]:
-        out.update(node=d[1], flags=f"0x{d[2]:02X}", state=f"0x{d[3]:02X}")
-    elif op == tp.OP["ack"]:
-        out.update(acked=tp.OP_NAME.get(d[1], f"0x{d[1]:02X}"), detail=d[3])
-    elif op == tp.OP["nack"]:
-        out.update(rejected=tp.OP_NAME.get(d[1], f"0x{d[1]:02X}"),
+    if 0x70 <= cmd <= 0x7F:
+        qts = d[1] | (d[2] << 8)
+        wme = d[4] | (d[5] << 8)
+        out.update(register="pulsebeat", seq=cmd & 0xF, queued=qts & 0xF,
+                   time_scale=tp.signext(qts >> 4, 12) / 256.0, state=tp.STATES[d[3] & 0xF],
+                   fault_group=tp.FAULT_GROUPS.get(d[3] >> 4, d[3] >> 4), warn_group=wme & 0xF,
+                   mode=tp.MODES[min((wme >> 4) & 0x3F, 5)], error=tp.signext(wme >> 10, 6) / 16.0,
+                   load=tp.signext(d[6], 8), io=d[7])
+        return out
+    if cmd == tp.CMD["ack"]:
+        out.update(register="ack", acked=tp.CMD_NAME.get(d[1], f"0x{d[1]:02X}"), detail=d[3])
+        return out
+    if cmd == tp.CMD["nack"]:
+        out.update(register="nack", rejected=tp.CMD_NAME.get(d[1], f"0x{d[1]:02X}"),
                    error=tp.ERRORS.get(d[2], f"0x{d[2]:02X}"), detail=d[3])
+        return out
+    found = tp.register_for_frame(d)
+    if found is None:
+        out["register"] = f"0x{cmd:02X}"
+        return out
+    key, reg = found
+    vals = reg.decode(d)
+    for k, v in list(vals.items()):
+        if isinstance(v, float) and v != v:
+            vals[k] = None                                   # NaN: not available
+    out["register"] = key
+    out.update(vals)
+    if key == "system_status":
+        w = vals["fault_word"]
+        out.update(faults=_bits(w & 0xFF, tp.FAULT_BITS), warnings=_bits((w >> 8) & 0xFF, tp.WARN_BITS),
+                   state=tp.STATES[(w >> 16) & 0xF], mode=tp.MODES[min((w >> 20) & 0xF, 5)])
+    elif key == "driver_status":
+        out.update(faults=_bits(vals["fault"], tp.FAULT_BITS), warnings=_bits(vals["warn"], tp.WARN_BITS))
+    elif key == "motor_status":
+        out.update(state_name=tp.STATES[vals["state"]], mode_name=tp.MODES[min(vals["mode"], 5)],
+                   type_name={0: "none", 1: "stepper", 2: "bldc", 3: "error"}[vals["type"]])
+    elif key == "motion_status_1":
+        out["time_scale"] = vals["time_scale"] / 256.0
+    elif key == "diag:calibration":
+        fl = vals["flags"]
+        out.update(calibrated=bool(fl & 1), settling=bool(fl & 2), persisting=bool(fl & 4),
+                   failed=bool(fl & 8), identified=bool(fl & 16), profile_loaded=bool(fl & 32),
+                   running_names=[n for n, b in tp.CAL_BITS.items()
+                                  if n in ("encoder", "offset", "phase", "resistance", "inductance") and vals["running"] & b],
+                   stage_name=(SWEEP_STAGES.get(vals["stage"] & 0x7F, f"sweep stage {vals['stage'] & 0x7F}")
+                               if vals["stage"] & 0x80 else
+                               CALIB_STAGES.get(vals["stage"], f"stage {vals['stage']}")))
+    elif key in ("discovery_assign", "discovery_search"):
+        for k in ("uid", "prefix"):
+            if k in out:
+                out[k] = f"{out[k]:012X}"
+    elif key == "system_control":
+        out.update(enabled=vals["enable"] == tp.SYS_ENABLE,
+                   calibration_valid=[n for n, b in tp.CAL_BITS.items()
+                                      if n in ("encoder", "offset", "phase", "resistance", "inductance") and vals["calibration"] & b])
     return out
+
+
+CALIB_STAGES = {0: "success", 1: "soft-warmup", 2: "settle", 3: "slow-rotation", 4: "resistance",
+                5: "inductance", 6: "calibration-error", 7: "electrical-done", 8: "hfi-warmup",
+                9: "hfi-d", 10: "hfi-q", 11: "hfi-d2", 12: "hfi-q2"}
+
+# Angle-sweep CalStage values (bit 7 of the stage byte set), matching angle_calibrator.h.
+SWEEP_STAGES = {0: "sweep-idle", 1: "sweep-setup", 2: "direction-test", 3: "forward-pass",
+                4: "reverse-pass", 5: "checking-table", 6: "table-ready", 7: "sweep-error",
+                8: "reading-stored-table", 9: "storing-table"}
 
 
 def _bits(value, names):
@@ -620,101 +584,92 @@ NODE_ARG = {"type": "integer", "minimum": 0, "maximum": 255,
       "falling back to auto-detecting the CDC console. Safe: it only reads. Calling it again "
       "reconnects. Other tools connect automatically, so this is only needed to pin a transport, "
       "a port or the default node.",
-      {"interface": {"type": "string",
-                     "enum": ["auto", "hid", "serial", "slcan", "pcan", "socketcan"],
-                     "description": "Transport. 'auto' (default) picks HID when the board exposes "
-                                    "it, otherwise the console."},
-       "channel": {"type": "string",
-                   "description": "Serial device or adapter channel. Omit to auto-detect."},
+      {"interface": {"type": "string", "enum": ["auto", "hid", "serial", "slcan", "pcan", "socketcan"],
+                     "description": "Transport. 'auto' (default) picks HID when the board exposes it."},
+       "channel": {"type": "string", "description": "Serial device or adapter channel. Omit to auto-detect."},
        "node": NODE_ARG},
       mutating=False)
 def t_connect(interface="auto", channel=None, node=None):
     detail = DRIVE.open(interface, channel, node)
     info = DRIVE.chunk(DRIVE.node, "device_info")
-    status = DRIVE.chunk(DRIVE.node, "device_status")
+    status = DRIVE.chunk(DRIVE.node, "system_status")
     out = {"connected": True, "interface": DRIVE.interface, "channel": DRIVE.channel,
            "default_node": DRIVE.node, "device": info, "status": status}
     out.update(detail)
     if info is None:
-        out["warning"] = (f"the link is open but node {DRIVE.node} did not answer. Run 'scan' if "
-                          f"the drive is unaddressed, or set a different node.")
+        out["warning"] = (f"the link is open but node {DRIVE.node} did not answer. Run 'scan' if the "
+                          f"drive is unaddressed (it reports node 255), or set a different node.")
     return out
 
 
 @tool("disconnect",
       "Close the link and release the USB device. A HID device can only be held by one process, "
-      "so this is what frees it for tpcp_host.py or the desktop app.",
-      mutating=False)
+      "so this is what frees it for tpcp_host.py or the desktop app.", mutating=False)
 def t_disconnect():
     was = DRIVE.interface
     DRIVE.close()
     return {"connected": False, "released": was}
 
 
-@tool("link_status", "Report whether a link is open, over what, and to which default node.",
-      mutating=False)
+@tool("link_status", "Report whether a link is open, over what, and to which default node.", mutating=False)
 def t_link_status():
     if DRIVE.link is None:
-        return {"connected": False,
-                "hint": "any tool will connect on its own; use 'connect' to pin a transport"}
-    counters = {}
-    for name in ("rx_count", "tx_count", "dropped", "errors"):
-        fn = getattr(DRIVE.link, name, None)
-        if callable(fn):
-            counters[name] = fn()
-    out = {"connected": True, "interface": DRIVE.interface, "channel": DRIVE.channel,
-           "default_node": DRIVE.node, "open_for_s": round(time.time() - DRIVE.opened_at, 1),
-           "playing_midi": bool(DRIVE.player and DRIVE.player.is_alive())}
-    if counters:
-        out["transport_counters"] = counters      # Only the CDC transport keeps any
-    return out
+        return {"connected": False, "hint": "any tool will connect on its own; use 'connect' to pin a transport"}
+    return {"connected": True, "interface": DRIVE.interface, "channel": DRIVE.channel,
+            "default_node": DRIVE.node, "open_for_s": round(time.time() - DRIVE.opened_at, 1),
+            "playing_midi": bool(DRIVE.player and DRIVE.player.is_alive())}
 
 
 @tool("scan",
-      "Run a UID discovery sweep and hand out node addresses to unaddressed drives. Needed only "
-      "when a drive reports node 0, which answers network management and nothing else.",
+      "Find unaddressed drives by binary HashUID search and hand out node addresses. Needed only "
+      "when a drive reports node 255, which answers discovery and nothing else.",
       {"first_id": {"type": "integer", "minimum": 1, "maximum": 254, "default": 1},
-       "window": {"type": "number", "default": 0.05,
-                  "description": "Arbitration collection window per UID byte [s]."},
-       "save": {"type": "boolean", "default": False,
-                "description": "Persist each assigned address to flash."}})
-def t_scan(first_id=1, window=0.05, save=False):
-    args = _Args(first_id=first_id, window=window, save=save)
+       "window": {"type": "number", "default": 0.03, "description": "Reply window per probe [s]."},
+       "limit": {"type": "integer", "default": 32}})
+def t_scan(first_id=1, window=0.03, limit=32):
+    args = _Args(first_id=first_id, window=window, limit=limit)
     with DRIVE.lock:
         tp.cmd_scan(DRIVE.ensure(), args)
     return {"ok": True}
+
+
+@tool("ping", "Inventory every addressed node on the link with one broadcast identity read.",
+      {"window": {"type": "number", "default": 0.3}}, mutating=False)
+def t_ping(window=0.3):
+    with DRIVE.lock:
+        link = DRIVE.ensure()
+        link.send(tp.ID_COMMAND + tp.NODE_BROADCAST, bytes([tp.CMD["discovery_assign"]]) + b"\x00" * 7)
+        seen = {}
+        for m in link.drain(window):
+            d = bytes(m.data).ljust(8, b"\x00")
+            if (m.arbitration_id & 0x700) == tp.ID_RESPONSE and d[0] == tp.CMD["discovery_assign"]:
+                seen[f"{int.from_bytes(d[2:8], 'little'):012X}"] = d[1]   # keyed by identity: unassigned drives share 255
+    return {"nodes": [{"node": n, "uid": u} for u, n in sorted(seen.items(), key=lambda kv: (kv[1], kv[0]))]}
 
 
 # ============================================================================
 # Tools: status and registers
 # ============================================================================
 
-# The chunks worth reading on every poll: what the drive is doing, whether it
-# is faulted, where the shaft is, and whether a trajectory is draining.
-DEFAULT_CHUNKS = ["device_status", "motor_status", "electric_status", "motion1",
-                  "motion3", "queue_stat"]
-
-# Everything the drive will report, in the order tpcp_host's `info` asks for it.
-ALL_CHUNKS = ["device_info", "device_uid", "device_status", "motor_status", "electric_status",
-              "motion1", "motion2", "motion3", "motor_props", "encoder", "driver_status",
-              "calib_status", "comm_status", "power_status", "queue_stat", "param_status",
-              "calib_result"]
+DEFAULT_REGISTERS = ["system_status", "motor_status", "driver_status", "motion_status_2",
+                     "motion_status_1", "diag:queue"]
+READ_ONLY_INFO = tp.INFO_REGISTERS
 
 
 @tool("read_status",
-      "Read decoded status chunks from the drive. The default set covers state, faults, mode, "
-      "position, following error and the trajectory queue. Pass chunks=['all'] for everything, "
-      "or name the ones you want. Read-only.",
+      "Read decoded registers from the drive. The default set covers state, faults, mode, position, "
+      "following error and the trajectory queue. Pass registers=['all'] for the whole info set, or "
+      "name the ones you want ('group:record' for sub-spaces). Read-only.",
       {"node": NODE_ARG,
-       "chunks": {"type": "array", "items": {"type": "string"},
-                  "description": "Chunk names, or ['all']. Available: " + ", ".join(ALL_CHUNKS)}},
+       "registers": {"type": "array", "items": {"type": "string"},
+                     "description": "Register names, or ['all']. Available: " + ", ".join(READ_ONLY_INFO)}},
       mutating=False)
-def t_read_status(node=None, chunks=None):
+def t_read_status(node=None, registers=None):
     n = DRIVE.target(node)
-    names = DEFAULT_CHUNKS if not chunks else (ALL_CHUNKS if "all" in chunks else list(chunks))
-    bad = [c for c in names if c not in tp.OP]
+    names = DEFAULT_REGISTERS if not registers else (READ_ONLY_INFO if "all" in registers else list(registers))
+    bad = [c for c in names if c not in tp.REGISTERS]
     if bad:
-        raise McpError(f"unknown chunk(s) {bad}. Available: {', '.join(ALL_CHUNKS)}")
+        raise McpError(f"unknown register(s) {bad}. Available: {', '.join(sorted(tp.REGISTERS))}")
     out = {"node": n}
     for name in names:
         out[name] = DRIVE.chunk(n, name) or {"error": "no response"}
@@ -722,45 +677,42 @@ def t_read_status(node=None, chunks=None):
 
 
 @tool("list_registers",
-      "List the drive's register map: name, id, type and which group it belongs to. Use it to "
-      "find the right name for read_register / write_register. Read-only, no drive access.",
-      {"filter": {"type": "string",
-                  "description": "Substring match on the register name, e.g. 'limit' or 'tone'."}},
+      "List the drive's register map: name, CMD, fields and whether it is writable. Use it to find "
+      "the right names for read_register / write_register. Read-only, no drive access.",
+      {"filter": {"type": "string", "description": "Substring match on the register name."}},
       mutating=False)
-def t_list_registers(filter=None):  # noqa: A002 - the schema name is the useful one
-    groups = {0x00: "device & link", 0x01: "motor", 0x02: "limits & protection",
-              0x03: "control", 0x04: "motion", 0x05: "telemetry (mostly read-only)"}
+def t_list_registers(filter=None):  # noqa: A002
     out = []
-    for name, (rid, rtype) in sorted(tp.REGS.items(), key=lambda kv: kv[1][0]):
+    for name, reg in sorted(tp.REGISTERS.items(), key=lambda kv: (kv[1].cmd, kv[1].sub or 0)):
         if filter and filter.lower() not in name.lower():
             continue
-        out.append({"name": name, "id": f"0x{rid:04X}", "type": rtype,
-                    "group": groups.get(rid >> 8, "other")})
+        out.append({"name": name, "cmd": f"0x{reg.cmd:02X}", "sub": reg.sub, "writable": reg.writable,
+                    "keyed_by": reg.keyed,
+                    "fields": [{"name": f.name, "kind": f.kind, "read_only": f.ro} for f in reg.fields]})
     return {"count": len(out), "registers": out}
 
 
 @tool("read_register",
-      "Read one or more registers by name. Read-only.",
+      "Read one or more registers by name ('group:record' for sub-spaces). A keyed register (the IO "
+      "map) takes its selector in 'selector', e.g. selector=3 for function 3. Read-only.",
       {"node": NODE_ARG,
-       "names": {"type": "array", "items": {"type": "string"},
-                 "description": "Register names. See list_registers."}},
+       "names": {"type": "array", "items": {"type": "string"}},
+       "selector": {"type": "integer", "description": "Record selector for keyed registers."}},
       required=["names"], mutating=False)
-def t_read_register(names, node=None):
+def t_read_register(names, node=None, selector=None):
     n = DRIVE.target(node)
     values, errors = {}, {}
     for name in names:
-        if name not in tp.REGS:
+        if name not in tp.REGISTERS:
             errors[name] = "unknown register"
             continue
-        rid, rtype = tp.REGS[name]
-        payload = bytes([tp.OP["reg_read"], 0]) + struct.pack("<H", rid) + b"\x00" * 4
-        reply = DRIVE.request(n, payload, timeout=0.4)
+        reply = DRIVE.request(n, tp.REGISTERS[name].request(selector), timeout=0.4)
         if reply is None:
             errors[name] = "no response"
-        elif reply[0] == tp.OP["nack"]:
+        elif reply[0] == tp.CMD["nack"]:
             errors[name] = tp.ERRORS.get(reply[2], f"0x{reply[2]:02X}")
         else:
-            values[name] = tp.decode_reg(rtype, struct.unpack("<I", reply[4:8])[0])
+            values[name] = decode_frame(reply)
     out = {"node": n, "values": values}
     if errors:
         out["errors"] = errors
@@ -768,27 +720,31 @@ def t_read_register(names, node=None):
 
 
 @tool("write_register",
-      "Write one register and report the value the drive holds afterwards. Changing a limit or a "
-      "control gain takes effect immediately; it is NOT persisted until you call persist.",
+      "Write fields of one register (read-modify-write, so untouched fields keep their value) and "
+      "report what the drive holds afterwards. Values are in the register's own units; give 'nan' "
+      "to leave a float field alone. Takes effect immediately; NOT persisted until you call persist.",
       {"node": NODE_ARG,
-       "name": {"type": "string", "description": "Register name. See list_registers."},
-       "value": {"type": ["number", "string"],
-                 "description": "Value in the register's own units. Integers accept 0x notation."}},
-      required=["name", "value"])
-def t_write_register(name, value, node=None):
-    if name not in tp.REGS:
+       "name": {"type": "string", "description": "Register name, e.g. motor_props_1 or axis:led."},
+       "fields": {"type": "object", "additionalProperties": {"type": ["number", "string"]},
+                  "description": "field -> value."},
+       "selector": {"type": "integer", "description": "Record selector for keyed registers."}},
+      required=["name", "fields"])
+def t_write_register(name, fields, node=None, selector=None):
+    if name not in tp.REGISTERS:
         raise McpError(f"unknown register '{name}'. Call list_registers to see them all.")
+    reg = tp.REGISTERS[name]
+    if not reg.writable:
+        raise McpError(f"'{name}' is read only")
+    known = {f.name for f in reg.fields}
+    bad = [f for f in fields if f not in known]
+    if bad:
+        raise McpError(f"'{name}' has no field(s) {bad}. Fields: {', '.join(sorted(known))}")
     n = DRIVE.target(node)
-    rid, rtype = tp.REGS[name]
-    # encode_reg parses a command-line string; give it one of the right shape
-    # for the register's type so "1.0" into a u8 does not raise instead of
-    # rounding, and "0x10" into a u8 still works.
-    raw = _encode(rtype, value)
-    payload = bytes([tp.OP["reg_write"], 0]) + struct.pack("<HI", rid, raw)
-    reply = DRIVE.request(n, payload)
+    with DRIVE.lock:
+        reply = tp.write_register(DRIVE.ensure(), n, name, {k: str(v) for k, v in fields.items()}, key=selector)
     if reply is None:
         return {"ok": False, "node": n, "register": name, "error": "no response"}
-    if reply[0] == tp.OP["nack"]:
+    if reply[0] == tp.CMD["nack"]:
         return {"ok": False, "node": n, "register": name,
                 "error": tp.ERRORS.get(reply[2], f"0x{reply[2]:02X}"), "detail": reply[3]}
     return {"ok": True, "node": n, "register": name, "result": decode_frame(reply)}
@@ -799,173 +755,148 @@ def t_write_register(name, value, node=None):
 # ============================================================================
 
 
-def _encode(rtype, value):
-    """Turn a JSON value into the 32-bit payload a register write carries.
-
-    A model has no reason to know that a pole count is an integer and a current
-    limit is a float, and JSON blurs the two anyway - 2 and 2.0 are the same
-    number to it. So an integer register accepts anything that names a whole
-    number, in decimal or 0x form, and only a genuinely fractional value for an
-    integer field is refused. Negative values wrap to two's complement, which is
-    exactly how the signed types are encoded on the wire.
-    """
-    if rtype in ("f32", "q16"):
-        return tp.encode_reg(rtype, str(value))
-    try:
-        return int(str(value), 0) & 0xFFFFFFFF
-    except ValueError:
-        pass
-    number = float(value)
-    if number != int(number):
-        raise McpError(f"a {rtype} register cannot hold {value!r}")
-    return int(number) & 0xFFFFFFFF
-
-
 @tool("set_mode",
-      "Select the control mode, optionally arming the output stage at the same time. "
-      "disabled/torque/velocity/position/motion/tone. Note the trajectory queue only advances in "
-      "motion mode, and a queued move in any other mode simply sits there.",
-      {"node": NODE_ARG,
-       "mode": {"type": "string", "enum": tp.MODES},
-       "enable": {"type": "boolean", "default": False,
-                  "description": "Also energize the output stage."}},
+      "Select the control mode (disabled/torque/velocity/position/motion/tone), optionally arming "
+      "the output stage. Note that setpoint frames select their own mode: move -> position, jog -> "
+      "velocity, torque -> torque, queued segments and bursts -> motion.",
+      {"node": NODE_ARG, "mode": {"type": "string", "enum": tp.MODES},
+       "enable": {"type": "boolean", "default": False}},
       required=["mode"])
 def t_set_mode(mode, node=None, enable=False):
     if mode not in tp.MODES:
         raise McpError(f"unknown mode '{mode}'. One of: {', '.join(tp.MODES)}")
     n = DRIVE.target(node)
-    payload = bytes([tp.OP["control_mode"], tp.MODES.index(mode), 1 if enable else 0, 0, 0, 0, 0, 0])
-    return DRIVE.command(n, payload, f"mode {mode}{' +enable' if enable else ''}")
+    with DRIVE.lock:
+        ok = tp.write_fields(DRIVE.ensure(), n, "motor_props_1", mode=tp.MODES.index(mode))
+    out = {"ok": ok, "node": n, "mode": mode}
+    if ok and enable:
+        with DRIVE.lock:
+            reply = tp.system_control(DRIVE.ensure(), n, enable=tp.SYS_ENABLE)
+        out["enable"] = decode_frame(reply) if reply else "no response"
+        out["ok"] = reply is not None and reply[0] != tp.CMD["nack"]
+    return out
 
 
 @tool("enable",
-      "Arm or disarm the output stage without changing the control mode. Disarming freewheels: "
-      "the bridge goes high-impedance and the shaft is free.",
-      {"node": NODE_ARG, "on": {"type": "boolean"}},
-      required=["on"])
+      "Arm or disarm the output stage without changing the control mode. Disarming freewheels.",
+      {"node": NODE_ARG, "on": {"type": "boolean"}}, required=["on"])
 def t_enable(on, node=None):
     n = DRIVE.target(node)
-    return DRIVE.command(n, bytes([tp.OP["sys_enable"], 1 if on else 0, 0, 0, 0, 0, 0, 0]),
-                         "enable on" if on else "enable off")
+    with DRIVE.lock:
+        reply = tp.system_control(DRIVE.ensure(), n, enable=tp.SYS_ENABLE if on else tp.SYS_DISABLE)
+    if reply is None:
+        return {"ok": False, "node": n, "error": "no response"}
+    return {"ok": reply[0] != tp.CMD["nack"], "node": n, "result": decode_frame(reply)}
 
 
 @tool("stop",
-      "Stop the motor with a chosen end state. hold keeps position, freewheel releases the bridge, "
-      "brake shorts the windings, quick decelerates at the limit.",
-      {"node": NODE_ARG,
-       "style": {"type": "string", "enum": ["hold", "freewheel", "brake", "quick"],
-                 "default": "hold"}})
+      "Stop the motor: hold keeps position, freewheel releases the bridge, brake shorts the windings, "
+      "reset clears the trajectory queue and holds.",
+      {"node": NODE_ARG, "style": {"type": "string", "enum": ["hold", "freewheel", "brake", "reset"], "default": "hold"}})
 def t_stop(node=None, style="hold"):
     n = DRIVE.target(node)
-    code = {"hold": 0, "freewheel": 1, "brake": 2, "quick": 3}[style]
-    return DRIVE.command(n, bytes([tp.OP["stop"], code, 0, 0, 0, 0, 0, 0]), f"stop {style}")
+    return DRIVE.fire(n, tp.mt1(0, tp.MT_MODES[style]), f"stop {style}")
 
 
-@tool("estop",
-      "Broadcast an emergency stop to every node on the link. Use this first if anything is "
+@tool("estop", "Broadcast freewheel + disable to every node on the link. Use this first if anything is "
       "moving that should not be.")
 def t_estop():
     with DRIVE.lock:
-        DRIVE.ensure().send(tp.NMT_GLOBAL_CONTROL, b"\x00" * 8)
+        link = DRIVE.ensure()
+        link.send(tp.ID_COMMAND + tp.NODE_BROADCAST, tp.mt1(0, tp.MT_MODES["freewheel"]))
+        link.send(tp.ID_COMMAND + tp.NODE_BROADCAST,
+                  bytes([tp.CMD["system_control"] | tp.CMD_WRITE, tp.SYS_DISABLE, 0, 0, 0, 0, 0, 0]))
     return {"ok": True, "command": "emergency stop broadcast"}
 
 
 @tool("move",
-      "MOVES THE SHAFT. Command a position target in revolutions. Returns as soon as the drive "
-      "accepts the target unless wait is set, because accepting a target is what makes streaming "
-      "setpoints possible - arrival is a separate question.",
+      "MOVES THE SHAFT. Command a position in revolutions. By default a cyclic setpoint (POSITION "
+      "mode); with scurve=true or relative=true a jerk-limited point-to-point move is queued in "
+      "MOTION mode instead. Returns as soon as the drive accepts it unless wait is set.",
       {"node": NODE_ARG,
-       "revolutions": {"type": "number", "description": "Target position [rev]."},
-       "relative": {"type": "boolean", "default": False,
-                    "description": "Treat the target as an offset from where the shaft is now."},
-       "set_mode": {"type": "boolean", "default": False,
-                    "description": "Switch to position mode and enable as part of the command."},
-       "wait": {"type": "boolean", "default": False,
-                "description": "Poll the following error until the shaft has arrived."},
-       "tolerance": {"type": "number", "default": 0.01,
-                     "description": "Arrival window on the following error [rev]."},
-       "timeout": {"type": "number", "default": 30.0, "description": "Give up waiting after [s]."}},
+       "revolutions": {"type": "number"},
+       "relative": {"type": "boolean", "default": False, "description": "Queue a displacement from the queue tail."},
+       "scurve": {"type": "boolean", "default": False, "description": "Queue an absolute S-curve move."},
+       "velocity": {"type": "number", "description": "Cruise velocity for the S-curve [rev/s]."},
+       "wait": {"type": "boolean", "default": False},
+       "tolerance": {"type": "number", "default": 0.01},
+       "timeout": {"type": "number", "default": 30.0}},
       required=["revolutions"])
-def t_move(revolutions, node=None, relative=False, set_mode=False, wait=False,
+def t_move(revolutions, node=None, relative=False, scurve=False, velocity=None, wait=False,
            tolerance=0.01, timeout=30.0):
     n = DRIVE.target(node)
-    flags = (0x01 if relative else 0x00) | (0x02 if set_mode else 0x00)
-    payload = bytes([tp.OP["target_position"], flags]) + tp.rev_to_i48(revolutions)
-    result = DRIVE.command(n, payload, f"move {revolutions:+g}rev")
+    with DRIVE.lock:
+        link = DRIVE.ensure()
+        if scurve or relative:
+            seg = 1 + int(time.time() * 10) % 250
+            frames = [tp.mt1(seg, tp.MT_MODES["scurve"], is_abs=not relative, pos_mode=1, is_vel=velocity is not None),
+                      tp.mt2(seg, revolutions)]
+            if velocity is not None:
+                frames.append(tp.mt3(seg, velocity=velocity))
+            link.send_many(tp.ID_COMMAND + n, frames)
+            result = {"ok": True, "command": f"scurve {revolutions:+g}rev", "segment": seg}
+        else:
+            result = DRIVE.fire(n, tp.mt2(0, revolutions), f"move {revolutions:+g}rev")
     if not result["ok"] or not wait:
         return result
     with DRIVE.lock:
         settled = tp.wait_settled(DRIVE.ensure(), n, tolerance, timeout)
     result["settled"] = settled
-    result["motion3"] = DRIVE.chunk(n, "motion3")
+    result["motion_status_1"] = DRIVE.chunk(n, "motion_status_1")
     return result
 
 
 @tool("jog",
-      "MOVES THE SHAFT. Command a continuous velocity target in revolutions per second. The shaft "
-      "keeps turning until stopped, so pair it with stop.",
-      {"node": NODE_ARG,
-       "rps": {"type": "number", "description": "Target velocity [rev/s]. 0 stops turning."},
-       "set_mode": {"type": "boolean", "default": False,
-                    "description": "Switch to velocity mode and enable as part of the command."}},
-      required=["rps"])
-def t_jog(rps, node=None, set_mode=False):
+      "MOVES THE SHAFT. Command a continuous velocity in revolutions per second (VELOCITY mode). "
+      "The shaft keeps turning until stopped, so pair it with stop.",
+      {"node": NODE_ARG, "rps": {"type": "number"}}, required=["rps"])
+def t_jog(rps, node=None):
     n = DRIVE.target(node)
-    v = tp.float_to_f24(rps)
-    payload = (bytes([tp.OP["target_velocity"], v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF]) +
-               struct.pack("<H", 0) + bytes([0x02 if set_mode else 0x00, 0]))
-    return DRIVE.command(n, payload, f"jog {rps:+g} RPS")
+    return DRIVE.fire(n, tp.mt3(0, velocity=rps), f"jog {rps:+g} RPS")
+
+
+@tool("torque",
+      "MOVES THE SHAFT. Command a torque setpoint (TORQUE mode): N*m when Kt is set in motor_props_2, "
+      "amperes otherwise.",
+      {"node": NODE_ARG, "value": {"type": "number"}}, required=["value"])
+def t_torque(value, node=None):
+    n = DRIVE.target(node)
+    return DRIVE.fire(n, tp.mt3(0, torque=value), f"torque {value:+g}")
 
 
 @tool("pvt_move",
-      "MOVES THE SHAFT. Run a profiled move through the trajectory queue: the leg is cut into "
-      "segments streamed as position/velocity/time frames, so the shape of the motion comes from "
-      "the numbers rather than from host timing. Set back or cycles>1 to return to the start. "
-      "Delivery is paced against the drive's free queue slots.",
+      "MOVES THE SHAFT. Stream a profiled move as PVT burst frames: the leg is cut into time-tagged "
+      "position/velocity points paced against the drive's free queue slots. Set back or cycles>1 to "
+      "return to the start.",
       {"node": NODE_ARG,
-       "revolutions": {"type": "number", "description": "Displacement per leg [rev]."},
-       "seconds": {"type": "number", "description": "Duration of one leg [s]."},
-       "segments": {"type": "integer", "default": 20, "minimum": 1, "maximum": 2000,
-                    "description": "Segments per leg. Finer is smoother but must be refilled "
-                                   "faster than it plays."},
+       "revolutions": {"type": "number"}, "seconds": {"type": "number"},
+       "segments": {"type": "integer", "default": 20, "minimum": 1, "maximum": 2000},
        "cycles": {"type": "integer", "default": 1, "minimum": 1, "maximum": 100},
-       "back": {"type": "boolean", "default": False,
-                "description": "Follow each leg with its mirror image."},
-       "set_mode": {"type": "boolean", "default": True,
-                    "description": "Put the drive in motion mode and enable it first. Without "
-                                   "this the segments queue and never run."},
-       "wait": {"type": "boolean", "default": False,
-                "description": "Wait for each leg to settle before starting the next."},
+       "back": {"type": "boolean", "default": False},
+       "set_mode": {"type": "boolean", "default": True, "description": "Enable the stage first."},
+       "wait": {"type": "boolean", "default": False},
        "tolerance": {"type": "number", "default": 0.01}},
       required=["revolutions", "seconds"])
-def t_pvt_move(revolutions, seconds, node=None, segments=20, cycles=1, back=False,
-               set_mode=True, wait=False, tolerance=0.01):
+def t_pvt_move(revolutions, seconds, node=None, segments=20, cycles=1, back=False, set_mode=True,
+               wait=False, tolerance=0.01):
     n = DRIVE.target(node)
-    args = _Args(node=n, revolutions=revolutions, seconds=seconds, segments=segments,
-                 cycles=cycles, back=back, set_mode=set_mode, wait=wait, tolerance=tolerance)
+    args = _Args(node=n, revolutions=revolutions, seconds=seconds, segments=segments, cycles=cycles,
+                 back=back, set_mode=set_mode, wait=wait, tolerance=tolerance)
     with DRIVE.lock:
         rc = tp.cmd_pvt(DRIVE.ensure(), args)
-    return {"ok": rc == 0, "node": n, "queue": DRIVE.chunk(n, "queue_stat"),
-            "motion1": DRIVE.chunk(n, "motion1")}
+    return {"ok": rc == 0, "node": n, "queue": DRIVE.chunk(n, "diag:queue"),
+            "position": DRIVE.chunk(n, "motion_status_2")}
 
 
 @tool("queue",
-      "Inspect or control the trajectory queue: status, clear, pause, resume, or scale playback "
-      "speed. Clearing discards queued segments; the shaft stops where it is.",
-      {"node": NODE_ARG,
-       "action": {"type": "string", "enum": ["status", "clear", "pause", "resume", "scale"],
-                  "default": "status"},
-       "scale": {"type": "number", "default": 1.0,
-                 "description": "Playback rate for action='scale'. 1.0 is real time."}})
-def t_queue(node=None, action="status", scale=1.0):
+      "Inspect or clear the trajectory queue. Clearing discards queued segments; the shaft holds.",
+      {"node": NODE_ARG, "action": {"type": "string", "enum": ["status", "clear"], "default": "status"}})
+def t_queue(node=None, action="status"):
     n = DRIVE.target(node)
     if action == "status":
-        return {"node": n, "queue": DRIVE.chunk(n, "queue_stat") or {"error": "no response"}}
-    code = {"clear": 1, "pause": 2, "resume": 3, "scale": 4}[action]
-    raw = int(round(scale * 1024)) if action == "scale" else 0
-    payload = bytes([tp.OP["queue_ctl"], code]) + struct.pack("<hI", raw, 0)[:6]
-    result = DRIVE.command(n, payload, f"queue {action}")
-    result["queue"] = DRIVE.chunk(n, "queue_stat")
+        return {"node": n, "queue": DRIVE.chunk(n, "diag:queue") or {"error": "no response"}}
+    result = DRIVE.fire(n, tp.mt1(0, tp.MT_MODES["reset"]), "queue clear")
+    result["queue"] = DRIVE.chunk(n, "diag:queue")
     return result
 
 
@@ -973,162 +904,119 @@ def t_queue(node=None, action="status", scale=1.0):
 # Tools: calibration, persistence, faults
 # ============================================================================
 
-CALIB_KINDS = {"offset": 0, "electrical": 1, "angle": 2}
 
-
-def _follow_calibration(node, kind, timeout):
-    """Poll until a calibration routine finishes, and say how it went.
-
-    The two routines have to be followed by different signals, and getting this
-    wrong is what makes a working drive look broken.
-
-    Electrical identification drives the stage/progress pair. An angle sweep
-    does not: stage and progress keep reporting whatever the last electrical run
-    left behind - typically "success, 100%" - for the whole time the shaft is
-    turning. What an angle sweep does move is the flag byte, so it is followed
-    there: the table is invalidated (calibrated clears), the shaft sweeps, the
-    result settles and is persisted, and the routine is done when calibrated
-    comes back with nothing being written.
-
-    Both are watched for the routine STARTING before they are watched for it
-    finishing. Without that the status left over from the previous run - idle,
-    success, 100%, calibrated - satisfies the completion test on the very first
-    poll and the tool reports success while the shaft is still turning.
-    """
+def _follow_calibration(node, bits, timeout):
+    """Poll the calibration diagnostics until the requested routines stop running."""
     deadline = time.time() + timeout
-    started = False
-    last = None
+    started, last = False, None
     while time.time() < deadline:
         time.sleep(0.25)
-        status = DRIVE.chunk(node, "calib_status")
+        status = DRIVE.chunk(node, "diag:calibration")
         if status is None:
             continue
         last = status
         if status["failed"]:
             return {"ok": False, "finished": True, "status": status,
                     "error": f"calibration failed in stage '{status['stage_name']}'",
-                    "hint": "the reason is printed on the drive's CDC console; reconnect with "
-                            "interface='serial' to read it"}
-        if kind == CALIB_KINDS["angle"]:
-            # The flag byte is the only thing an angle sweep moves.
-            running = (not status["calibrated"]) or status["settling"] or status["persisting"]
-        else:
-            # kind returns to 0xFF (idle) when the routine is no longer loaded.
-            running = (status["kind"] == kind) or (status["stage_name"] == "calibrating")
+                    "hint": "the reason is printed on the drive's CDC console"}
+        running = (status["running"] & bits) != 0
         if running:
             started = True
         elif started:
-            return {"ok": status["stage_name"] == "success", "finished": True, "status": status}
-
+            return {"ok": True, "finished": True, "status": status}
     if not started:
         return {"ok": True, "finished": True, "status": last,
-                "warning": "the routine never reported itself running and the shaft may never "
-                           "have turned. A drive with a stored motor profile reloads it instead "
-                           "of sweeping - retry with force=true."}
-    return {"ok": False, "finished": False, "status": last,
-            "error": f"still running after {timeout:g}s"}
+                "warning": "the routine never reported itself running"}
+    return {"ok": False, "finished": False, "status": last, "error": f"still running after {timeout:g}s"}
 
 
 @tool("calibrate",
-      "TURNS THE SHAFT (kind 'angle' and 'electrical'). Start a calibration routine. "
-      "'offset' measures current-sense offsets and does not move. 'electrical' identifies "
-      "resistance and inductance by injecting current. 'angle' sweeps a full turn to build the "
-      "encoder table. A drive with a stored motor profile reloads it instead of sweeping unless "
-      "force is set.",
+      "TURNS THE SHAFT (kinds 'angle', 'electrical' and 'full'). Start a calibration routine. 'offset' "
+      "measures current-sense offsets and does not move. 'electrical' identifies wiring, resistance "
+      "and inductance. 'angle' sweeps a full turn to build the encoder table (always a physical "
+      "sweep). 'full' runs electrical then angle.",
       {"node": NODE_ARG,
-       "kind": {"type": "string", "enum": list(CALIB_KINDS), "default": "angle"},
-       "force": {"type": "boolean", "default": False,
-                 "description": "Force a physical sweep even when a table is already stored."},
-       "wait": {"type": "boolean", "default": True,
-                "description": "Poll to completion and report the outcome."},
-       "timeout": {"type": "number", "default": 90.0}})
-def t_calibrate(node=None, kind="angle", force=False, wait=True, timeout=90.0):
-    if kind not in CALIB_KINDS:
-        raise McpError(f"unknown calibration kind '{kind}'. One of: {', '.join(CALIB_KINDS)}")
+       "kind": {"type": "string", "enum": ["offset", "electrical", "angle", "full"], "default": "angle"},
+       "wait": {"type": "boolean", "default": True},
+       "timeout": {"type": "number", "default": 120.0}})
+def t_calibrate(node=None, kind="angle", wait=True, timeout=120.0):
     n = DRIVE.target(node)
-    code = CALIB_KINDS[kind]
-    # Byte 2 is the flags byte; bit 1 forces a physical sweep.
-    payload = bytes([tp.OP["calib_start"], code, 0x02 if force else 0x00, 0, 0, 0, 0, 0])
-    result = DRIVE.command(n, payload, f"calibrate {kind}{' --force' if force else ''}")
-    if not result["ok"]:
-        return result
+    bits = tp.CAL_BITS[kind]
+    with DRIVE.lock:
+        reply = tp.system_control(DRIVE.ensure(), n, calibration=bits)
+    if reply is None:
+        return {"ok": False, "node": n, "error": "no response"}
+    if reply[0] == tp.CMD["nack"]:
+        return {"ok": False, "node": n, "error": tp.ERRORS.get(reply[2], f"0x{reply[2]:02X}")}
+    result = {"ok": True, "node": n, "command": f"calibrate {kind}"}
     if not wait:
-        result["status"] = DRIVE.chunk(n, "calib_status")
-        result["note"] = "started; poll read_status(chunks=['calib_status']) for progress"
+        result["status"] = DRIVE.chunk(n, "diag:calibration")
+        result["note"] = "started; poll read_status(registers=['diag:calibration']) for progress"
         return result
-    result.update(_follow_calibration(n, code, timeout))
-    result["result"] = DRIVE.chunk(n, "calib_result")
+    result.update(_follow_calibration(n, bits, timeout))
+    result["result"] = DRIVE.chunk(n, "diag:calib_result")
     return result
 
 
 @tool("persist",
-      "Save the configuration to flash, reload it, or restore defaults. Saving requires the drive "
-      "to be disabled. target='all' with action='defaults' ERASES the stored record, which loses "
-      "the node address and needs a discovery sweep afterwards, so it needs confirm=true.",
+      "Save the configuration to flash, restore the compiled-in defaults into the live shadow, or "
+      "erase the stored record. Saving requires the drive to be disabled. action='erase' loses the "
+      "node address (a discovery sweep is needed afterwards), so it needs confirm=true.",
       {"node": NODE_ARG,
-       "action": {"type": "string", "enum": ["save", "load", "defaults"], "default": "save"},
+       "action": {"type": "string", "enum": ["save", "defaults", "erase"], "default": "save"},
        "target": {"type": "string", "enum": ["all", "config", "motor"], "default": "config"},
-       "confirm": {"type": "boolean", "default": False,
-                   "description": "Required for action='defaults' with target='all'."}})
+       "confirm": {"type": "boolean", "default": False}})
 def t_persist(node=None, action="save", target="config", confirm=False):
     n = DRIVE.target(node)
-    if action == "defaults":
-        if target == "motor":
-            raise McpError("action='defaults' accepts target 'all' or 'config'")
-        code = {"all": 0, "config": 1}[target]
-        if code == 0 and not confirm:
-            raise McpError("restoring ALL defaults erases the stored configuration: the node comes "
-                           "back unaddressed and needs a discovery sweep. Pass confirm=true if "
-                           "that is what you want.")
-        payload = bytes([tp.OP["param_defaults"], code, 0, 0]) + struct.pack("<I", tp.DEFAULTS_KEY)
-        return DRIVE.command(n, payload, f"defaults {target}")
-    code = {"all": 0, "config": 1, "motor": 2}[target]
-    op = tp.OP["param_save"] if action == "save" else tp.OP["param_load"]
-    result = DRIVE.command(n, bytes([op, code, 0, 0, 0, 0, 0, 0]), f"{action} {target}")
-    result["param_status"] = DRIVE.chunk(n, "param_status")
+    if action == "erase" and not confirm:
+        raise McpError("erasing the stored configuration leaves the node unaddressed. Pass confirm=true.")
+    catalog = {"all": 0xFFFFFF, "config": 1, "motor": 2}[target]
+    key = {"save": tp.SAVE_KEY, "defaults": tp.DEFAULTS_KEY, "erase": tp.ERASE_KEY}[action]
+    payload = bytes([tp.CMD["save_config"]]) + catalog.to_bytes(3, "little") + struct.pack("<I", key)
+    result = DRIVE.command(n, payload, f"{action} {target}")
+    result["persist"] = DRIVE.chunk(n, "diag:persist")
     return result
 
 
-@tool("fault_reset", "Clear latched faults. The condition that caused them must be gone first.",
-      {"node": NODE_ARG})
+@tool("fault_reset", "Clear latched faults. The condition that caused them must be gone first.", {"node": NODE_ARG})
 def t_fault_reset(node=None):
     n = DRIVE.target(node)
-    result = DRIVE.command(n, bytes([tp.OP["fault_reset"], 0, 0, 0, 0, 0, 0, 0]), "fault reset")
-    result["status"] = DRIVE.chunk(n, "device_status")
-    return result
+    with DRIVE.lock:
+        reply = tp.system_control(DRIVE.ensure(), n, action=tp.SYS_FAULT_RESET)
+    out = {"ok": reply is not None and reply[0] != tp.CMD["nack"], "node": n}
+    out["status"] = DRIVE.chunk(n, "system_status")
+    return out
 
 
 @tool("reboot",
-      "Reboot the drive, optionally into the USB DFU bootloader. Rebooting into DFU drops the "
-      "protocol link until the board is reflashed or power-cycled, so it needs confirm=true.",
-      {"node": NODE_ARG,
-       "dfu": {"type": "boolean", "default": False},
-       "confirm": {"type": "boolean", "default": False}})
+      "Reboot the drive, optionally into the USB DFU bootloader (needs confirm=true: it drops the link "
+      "until the board is reflashed or power-cycled).",
+      {"node": NODE_ARG, "dfu": {"type": "boolean", "default": False}, "confirm": {"type": "boolean", "default": False}})
 def t_reboot(node=None, dfu=False, confirm=False):
     if dfu and not confirm:
         raise McpError("rebooting into DFU leaves no protocol link. Pass confirm=true to proceed.")
     n = DRIVE.target(node)
-    payload = bytes([tp.OP["reboot"], 1 if dfu else 0, 0, 0]) + struct.pack("<I", tp.REBOOT_KEY)
-    result = DRIVE.command(n, payload, "reboot into DFU" if dfu else "reboot")
-    # The device re-enumerates, so the handle we hold is stale either way.
+    with DRIVE.lock:
+        reply = tp.system_control(DRIVE.ensure(), n, action=tp.SYS_REBOOT_DFU if dfu else tp.SYS_REBOOT)
+    result = {"ok": reply is not None and reply[0] != tp.CMD["nack"], "node": n,
+              "command": "reboot into DFU" if dfu else "reboot"}
     DRIVE.close()
     result["link"] = "closed - the drive is re-enumerating; call connect again"
     return result
 
 
 @tool("watchdog",
-      "Configure the master-liveness watchdog. With it armed the drive stops on its own if the "
-      "master goes quiet, which is what makes an unattended session safe. timeout_ms=0 disables it.",
-      {"node": NODE_ARG,
-       "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 65535},
-       "action": {"type": "string", "enum": ["freewheel", "brake", "hold"], "default": "hold"}},
+      "Configure the master-liveness watchdog. With it armed the drive stops on its own if the master "
+      "goes quiet. timeout_ms=0 disables it.",
+      {"node": NODE_ARG, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 60000}},
       required=["timeout_ms"])
-def t_watchdog(timeout_ms, node=None, action="hold"):
+def t_watchdog(timeout_ms, node=None):
     n = DRIVE.target(node)
-    code = {"freewheel": 0, "brake": 1, "hold": 2}[action]
-    flags = 0x80 | (0x01 if timeout_ms else 0x00)
-    payload = bytes([tp.OP["watchdog"], code, flags, 0]) + struct.pack("<HH", timeout_ms, 0)
-    return DRIVE.command(n, payload, f"watchdog {timeout_ms}ms {action}")
+    with DRIVE.lock:
+        reply = tp.write_register(DRIVE.ensure(), n, "watchdog", {"timeout": timeout_ms / 1000.0})
+    if reply is None:
+        return {"ok": False, "node": n, "error": "no response"}
+    return {"ok": reply[0] != tp.CMD["nack"], "node": n, "result": decode_frame(reply)}
 
 
 # ============================================================================
@@ -1137,84 +1025,53 @@ def t_watchdog(timeout_ms, node=None, action="hold"):
 
 
 @tool("tone",
-      "MAKES THE MOTOR SING. In tone mode the control ISR synthesizes a sine straight onto the "
-      "alpha-beta voltage vector, bypassing the current loop, so the windings act as a "
-      "loudspeaker. hz=0 silences the drive and returns it to disabled. The shaft holds rather "
-      "than spins, but it is energized.",
+      "MAKES THE MOTOR SING. Play one MIDI note through the coils (the drive selects TONE mode and "
+      "enables itself). note=0 silences it and disables the stage.",
       {"node": NODE_ARG,
-       "hz": {"type": "integer", "minimum": 0, "maximum": 20000,
-              "description": f"Frequency. Useful range is about {tp.TONE_MIN_HZ}-{tp.TONE_MAX_HZ} Hz; "
-                             f"0 stops and disables."},
-       "amp": {"type": "integer", "minimum": 0, "maximum": 8192, "default": 2000,
-               "description": "Amplitude as a fraction of the bus voltage, out of 32768. "
-                              "The drive rejects more than 8192."}},
-      required=["hz"])
-def t_tone(hz, node=None, amp=2000):
+       "note": {"type": "integer", "minimum": 0, "maximum": 127, "description": "MIDI note (69 = A4 = 440 Hz)."},
+       "volume": {"type": "integer", "minimum": 0, "maximum": 255, "default": 128},
+       "duration_ms": {"type": "number", "default": 0, "description": "0 = until the next command."}},
+      required=["note"])
+def t_tone(note, node=None, volume=128, duration_ms=0):
     n = DRIVE.target(node)
-    DRIVE.stop_playback.set()                       # A manual tone overrides playback
+    DRIVE.stop_playback.set()
     with DRIVE.lock:
         link = DRIVE.ensure()
-        if hz == 0:
+        if note == 0:
             tp.silence(link, n)
             return {"ok": True, "node": n, "tone": "off"}
-        if not tp.write_reg(link, n, "tone_amp", amp):
-            return {"ok": False, "node": n, "error": "the drive rejected the amplitude (max 8192)"}
-        if not tp.write_reg(link, n, "control_mode", tp.MODES.index("tone")):
-            return {"ok": False, "node": n,
-                    "error": "the drive rejected tone mode - is the firmware new enough?"}
-        tp.write_reg(link, n, "enable", 1)
-        ok = tp.write_reg(link, n, "tone_freq", hz)
-    return {"ok": ok, "node": n, "tone": "on", "hz": hz, "amp": amp}
+    return DRIVE.command(n, tp.midi_frame(note, volume, duration_ms), f"tone {note}")
 
 
-def _play(node, schedule, amp):
-    """Play a parsed schedule of (time, frequency) pairs on the motor coils.
-
-    Runs on its own thread so a thirty-second clip does not hold a tool call
-    open for thirty seconds. Each entry costs one register write, taken under
-    the shared lock, so status reads still interleave while it plays.
-    """
-    with DRIVE.lock:
-        link = DRIVE.ensure()
-        tp.write_reg(link, node, "tone_amp", amp)
-        tp.write_reg(link, node, "control_mode", tp.MODES.index("tone"))
-        tp.write_reg(link, node, "enable", 1)
+def _play(node, schedule, volume):
+    """Play a parsed schedule of (time, note) pairs on the motor coils."""
     t0 = time.time()
     try:
-        for t, freq in schedule:
+        for t, note in schedule:
             delay = t0 + t - time.time()
             if delay > 0 and DRIVE.stop_playback.wait(delay):
-                break                               # Asked to stop mid-clip
+                break
             if DRIVE.stop_playback.is_set():
                 break
             with DRIVE.lock:
-                tp.write_reg(DRIVE.ensure(), node, "tone_freq", freq)
+                DRIVE.ensure().request(node, tp.midi_frame(note, volume), timeout=0.2)
     finally:
-        # Whatever happened, the coils must not be left singing.
         with DRIVE.lock:
             if DRIVE.link is not None:
                 tp.silence(DRIVE.link, node)
 
 
 @tool("play_midi",
-      "MAKES THE MOTOR SING. Play a window of a MIDI file through the motor coils. A motor is "
-      "monophonic, so the melody is reduced to one voice: the most monophonic channel in the file, "
-      "highest note sounding at each instant. Plays in the background and returns immediately; "
-      "call stop_midi or tone(hz=0) to stop it early.",
-      {"node": NODE_ARG,
-       "file": {"type": "string", "description": "Path to a Standard MIDI File."},
-       "start": {"type": "number", "default": 0.0, "description": "Window start [s]."},
-       "end": {"type": "number", "description": "Window end [s]. Defaults to start + seconds."},
-       "seconds": {"type": "number", "default": 30.0,
-                   "description": "Window length when end is not given."},
-       "amp": {"type": "integer", "minimum": 0, "maximum": 8192, "default": 2000},
-       "voice": {"type": "integer", "minimum": 0, "maximum": 15,
-                 "description": "Force a MIDI channel instead of choosing the most monophonic one."},
-       "blocking": {"type": "boolean", "default": False,
-                    "description": "Wait for the clip to finish instead of returning at once."}},
+      "MAKES THE MOTOR SING. Play a window of a MIDI file through the motor coils, reduced to one "
+      "voice. Plays in the background and returns immediately; call stop_midi or tone(note=0) to stop.",
+      {"node": NODE_ARG, "file": {"type": "string"},
+       "start": {"type": "number", "default": 0.0}, "end": {"type": "number"},
+       "seconds": {"type": "number", "default": 30.0},
+       "volume": {"type": "integer", "minimum": 0, "maximum": 255, "default": 128},
+       "voice": {"type": "integer", "minimum": 0, "maximum": 15},
+       "blocking": {"type": "boolean", "default": False}},
       required=["file"])
-def t_play_midi(file, node=None, start=0.0, end=None, seconds=30.0, amp=2000,
-                voice=None, blocking=False):
+def t_play_midi(file, node=None, start=0.0, end=None, seconds=30.0, volume=128, voice=None, blocking=False):
     path = os.path.expanduser(file)
     if not os.path.isfile(path):
         raise McpError(f"no such file: {path}")
@@ -1223,21 +1080,15 @@ def t_play_midi(file, node=None, start=0.0, end=None, seconds=30.0, amp=2000,
         raise McpError(f"end ({stop:g}s) must be after start ({start:g}s)")
     if DRIVE.player is not None and DRIVE.player.is_alive():
         raise McpError("a clip is already playing; call stop_midi first")
-
     schedule, chosen = tp.parse_midi_melody(path, start, stop, voice)
-    notes = sum(1 for _, f in schedule if f)
+    notes = sum(1 for _, n in schedule if n)
     if notes == 0:
-        return {"ok": False, "file": os.path.basename(path),
-                "error": f"no notes between {start:g}s and {stop:g}s on channel {chosen}",
-                "hint": "try a different window, or name a channel with 'voice'"}
-
+        return {"ok": False, "file": os.path.basename(path), "error": "no notes in that window"}
     DRIVE.stop_playback.clear()
-    DRIVE.player = threading.Thread(target=_play, args=(DRIVE.target(node), schedule, amp),
-                                    daemon=True)
+    DRIVE.player = threading.Thread(target=_play, args=(DRIVE.target(node), schedule, volume), daemon=True)
     DRIVE.player.start()
-    out = {"ok": True, "file": os.path.basename(path), "node": DRIVE.target(node),
-           "notes": notes, "window_s": [start, stop], "channel": chosen, "amp": amp,
-           "events": len(schedule)}
+    out = {"ok": True, "file": os.path.basename(path), "node": DRIVE.target(node), "notes": notes,
+           "window_s": [start, stop], "channel": chosen, "volume": volume}
     if blocking:
         DRIVE.player.join(timeout=(stop - start) + 10.0)
         out["finished"] = not DRIVE.player.is_alive()
@@ -1246,8 +1097,7 @@ def t_play_midi(file, node=None, start=0.0, end=None, seconds=30.0, amp=2000,
     return out
 
 
-@tool("stop_midi", "Stop playback, silence the coils and disable the output stage.",
-      {"node": NODE_ARG})
+@tool("stop_midi", "Stop playback, silence the coils and disable the output stage.", {"node": NODE_ARG})
 def t_stop_midi(node=None):
     n = DRIVE.target(node)
     DRIVE.stop_playback.set()
@@ -1265,83 +1115,72 @@ def t_stop_midi(node=None):
 
 
 @tool("telemetry_config",
-      "Configure one cyclic telemetry slot. The drive then emits that chunk unprompted at the "
-      "given period, which is what 'monitor' listens for. period_ms=0 disables the slot.",
-      {"node": NODE_ARG,
-       "slot": {"type": "integer", "minimum": 0, "maximum": 7},
-       "chunk": {"type": "string", "description": "Status chunk name, e.g. motion1 or heartbeat."},
+      "Configure one cyclic telemetry slot: the drive then emits that register unprompted at the given "
+      "period, which is what 'monitor' listens for. period_ms=0 disables the slot.",
+      {"node": NODE_ARG, "slot": {"type": "integer", "minimum": 0, "maximum": 3},
+       "register": {"type": "string", "description": "e.g. motion_status_2, pulsebeat, currents:dq"},
        "period_ms": {"type": "integer", "minimum": 0, "maximum": 65535}},
-      required=["slot", "chunk", "period_ms"])
-def t_telemetry_config(slot, chunk, period_ms, node=None):
-    op = tp.OP.get(chunk)
-    if op is None or op > tp.OP["heartbeat"]:
-        raise McpError(f"'{chunk}' is not a telemetry chunk")
+      required=["slot", "register", "period_ms"])
+def t_telemetry_config(slot, register, period_ms, node=None):
+    if register == "pulsebeat":
+        code = 0x70
+    elif register in tp.REGISTERS:
+        code = tp.REGISTERS[register].cmd
+    else:
+        raise McpError(f"'{register}' is not a readable register")
     n = DRIVE.target(node)
-    flags = 0x80 | (0x01 if period_ms else 0x00)    # Bit 7 applies, bit 0 enables
-    payload = bytes([tp.OP["telemetry"], slot, op if period_ms else 0, flags]) + \
-        struct.pack("<HH", period_ms, 0)
-    return DRIVE.command(n, payload, f"telemetry slot {slot} = {chunk} @ {period_ms}ms")
+    payload = bytes([tp.CMD["telemetry"] | tp.CMD_WRITE, slot, code if period_ms else 0,
+                     0x01 if period_ms else 0]) + struct.pack("<HH", period_ms, 0)
+    return DRIVE.command(n, payload, f"telemetry slot {slot} = {register} @ {period_ms}ms")
+
+
+@tool("sync", "Broadcast the host clock to every node so PVT time tags line up. Nothing moves.",
+      mutating=False)
+def t_sync():
+    args = _Args()
+    with DRIVE.lock:
+        tp.cmd_sync(DRIVE.ensure(), args)
+    return {"ok": True}
 
 
 @tool("monitor",
-      "Listen for a fixed window and decode every frame that arrives - telemetry, emergencies, "
-      "anything another master is sending. Nothing is transmitted. Configure a telemetry slot "
-      "first, or there may be nothing to hear.",
-      {"node": NODE_ARG,
-       "seconds": {"type": "number", "default": 2.0, "minimum": 0.1, "maximum": 30.0},
-       "all_nodes": {"type": "boolean", "default": False,
-                     "description": "Include frames addressed to other nodes."}},
+      "Listen for a fixed window and decode every frame that arrives - PulseBeats, telemetry, "
+      "emergencies. Nothing is transmitted.",
+      {"node": NODE_ARG, "seconds": {"type": "number", "default": 2.0, "minimum": 0.1, "maximum": 30.0},
+       "all_nodes": {"type": "boolean", "default": False}},
       mutating=False)
 def t_monitor(node=None, seconds=2.0, all_nodes=False):
     n = DRIVE.target(node)
     with DRIVE.lock:
         messages = DRIVE.ensure().drain(seconds)
     frames = []
+    kinds = {tp.ID_EMCY: "emergency", tp.ID_COMMAND: "command", tp.ID_RESPONSE: "response",
+             tp.ID_TELEMETRY: "telemetry"}
     for msg in messages:
         cid = msg.arbitration_id
-        kind, src = _classify(cid)
-        if not all_nodes and src is not None and src != n and kind != "nmt":
+        src = cid & 0xFF
+        if not all_nodes and src != n and src != tp.NODE_BROADCAST:
             continue
-        frames.append({"kind": kind, "node": src,
+        frames.append({"kind": kinds.get(cid & 0x700, "unknown"), "node": src,
                        "frame": decode_frame(bytes(msg.data).ljust(8, b"\x00"))})
     return {"node": n, "window_s": seconds, "count": len(frames), "frames": frames,
-            "note": None if frames else "nothing arrived: telemetry may not be configured"}
-
-
-def _classify(cid):
-    """Map an identifier onto its channel and source node."""
-    if cid < tp.ID_NMT:
-        return "emergency", cid
-    if cid < tp.ID_SETPOINT:
-        return "nmt", None
-    if cid < tp.ID_REQUEST:
-        return "setpoint", cid - tp.ID_SETPOINT
-    if cid < tp.ID_RESPONSE:
-        return "request", cid - tp.ID_REQUEST
-    if cid < tp.ID_DISCOVERY:
-        return "response", cid - tp.ID_RESPONSE
-    if cid < tp.ID_TELEMETRY:
-        return "discovery", None
-    return "telemetry", cid - tp.ID_TELEMETRY
+            "note": None if frames else "nothing arrived: is a telemetry slot or the PulseBeat configured?"}
 
 
 @tool("raw",
-      "Send an arbitrary eight-byte request frame and decode the answer. The escape hatch for "
-      "anything the typed tools do not cover; see CAN_PROTOCOL.md for the layouts.",
-      {"node": NODE_ARG,
-       "hex": {"type": "string",
-               "description": "Payload bytes as hex, e.g. '01' or '20 00 00 05'. Padded to 8."}},
+      "Send an arbitrary eight-byte command frame and decode the answer. The escape hatch for anything "
+      "the typed tools do not cover; see CAN_PROTOCOL.md for the layouts.",
+      {"node": NODE_ARG, "hex": {"type": "string", "description": "Payload bytes as hex, padded to 8."}},
       required=["hex"])
-def t_raw(hex, node=None):  # noqa: A002 - matches the CLI's argument name
+def t_raw(hex, node=None):  # noqa: A002
     n = DRIVE.target(node)
     try:
         payload = bytes.fromhex(hex.replace(" ", "")).ljust(8, b"\x00")[:8]
     except ValueError as exc:
         raise McpError(f"not valid hex: {exc}") from exc
     reply = DRIVE.request(n, payload)
-    return {"node": n, "sent": payload.hex(" "),
-            "reply": decode_frame(reply) if reply else None,
-            "ok": reply is not None and reply[0] != tp.OP["nack"]}
+    return {"node": n, "sent": payload.hex(" "), "reply": decode_frame(reply) if reply else None,
+            "ok": reply is not None and reply[0] != tp.CMD["nack"]}
 
 
 # ============================================================================
@@ -1349,18 +1188,17 @@ def t_raw(hex, node=None):  # noqa: A002 - matches the CLI's argument name
 # ============================================================================
 
 
-@resource("tpcp://registers", "TPCP register map",
-          "Every register the drive exposes: name, id, type and group.", "application/json")
+@resource("tpcp://registers", "TPCP register map", "Every register the drive exposes: name, CMD, fields.",
+          "application/json")
 def r_registers():
     return json.dumps(t_list_registers(), indent=2)
 
 
 @resource("tpcp://protocol", "TunePulse CAN Protocol specification",
-          "The full wire specification: identifier map, opcodes, chunk layouts, registers, "
-          "worked examples.", "text/markdown")
+          "The full wire specification: identifier map, CMD groups, every register, worked examples.",
+          "text/markdown")
 def r_protocol():
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "src", "api", "CAN_PROTOCOL.md")
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "api", "CAN_PROTOCOL.md")
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read()
@@ -1375,23 +1213,25 @@ otherwise.
 
 The link opens on first use; call connect only to pin a transport, a port or the default node.
 
-Reading is free: read_status, read_register, list_registers and monitor never change anything.
+Reading is free: read_status, read_register, list_registers, ping and monitor never change anything.
 
 Anything that moves a real shaft says so in capitals at the start of its description - move, jog,
-pvt_move, calibrate, and the tone tools, which energize the windings. Check read_status first,
-keep estop and stop in mind, and prefer small displacements until you know the mechanics are free
-to turn.
+torque, pvt_move, calibrate, and the tone tools, which energize the windings. Check read_status
+first, keep estop and stop in mind, and prefer small displacements until you know the mechanics are
+free to turn.
 
-Two things about this drive surprise people:
+Three things about this drive surprise people:
 
-  * The trajectory queue only advances in MOTION mode with the output stage enabled. Segments
-    pushed in any other mode are accepted, queued, and never run - which looks exactly like a
-    mechanical failure.
+  * Setpoint frames select their own control mode (move -> POSITION, jog -> VELOCITY, torque ->
+    TORQUE, queued segments and bursts -> MOTION), but the output stage is enabled separately.
+    Nothing moves until enable(on=true) has been accepted, and enabling is refused while the drive
+    is uncalibrated or faulted.
 
-  * In a calibration status chunk, stage and progress describe the ELECTRICAL identification
-    routine only. During an angle sweep they keep reporting whatever the last electrical run
-    left behind. Follow an angle sweep through the calibrated / settling / persisting flags
-    instead; the calibrate tool already does.
+  * Accepted setpoints are SILENT in the default response policy: only a rejection comes back as a
+    NACK. A tool that reports ok with no reply has simply not been refused.
+
+  * Torque fields are in N*m only once Kt has been written into motor_props_2; until then they are
+    amperes.
 """
 
 

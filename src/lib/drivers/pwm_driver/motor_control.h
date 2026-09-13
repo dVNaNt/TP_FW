@@ -54,6 +54,7 @@ private:
     static constexpr uint8_t LPF_ALPHA = 42;  // Filter coefficient (0-255)
 
     int16_t epsilon_abs_;  // Absolute balance tolerance in Q15 format
+    int16_t epsilon_rel_;  // Relative balance tolerance: Q15 fraction of the summed channel magnitudes
     Vec3D abc_voltages_;   // ABC voltages after phase remapping
 
     MotorType motor_type_;  // Motor type: 1=DC, 4=Stepper, 6=BLDC
@@ -187,10 +188,21 @@ private:
         if (present_cnt == 3) {  // Phase-balance supervision (all sensors present)
             // Low-pass filtered sum of the three phase currents should stay
             // near zero (Kirchhoff). A persistent offset indicates a sensor
-            // gain/offset fault and raises the current-path error flag.
+            // gain/offset fault - or a coil leaking to ground - and raises the
+            // current-path error flag.
+            //
+            // The tolerance has an absolute part (noise and offsets at rest)
+            // and a part proportional to the current flowing: three shunts
+            // and three amplifiers each carry a few percent of gain error, so
+            // the sum of healthy sensors drifts away from zero in proportion
+            // to the current. A fixed tolerance sized for standstill tripped
+            // the electrical identification of a healthy motor at 3.5 A on the
+            // shared channel, where a 4 % mismatch already exceeds it.
+            const int32_t magnitude = (ia < 0 ? -ia : ia) + (ib < 0 ? -ib : ib) + (ic < 0 ? -ic : ic);
+            const int32_t tolerance = (int32_t)epsilon_abs_ + ((magnitude * (int32_t)epsilon_rel_) >> 15);
             const int16_t bal = lpf_.tick_lpf(sum);
-            if (bal > epsilon_abs_ or bal < -epsilon_abs_)  // Outside tolerance...
-                err_current_ = true;                        // ...raise error flag
+            if (bal > tolerance or bal < -tolerance)  // Outside tolerance...
+                err_current_ = true;                  // ...raise error flag
         }
         return ab_currents_;
     }
@@ -217,9 +229,11 @@ private:
           err_voltage_(0u),
           err_current_(0u),
           lpf_(0, LPF_ALPHA),
-          epsilon_abs_(0) {
+          epsilon_abs_(0),
+          epsilon_rel_(0) {
         set_phase_pattern(phase_pattern);
         set_current_epsilon(current_epsilon);
+        set_current_epsilon_relative(BALANCE_REL_DEFAULT_PERCENT);
     }
 
     /**
@@ -384,6 +398,16 @@ public:
     /// Set balance tolerance for current converter
     /// @param epsilon Balance tolerance in Q15 format
     inline void set_current_epsilon(int16_t epsilon) { epsilon_abs_ = abs((int32_t)epsilon); }
+
+    /// Default relative balance tolerance: two 3 % amplifiers and 1 % shunts, plus margin.
+    static constexpr uint8_t BALANCE_REL_DEFAULT_PERCENT = 8;
+
+    /// Set the relative part of the balance tolerance.
+    /// @param percent Allowed |sum| as a percentage of |ia| + |ib| + |ic| (0..100)
+    inline void set_current_epsilon_relative(uint8_t percent) {
+        const uint32_t p = (percent > 100u) ? 100u : percent;      // Clamp to a fraction
+        epsilon_rel_ = (int16_t)((p * 32768u) / 100u);             // Percent -> Q15
+    }
 
     /// Check if voltage path error occurred
     /// @return 1 if error, 0 if no error
