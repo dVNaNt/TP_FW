@@ -143,7 +143,6 @@ enum class DriveReq : uint8_t {
     VelocityLimit,   ///< f32 = velocity envelope [RPS].
     AccelLimit,      ///< f32 = acceleration envelope [RPS^2].
     JerkLimit,       ///< f32 = jerk envelope [RPS^3].
-    Anchor,          ///< i64 = value the current position takes on, Q16.16.
     Stop,            ///< u32 = TpStopMode value.
     PushSegment,     ///< seg = one trajectory segment for the executor queue.
     PushSegmentAbs,  ///< seg = segment whose displacement field is an ABSOLUTE target, Q16.16.
@@ -386,6 +385,7 @@ public:
         // existed, so the published window keeps describing the real vector.
         if (inhibit) {
             target_pos_q32_ = (int64_t)measured_pos_q16 << 16;
+            queue_tail_q32_ = target_pos_q32_;             // A move planned now starts from here
             exec_.update_real_pos(target_pos_q32_);
             out.action = DriveAction::RunTorque;
             out.target_pos_q16 = measured_pos_q16;
@@ -403,6 +403,7 @@ public:
             // Keep every target glued to the measured position so that
             // re-enabling the drive can never produce a step command.
             target_pos_q32_ = (int64_t)measured_pos_q16 << 16;
+            queue_tail_q32_ = target_pos_q32_;             // A move planned while parked starts from here
             exec_.update_real_pos(target_pos_q32_);
             out.target_pos_q16 = measured_pos_q16;
             switch (safe_state_) {
@@ -505,6 +506,18 @@ public:
                 out.target_pos_q16 = measured_pos_q16;
                 break;
             }
+        }
+
+        // The queue tail is where the NEXT queued segment starts, and the
+        // thread side sizes a profiled move from it before the segment even
+        // reaches this ISR. Outside Motion mode the target moves without the
+        // queue (a velocity ramp, a setpoint, a torque command tracking the
+        // rotor), and a drained queue holds wherever it stopped; in both
+        // cases the tail must follow the target, or the first S-curve after a
+        // jog is sized from a stale point (a 25 rev move planned as a 0 rev
+        // one collapses into a step the loop chases at full speed).
+        if ((mode_ != DriveMode::Motion) || exec_halted_) {
+            queue_tail_q32_ = target_pos_q32_;             // Nothing queued: the tail is the target
         }
 
         publish(measured_pos_q16, out, applied_current_a);
@@ -611,14 +624,6 @@ private:
                 if (r.arg.f32 > 0.0f) {
                     jerk_limit_rps3_ = r.arg.f32;          // Stored for the profile generators
                 }
-                break;
-            case DriveReq::Anchor:
-                // Redefine the coordinate system: the executor basis and the
-                // position target both shift by the same amount, so the rotor
-                // does not move even though its reported position changes.
-                target_pos_q32_ = r.arg.i64 << 16;
-                exec_.init(now_us(), target_pos_q32_);
-                queue_tail_q32_ = target_pos_q32_;         // The queue restarts from the new "here"
                 break;
             case DriveReq::Stop:
                 apply_stop((uint8_t)r.arg.u32);            // Controlled stop with an end state

@@ -275,15 +275,21 @@ inline TpError TpProtocol::commit_segment() {
             if (!has_pos) {
                 return TP_ERR_BAD_PARAM;                 // Nothing to anchor to
             }
-            int64_t target = pos;                        // New value of "here"
-            if (!is_abs) {
-                DriveTelemetry t;                        // Live control snapshot
-                tp_->drive.read_telemetry(t);
-                target = (int64_t)t.position_q16 + pos;  // Displace the current position
-            }
-            if (!tp_->drive.post_i64(DriveReq::Anchor, target)) {
-                return TP_ERR_BUSY;
-            }
+            // Redefine "here" WITHOUT moving: every position crosses the wire
+            // through the axis offset of 0x01/0x00 (reported = (native +
+            // offset) x direction), so the anchor is a change of that offset
+            // and nothing else. The control loop keeps holding the same
+            // physical spot; only the number the master sees for it changes.
+            // (Posting the anchor value as a new position TARGET, as this used
+            // to, sent the rotor there at full speed - a 25 rev "set position"
+            // became a 25 rev move.) The offset lives in the node
+            // configuration: save it to keep the anchor across a reboot.
+            DriveTelemetry t;                            // Live control snapshot
+            tp_->drive.read_telemetry(t);
+            const int32_t wire_now = tp_axis_to_wire(config_, t.position_q16);       // Where the master sees us
+            const int32_t wire_new = is_abs ? seg_pos_q16_ : (wire_now + seg_pos_q16_);  // Where it wants us
+            const int32_t signed_new = (config_.axis_inverted != 0u) ? -wire_new : wire_new;  // Undo the direction
+            config_.axis_offset_q16 = signed_new - t.position_q16;                    // reported == wire_new
             queued = false;
             break;
         }
