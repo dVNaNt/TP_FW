@@ -25,6 +25,7 @@
 #include "../../src/api/registers/tp_register_map.h"
 #include "../../src/api/node/tp_node_identity.h"
 #include "../../src/api/node/tp_discovery.h"
+#include "../../src/lib/math/helpers/crc.h"
 
 /** Unity per-test setup hook (nothing to prepare). */
 void setUp(void) {}
@@ -358,6 +359,48 @@ void test_discovery_assign(void) {
     TEST_ASSERT_FALSE(TpDiscovery::on_assign(id, 0ull, 7, true, assign));               // Wildcard assign refused
 }
 
+/**
+ * The shared CRC module: the three named algorithms against their published
+ * check values, the streaming context against the one-shot (any split of the
+ * data, restart between uses), and the little-endian word feed - the byte
+ * order every stored record relies on. The firmware's static_asserts cover
+ * the check values too; this keeps them on the host where a failure prints.
+ */
+void test_crc_module(void) {
+    const uint8_t v[9] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+    TEST_ASSERT_EQUAL_HEX8(0xF4u, Crc::crc8(v, 9));             // CRC-8 (poly 0x07)
+    TEST_ASSERT_EQUAL_HEX16(0x29B1u, Crc::crc16(v, 9));         // CRC-16/CCITT-FALSE
+    TEST_ASSERT_EQUAL_HEX32(0x0376E6E7u, Crc::crc32(v, 9));     // CRC-32/MPEG-2
+    TEST_ASSERT_EQUAL_HEX8(0x00u, Crc::crc8(v, 0));             // Empty input: the initial value
+    TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, Crc::crc32(v, 0));
+
+    Crc::Stream st;                                             // Streaming == one-shot, any split
+    for (uint8_t width = 8; width <= 32; width = (uint8_t)(width * 2)) {
+        for (size_t cut = 0; cut <= 9; ++cut) {
+            uint32_t expect = 0;
+            if (width == 8) {
+                st.begin(8, Crc::POLY8, Crc::INIT8);
+                expect = Crc::crc8(v, 9);
+            } else if (width == 16) {
+                st.begin(16, Crc::POLY16, Crc::INIT16);
+                expect = Crc::crc16(v, 9);
+            } else {
+                st.begin(32, Crc::POLY32, Crc::INIT32);
+                expect = Crc::crc32(v, 9);
+            }
+            st.feed(v, cut);
+            st.feed(v + cut, 9 - cut);
+            TEST_ASSERT_EQUAL_HEX32(expect, st.value());
+        }
+    }
+
+    const uint8_t bytes[8] = {0x01, 0x00, 0x3E, 0xFA, 0x28, 0x00, 0x00, 0x00};  // Two words, memory order
+    st.begin(32, Crc::POLY32, Crc::INIT32);
+    st.feed_word(0xFA3E0001u);                                  // Record marker + version, little-endian
+    st.feed_word(40u);                                          // Sample count
+    TEST_ASSERT_EQUAL_HEX32(Crc::crc32(bytes, 8), st.value()); // A word is its four little-endian bytes
+}
+
 /** Test entry point. */
 int main(void) {
     UNITY_BEGIN();
@@ -382,5 +425,6 @@ int main(void) {
     RUN_TEST(test_channel_bases_are_distinct);
     RUN_TEST(test_discovery_search);
     RUN_TEST(test_discovery_assign);
+    RUN_TEST(test_crc_module);
     return UNITY_END();
 }

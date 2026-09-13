@@ -42,8 +42,8 @@ The node-config partition is deliberately separate: the motor-profile engine era
 partition when it runs out of slots (~60 saves), which would otherwise destroy the stored node
 address.
 
-Reference build (this branch, 2026-09-13, review round 1): `cln17_v3_release` RAM 11752 B,
-Flash 71288 B; `cln17_v3_dev` Flash 82700 B. (Before the protocol rewrite: 61140 B / 72112 B.)
+Reference build (this branch, 2026-09-13, table CRC): `cln17_v3_release` RAM 11760 B,
+Flash 71480 B; `cln17_v3_dev` Flash 83080 B. (Before the protocol rewrite: 61140 B / 72112 B.)
 
 **Build flags that decide the size** (all in `platformio.ini`, mirrored in `cln234_release`):
 
@@ -59,6 +59,10 @@ Flash 71288 B; `cln17_v3_dev` Flash 82700 B. (Before the protocol rewrite: 61140
   HardwareSerial + HAL UART (5.5 KiB).
 - `-flto=auto`: anything referenced only from inline asm needs `__attribute__((used))`
   (`nvm_flash.h`: `flashg4_ll_nmi_dispatch`) or LTO drops it and the link fails.
+- `-D TP_CRC_HW=1`: `Crc::Stream` (`src/lib/math/helpers/crc.h`) runs on the STM32G4 CRC unit
+  through `src/bsp/stm32g4/crc.h`; without the flag it shifts in software and the stored records
+  are bit-identical. The one-shot `Crc::crc8/16/32` are always software (constexpr, ISR-safe); the
+  unit is one shared peripheral with no locking, so only one stream may be open at a time.
 - `-fno-math-errno`: `sqrtf`/`lrintf` inline to `vsqrt`/`vcvtr`. Keep float literals `f`-suffixed
   and never cast `float` straight to `int64_t` (`__aeabi_f2lz` drags in 2 KiB of soft-double);
   the image currently links no double-precision helper at all.
@@ -85,7 +89,7 @@ byte counts must come from the build you just ran.
 `test/test_tpcp/` holds host-side conformance tests for the CAN protocol wire format (Unity):
 
 ```bash
-python -m platformio test -e native_tpcp    # 21 tests: codecs, layouts, CMD groups, burst, discovery
+python -m platformio test -e native_tpcp    # 22 tests: codecs, layouts, CMD groups, burst, discovery, CRC
 ```
 
 They build nothing from the firmware tree — `tp_wire.h` / `tp_chunks.h` are hardware-independent by
@@ -184,9 +188,10 @@ flash must run inside this window, or the rotor gets yanked against a frozen vec
   - `motor_control/` — motor params, angle calibration + table, current control (`foc-current.h`, HFI),
     `drive_control.h` (control-mode machine + command mailbox + trajectory front end)
   - `math/` — `filters/` (EMA, median3, PLL), `motion/` (S-curve, Hermite, executor, governor,
-    observer), `helpers/`, `trigonometry.h`
+    observer), `helpers/` (incl. `crc.h`: CRC-8/16/32, software + optional hardware stream),
+    `trigonometry.h`
 - `src/bsp/` — board support, split three ways by what a thing actually depends on:
-  - `stm32g4/` — peripheral drivers shared by every board on this MCU family: `cordic.h`,
+  - `stm32g4/` — peripheral drivers shared by every board on this MCU family: `cordic.h`, `crc.h`,
     `tim1_pwm.h`, `bootloader.h`, `nvm_flash.h`, `comp_dac.h`, `fdcan.h`. They take their
     board-dependent values from the active board's `target.h`, which the per-environment include
     path resolves, so none of them branches on a board name.

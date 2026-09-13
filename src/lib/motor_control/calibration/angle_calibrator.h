@@ -517,8 +517,9 @@ public:
      * @brief "load_calibration" command: bind a memory region and restore
      *
      * Receives the flash driver pointer and restarts the non-blocking scan.
-     * When a valid table is found at the profile's Cal-ID chunk (FA3E marker,
-     * sane sample count, samples strictly monotonic), is_calibrated() starts
+     * When a valid table is found at the profile's Cal-ID chunk (FA3E marker with the
+     * current format version, sane sample count, samples strictly monotonic, CRC-32
+     * matching), is_calibrated() starts
      * returning true - unless calibrate() has been triggered meanwhile.
      */
     void load_calibration(FlashEEPROM* mem) {
@@ -534,8 +535,8 @@ public:
     /**
      * @brief "dump_calibration" command: persist the RAM table into flash
      *
-     * Serializes {FA3E marker, sample count, packed monotonic samples,
-     * metadata}. Checks free space first: appends there when the record fits,
+     * Serializes {FA3E marker + format version, sample count, packed monotonic samples,
+     * metadata, CRC-32}. Checks free space first: appends there when the record fits,
      * otherwise erases the whole region and rewrites from offset zero.
      */
     void dump_calibration() {

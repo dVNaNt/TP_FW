@@ -1139,3 +1139,24 @@ FLASH: 71288 bytes (62.16% of 114688 bytes): -156 bytes
 RAM: 11752 bytes (35.86% of 32768 bytes): -8 bytes
 
 
+## 2026-09-13 - CRC module with an STM32G4 hardware backend; the calibration table record carries a CRC-32
+**Changes:**
+- src/lib/math/helpers/crc.h: MSB-first CRC-8 (0x07) / CRC-16/CCITT-FALSE / CRC-32/MPEG-2 as constexpr one-shots (static_asserts on the published check values) plus Crc::Stream for data that arrives in pieces
+- src/bsp/stm32g4/crc.h: the stream on the G4 CRC unit (programmable POL / INIT, byte-wise DR feed) behind -D TP_CRC_HW=1, now set for cln17_v3 and cln234
+- MT6835::Crc8 is Crc::crc8 over the three payload bytes (software on purpose: 20 kHz ISR, shared unit)
+- calibration_table.h: record marker 0xFA3E0001 (format version in the low half), a fourth trailer word = CRC-32 over every preceding word as little-endian bytes, checked on load before a candidate is committed, a record of another version is refused
+- native_tpcp gains test_crc_module (22 tests): check values, stream == one-shot for any split and width, little-endian word feed
+
+**Reasoning:**
+- Review: one CRC implementation for the whole firmware, hardware-selectable at compile time through the BSP, and a stored calibration table that cannot be committed with a flipped bit - a corrupted sample passes the monotonicity check and steers the electrical angle for the life of the record
+
+**Notes:**
+- Bench (node 2, B9AA2D17E4E5): the version-0 record was refused at boot, the drive swept and stored a version-1 record at chunk 14 whose hardware-computed CRC matches an independent Python CRC-32/MPEG-2 over the 420 record bytes
+- a reboot loads it (no resweep), moves track within 0.002 rev, encoder link 0 bad frames
+- boot identification passed main's HFI spread check (R 1.06 ohm, Ld 2.09 mH, Lq 1.84 mH). Every board carrying an old record sweeps once on its first boot with this firmware. Software-CRC build measures 71592 B. cln17_v3_dev 83080 B
+- cln234_release 51696 B / 9168 B
+
+FLASH: 71480 bytes (62.33% of 114688 bytes): +192 bytes
+RAM: 11760 bytes (35.89% of 32768 bytes): +8 bytes
+
+
