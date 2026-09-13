@@ -85,12 +85,32 @@ inline void MX_ADCs_Init() { // Unified bare-metal initialization function for b
     // CKMODE = 3 (Synchronous PCLK/4), MDMA = 2 (12/10-bit mode for DMA), DUAL = 6 (Regular Simultaneous Mode)
     // VSENSESEL = 1: enable the internal temperature sensor conversion path
     // (on STM32G431 the sensor is wired to ADC1 channel 16 only).
+    // DMACFG (CCR bit 13) = 1: DMA CIRCULAR mode for the dual pair. In dual
+    // mode the DMA mode comes from THIS bit, not from ADC1->CFGR.DMACFG; with
+    // it clear the pair is in one-shot mode and STOPS (ADSTART cleared by
+    // hardware) once the DMA has moved one sequence. The software start that
+    // used to run every period re-armed it each time and hid that; a
+    // hardware-triggered ADC converted exactly once and then went silent.
     ADC12_COMMON->CCR = (3U << ADC_CCR_CKMODE_Pos) | (2U << ADC_CCR_MDMA_Pos) | (6U << ADC_CCR_DUAL_Pos) |
-                        ADC_CCR_VSENSESEL; // Write common setup
+                        ADC_CCR_DMACFG | ADC_CCR_VSENSESEL; // Write common setup
 
     // 5. ADC1 (Master) Configuration
     // ALIGN = 1 (Left-aligned), DMACFG = 1 (Circular DMA), DMAEN = 1 (Enable DMA requests)
-    ADC1->CFGR = ADC_CFGR_ALIGN | ADC_CFGR_DMACFG | ADC_CFGR_DMAEN; // Write CFGR register
+    //
+    // HARDWARE TRIGGER: EXTSEL = 10 (TIM1_TRGO2), EXTEN = 10 (falling edge).
+    // tim1_pwm.h routes OC4REF to TRGO2; in PWM mode 1 OC4REF FALLS at the
+    // up-count match with CCR4 = PERIOD - ADC_DELAY_TICKS, i.e. the same
+    // instant the CH4 interrupt fires, ADC_DELAY_TICKS before the counter
+    // peak where every low side conducts and the shunts see the coil
+    // currents. The conversion used to be started by SOFTWARE from that
+    // interrupt, so its sampling instant carried the interrupt's latency
+    // (the USB stack at priority 1 and SysTick at 0 could both hold it off).
+    // Driven by the timer itself the sample point cannot move, whatever the
+    // CPU is doing. ADSTART is set once at the end of ADC_Init() to ARM the
+    // ADC; every trigger edge then converts the sequence (ADC2 follows in
+    // regular simultaneous mode).
+    ADC1->CFGR = ADC_CFGR_ALIGN | ADC_CFGR_DMACFG | ADC_CFGR_DMAEN |
+                 (10U << ADC_CFGR_EXTSEL_Pos) | (2U << ADC_CFGR_EXTEN_Pos); // Write CFGR register
     
     // Sequencer SQR1: L = 2 (Length = 3 ranks). SQ1 = 4 (PA3/I_A),
     // SQ2 = 15 (PB0/I_C), SQ3 = 16 (internal temperature sensor).
@@ -119,8 +139,13 @@ inline void MX_ADCs_Init() { // Unified bare-metal initialization function for b
     ADC1->SMPR2 |= (6U << ADC_SMPR2_SMP16_Pos);
 
     // 6. ADC2 (Slave) Configuration
-    // ALIGN = 1 (Left-aligned). NOTE: Slave does NOT generate DMA requests, so DMAEN is left as 0
-    ADC2->CFGR = ADC_CFGR_ALIGN; // Write slave CFGR register
+    // ALIGN = 1 (Left-aligned). NOTE: Slave does NOT generate DMA requests, so DMAEN is left as 0.
+    // The slave carries the SAME external trigger as the master: in regular
+    // simultaneous mode it is the master's trigger that starts the pair, but
+    // with the slave left on software start it began one conversion behind
+    // the master, and the packed DMA words paired every master rank with the
+    // slave's previous one (the supply channel then read the I_B mid-rail).
+    ADC2->CFGR = ADC_CFGR_ALIGN | (10U << ADC_CFGR_EXTSEL_Pos) | (2U << ADC_CFGR_EXTEN_Pos); // Write slave CFGR register
     
     // Sequencer SQR1: L = 2 (Length = 3 ranks). SQ1 = 2 (PA1/I_B),
     // SQ2 = 1 (PA0/VSENS), SQ3 = 2 (dummy repeat of I_B).
@@ -136,11 +161,15 @@ inline void MX_ADCs_Init() { // Unified bare-metal initialization function for b
 } // End of bare-metal MX_ADCs_Init function
 
 /**
- * @brief Ultra-fast single-instruction trigger for Dual ADC conversion
+ * @brief Arm the dual ADC on its hardware trigger (TIM1 TRGO2).
+ *
+ * With EXTEN != 0, ADSTART does not convert: it arms the ADC, and every
+ * trigger edge from then on converts the regular sequence. Called once from
+ * ADC_Init(); the control-timer interrupt no longer starts conversions.
  */
-__attribute__((always_inline)) inline void ADC1_StartDMAConversion() { // Inline start command replacing LL
-    ADC1->CR |= ADC_CR_ADSTART; // Start ADC1 conversion (ADC2 automatically triggers simultaneously in Dual Mode)
-} // End of ADC1_StartDMAConversion function
+__attribute__((always_inline)) inline void ADC_ArmHardwareTrigger() {
+    ADC1->CR |= ADC_CR_ADSTART; // Arm ADC1 (ADC2 follows in regular simultaneous mode)
+} // End of ADC_ArmHardwareTrigger function
 
 /**
  * @brief Master initialization wrapper orchestrating ADC startup sequencing
@@ -172,6 +201,8 @@ inline void ADC_Init() { // Main initialization wrapper
     // Clear End of Conversion flags before first use to ensure clean interrupts
     ADC1->ISR = ADC_ISR_EOC; // Write 1 to clear EOC flag
     ADC2->ISR = ADC_ISR_EOC; // Write 1 to clear EOC flag
+
+    ADC_ArmHardwareTrigger(); // From here on TIM1 samples the currents, once per PWM period
 } // End of ADC_Init function
 
 /**

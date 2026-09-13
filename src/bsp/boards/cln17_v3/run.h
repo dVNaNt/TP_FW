@@ -188,6 +188,15 @@ inline void run_setup() {
         // is the thing that failed. The board still boots and stays reachable
         // over CAN, which is the point of not stopping here.
     }
+    // The USB stack installs its interrupts at priority 1 (USBD_IRQ_PRIO in
+    // the core, not overridable), above the control pass (DMA1 channel 1 at
+    // 2, see interrupt_setup.h). A HID report or a CDC transfer handled in
+    // that interrupt then preempts the pass for its own duration, and a pass
+    // stretched across the next PWM period boundary reaches the bridge one
+    // period late - a loop delay that jitters with the host's polling. USB is
+    // a background service here: it moves below every control interrupt.
+    NVIC_SetPriority(USB_HP_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
+    NVIC_SetPriority(USB_LP_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 4, 0));
 
 #ifdef DEV_LOG_ENABLE
     // Wait for the host to actually OPEN the port (DTR asserted) before

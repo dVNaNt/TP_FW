@@ -1180,3 +1180,62 @@ FLASH: 71576 bytes (62.41% of 114688 bytes): +96 bytes
 RAM: 11760 bytes (35.89% of 32768 bytes): +0 bytes
 
 
+## 2026-09-13 - ANCHOR changes the axis offset instead of the target; the queue tail follows the live target
+**Changes:**
+- 0xC0 ANCHOR: the engine sets config_.axis_offset_q16 so the reported position becomes the requested value and the rotor stays put (it used to post the value as a position TARGET, so 'set position 25 rev' became a 25 rev move at full speed)
+- DriveReq::Anchor removed
+- DriveControl keeps queue_tail_q32_ equal to the target whenever nothing is queued (non-Motion modes every pass, a halted executor, the inhibit and safe-state paths), so a profiled move planned after a velocity run or a setpoint is sized from where the rotor is - it was sized from a stale tail, a 25 rev S-curve got a ~0 s duration and collapsed into a step the loop chased at the voltage limit
+
+**Reasoning:**
+- Bench report: a move to 1 deg from 9000 deg at 1 rev/s 'hangs, shows the full distance as following error, then corrects itself'
+
+**Notes:**
+- The S-curve now runs its 25 s profile with a following error under 0.002 rev. CAN_PROTOCOL.md updated
+
+FLASH: 71652 bytes (62.48% of 114688 bytes): +76 bytes
+RAM: 11788 bytes (35.97% of 32768 bytes): +28 bytes
+
+
+## 2026-09-13 - Black box: the last 512 control passes around a fault, readable over the protocol
+**Changes:**
+- src/lib/flight_recorder.h: FlightRecorder<N> ring of 24-byte records (electrical angle, measured d/q current, commanded d/q and alpha/beta voltage, commanded q current, coil currents, supply, position error) fed at the end of every closed-loop pass in lib.h, frozen N/8 passes after the fault byte becomes non-zero, thawed by the fault reset
+- register 0x44 reads it in six parts (part 0 = ring state)
+- compiled only with TP_TRACE_DEPTH, set to 512 in cln17_v3_dev (12 KiB RAM), a release image answers NOT_IMPLEMENTED
+- tools/tpcp_host.py trace <node> dumps the ring as CSV
+
+**Reasoning:**
+- Every register a bench can read is a snapshot a few hundred times a second, while a current-loop excursion lives and dies in a handful of 50 us passes
+- the overcurrent trips on long profiled moves could not be diagnosed from the HID polls (the last recorded currents before the trip were 3.8 A on the d axis with the loop commanding 1 A on q - only the ring showed the loop losing its current response over 2 ms first)
+
+**Notes:**
+- cln17_v3_dev 84104 B / 24100 B RAM. Release +28 B for the NOT_IMPLEMENTED handler
+
+FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
+RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
+
+
+## 2026-09-13 - Deterministic control-pass timing: hardware-triggered ADC, encoder SPI at 10.6 MHz, USB below the control interrupts
+**Changes:**
+- adc_setup.h (both boards): the dual ADC is triggered by TIM1 TRGO2 = OC4REF (falling edge at the CCR4 match, ADC_DELAY_TICKS before the counter peak) instead of a software ADSTART from the CH4 interrupt, armed once in ADC_Init()
+- ADC_CCR_DMACFG set - in dual mode the DMA circular / one-shot choice lives in the COMMON register, and with it clear the pair stopped after its first sequence (the per-period software restart had hidden that for the whole life of the driver)
+- the slave ADC carries the same trigger
+- tim1_pwm.h routes OC4REF to TRGO2
+- spi_setup.h (cln17_v3): encoder SPI BR 5 -> 3 (2.66 -> 10.6 MHz, the MT6835 takes 16), the frame drops from ~20 us to ~5 us so the pass starts ~15 us into the period and ends ~30 us in
+- interrupt priorities: TIM1_CC 3 -> 0, control pass (DMA1 ch1) 5 -> 2, USB HP/LP 1 -> 4 (set in run.h after tp_hid_begin, the core hard-codes 1), both boards
+- interrupt_setup.h keeps PASS_OFFSET_LAST / PASS_CYCLES_LAST / PASS_CYCLES_MAX / PASS_LATE from the DWT cycle counter
+
+**Reasoning:**
+- Root cause of the overcurrent trips on long profiled moves (and of their dependence on build, control mode and host polling): the pass started ~21 us into the 50 us period (the 2.66 MHz encoder frame) and took ~27 us, so its end sat within a microsecond of the period boundary
+- the duty vector is latched at the boundary, so a pass that ended just after it reached the bridge a period later than one that ended just before, and the extra executor work of a profiled move (or a USB interrupt preempting the pass) moved the end across that line on some passes only - a loop delay jittering between one and two periods, which the current loop does not tolerate (a 500 Hz oscillation grew over ~2 ms until the 4 A comparator tripped). The same build with a slightly longer pass (the black box compiled in) was stable because its end sat consistently on the far side
+
+**Notes:**
+- Bench (node 1, release build): eight 10/25 rev S-curves at 1 rev/s, velocity runs and the 25 rev -> 1 deg case all clean (coil currents under 0.23 A, following error under 0.002 rev)
+- PASS_LATE stays at its boot value (2, flash stalls) through moves under full HID polling, where it grew by ~1000 per move before the priority change
+- encoder link 0 bad frames at 10.6 MHz
+- boot identification unchanged (R 1.055 ohm, Ld 2.09 mH, Lq 1.89 mH). One run in the series showed an undervoltage + DRV fault with coil currents under 0.3 A - the bench supply, not the loop
+- worth a look. cln234 builds (51688 B) but is untested on hardware. cln17_v3_dev 84104 B
+
+FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
+RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
+
+

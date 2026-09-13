@@ -133,7 +133,12 @@ inline void MX_ADCs_Init() { // Unified bare-metal initialization function for a
     // NOTE: VSENSESEL is deliberately LEFT CLEAR: the CLN234 board temperature
     // comes from the external NTC (PC4/ADC2_IN5), the internal die sensor of
     // the old CLN17 V3 rank-3 slot is not sampled at all.
-    ADC12_COMMON->CCR = (3U << ADC_CCR_CKMODE_Pos) | (2U << ADC_CCR_MDMA_Pos) | (6U << ADC_CCR_DUAL_Pos); // Write common setup
+    // DMACFG (CCR bit 13) = 1: DMA circular mode for the dual pair. In dual
+    // mode this bit, not ADC1->CFGR.DMACFG, selects the DMA mode; without it
+    // the pair stops (ADSTART cleared) after the first sequence once the
+    // conversions are hardware-triggered instead of re-started every period.
+    ADC12_COMMON->CCR = (3U << ADC_CCR_CKMODE_Pos) | (2U << ADC_CCR_MDMA_Pos) | (6U << ADC_CCR_DUAL_Pos) |
+                        ADC_CCR_DMACFG; // Write common setup
 
     // ADC3/4/5 group must be clocked synchronously as well, otherwise ADC3
     // would run on its default asynchronous kernel clock and drift against
@@ -142,7 +147,13 @@ inline void MX_ADCs_Init() { // Unified bare-metal initialization function for a
 
     // 5. ADC1 (Master) Configuration
     // ALIGN = 1 (Left-aligned), DMACFG = 1 (Circular DMA), DMAEN = 1 (Enable DMA requests)
-    ADC1->CFGR = ADC_CFGR_ALIGN | ADC_CFGR_DMACFG | ADC_CFGR_DMAEN; // Write CFGR register
+    // HARDWARE TRIGGER: EXTSEL = 10 (TIM1_TRGO2 = OC4REF, tim1_pwm.h), EXTEN = 10
+    // (falling edge = the up-count CCR4 match, ADC_DELAY_TICKS before the
+    // counter peak). Started from the timer itself, the sampling instant no
+    // longer carries the CH4 interrupt's latency - see the CLN17 V3 board for
+    // the failure that motivated it. ADSTART arms the ADC once in ADC_Init().
+    ADC1->CFGR = ADC_CFGR_ALIGN | ADC_CFGR_DMACFG | ADC_CFGR_DMAEN |
+                 (10U << ADC_CFGR_EXTSEL_Pos) | (2U << ADC_CFGR_EXTEN_Pos); // Write CFGR register
 
     // Sequencer SQR1: L = 1 (Length = 2 ranks). SQ1 = 4 (PA3/I_A),
     // SQ2 = 1 (PA0/VSENS).
@@ -180,8 +191,10 @@ inline void MX_ADCs_Init() { // Unified bare-metal initialization function for a
     // callback. The single conversion (6.5 + 12.5 = 19 ADC cycles ~ 0.45 us)
     // always finishes before the 2-rank ADC12 sequence (38 cycles ~ 0.9 us)
     // raises the DMA TC interrupt, so DR is guaranteed valid at read time.
-    // EXTEN = 0 after reset: software trigger only (ADSTART), as requested.
-    ADC3->CFGR = ADC_CFGR_ALIGN; // Write CFGR register
+    // Same hardware trigger as ADC1 (the ADC345 group lists TIM1_TRGO2 at
+    // EXTSEL 10 as well), so all three phase currents are sampled on the
+    // same timer edge; ADSTART arms it once in ADC_Init().
+    ADC3->CFGR = ADC_CFGR_ALIGN | (10U << ADC_CFGR_EXTSEL_Pos) | (2U << ADC_CFGR_EXTEN_Pos); // Write CFGR register
 
     // Sequencer SQR1: L = 0 (Length = 1 rank). SQ1 = 12 (PB0/I_C).
     ADC3->SQR1 = (0U << ADC_SQR1_L_Pos) | (12U << ADC_SQR1_SQ1_Pos); // Write Rank sequence
@@ -196,18 +209,19 @@ inline void MX_ADCs_Init() { // Unified bare-metal initialization function for a
 // CLN17 V3 setup runs its dual pair without any re-arm at 20 kHz.
 
 /**
- * @brief Ultra-fast trigger for the whole simultaneous 3-converter sample burst
+ * @brief Arm all three converters on the TIM1 TRGO2 hardware trigger.
  *
- * ADC3 (single rank, I_C) is started FIRST so its result is always settled
- * when the ADC12 dual sequence raises DMA TC; ADC1->ADSTART then starts the
- * dual regular simultaneous conversion (ADC2 follows ADC1 automatically in
- * Dual Mode). Both writes are back-to-back register stores: the sampling
- * windows of all three phase currents are aligned within ~100 ns.
+ * With EXTEN != 0, ADSTART arms rather than converts: every trigger edge
+ * from then on starts ADC3 (single rank, I_C) and the ADC12 dual sequence
+ * together, within the trigger's own propagation. ADC3's conversion is the
+ * shorter one, so its DR is settled when the ADC12 DMA raises TC. Called
+ * once from ADC_Init(); the control-timer interrupt no longer starts
+ * conversions.
  */
-__attribute__((always_inline)) inline void ADC1_StartDMAConversion() { // Inline start command replacing LL
-    ADC3->CR |= ADC_CR_ADSTART; // Start ADC3 single-rank conversion (I_C on PB0/ADC3_IN12)
-    ADC1->CR |= ADC_CR_ADSTART; // Start ADC1 conversion (ADC2 automatically triggers simultaneously in Dual Mode)
-} // End of ADC1_StartDMAConversion function
+__attribute__((always_inline)) inline void ADC_ArmHardwareTrigger() {
+    ADC3->CR |= ADC_CR_ADSTART; // Arm ADC3 (I_C on PB0/ADC3_IN12)
+    ADC1->CR |= ADC_CR_ADSTART; // Arm ADC1 (ADC2 follows in regular simultaneous mode)
+} // End of ADC_ArmHardwareTrigger function
 
 /**
  * @brief Master initialization wrapper orchestrating ADC startup sequencing
@@ -247,6 +261,8 @@ inline void ADC_Init() { // Main initialization wrapper
     ADC1->ISR = ADC_ISR_EOC; // Write 1 to clear EOC flag
     ADC2->ISR = ADC_ISR_EOC; // Write 1 to clear EOC flag
     ADC3->ISR = ADC_ISR_EOC; // Write 1 to clear EOC flag
+
+    ADC_ArmHardwareTrigger(); // From here on TIM1 samples the currents, once per PWM period
 } // End of ADC_Init function
 
 /**

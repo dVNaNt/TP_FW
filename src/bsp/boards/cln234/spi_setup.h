@@ -567,13 +567,16 @@ static inline void Encoder_Init() {
 
     SPI_Bus_ConfigureEncoder();  // 8-bit, mode 3
 
-    // DMA transfer-complete interrupt drives the control loop
+    // DMA transfer-complete interrupt drives the control loop. Priority 2:
+    // below the protections (0), the control timer (0) and the ADC data (1),
+    // above USB (moved to 4 in run.h) and the bus, so no host traffic can
+    // stretch a pass across the PWM period boundary (see the CLN17 V3 board).
     NVIC_DisableIRQ(DMA1_Channel1_IRQn);
     NVIC_ClearPendingIRQ(DMA1_Channel1_IRQn);
 
     NVIC_SetPriority(
         DMA1_Channel1_IRQn,
-        NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0)
+        NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 2, 0)
     );
 
     NVIC_EnableIRQ(DMA1_Channel1_IRQn);

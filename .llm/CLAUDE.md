@@ -42,8 +42,8 @@ The node-config partition is deliberately separate: the motor-profile engine era
 partition when it runs out of slots (~60 saves), which would otherwise destroy the stored node
 address.
 
-Reference build (this branch, 2026-09-13, review round 2): `cln17_v3_release` RAM 11760 B,
-Flash 71576 B; `cln17_v3_dev` Flash 83096 B. (Before the protocol rewrite: 61140 B / 72112 B.)
+Reference build (this branch, 2026-09-13, control timing): `cln17_v3_release` RAM 11788 B,
+Flash 71652 B; `cln17_v3_dev` Flash 84104 B (RAM 24100 B with the black box). (Before the protocol rewrite: 61140 B / 72112 B.)
 
 **Build flags that decide the size** (all in `platformio.ini`, mirrored in `cln234_release`):
 
@@ -110,7 +110,8 @@ The control loop does **not** run from `loop()`. It is entirely interrupt-driven
 the drive up and then pumps the CAN protocol and a diagnostic console heartbeat:
 
 ```
-TIM1_CC ISR  → FOC_TimTrig_Callback()   : start ADC DMA, start encoder SPI DMA,
+TIM1 CH4 match (hardware) → ADC conversion starts (TRGO2 = OC4REF, no software in the path)
+TIM1_CC ISR  → FOC_TimTrig_Callback()   : start encoder SPI DMA,
                                           TP.driver_phy.tick_icr() pushes new duties
 ADC DMA done → ADC_READY_Callback()     : range-check phases, feed current / supply / temperature
 SPI DMA done → POSITION_Callback()      : encoder.set_raw_position(), then TP.tick()
@@ -121,6 +122,24 @@ invoke them are defined in `src/bsp/boards/<board>/board.cpp`. `TP.tick()` is th
 pass, gated on `driver_phy.current.is_changed() & driver_phy.supply.is_changed()` — the bitwise `&`
 is deliberate so both freshness flags are cleared every pass. A `std::atomic<bool> is_running`
 re-entrancy guard drops a sample rather than letting an ISR reenter a running pass.
+
+**Timing is part of the design.** The pass runs on the encoder frame's completion and the duty it
+computes is latched at the next CH4 match, so the pass MUST end before that match every time: a pass
+end that wanders across the period boundary makes the loop delay jitter between one and two periods
+and destabilises the current loop (it showed as overcurrent trips on long profiled moves). Three
+things keep it deterministic: the encoder SPI runs at 10.6 MHz (`spi_setup.h`, frame ≈ 5 µs, so
+the pass starts ~15 µs into the 50 µs period and ends ~30 µs in); the ADC is triggered by the timer,
+not by software in an interrupt (`adc_setup.h`, incl. `ADC_CCR_DMACFG` — in dual mode the DMA
+circular/one-shot choice lives in the COMMON register); and the interrupt priorities put every
+control interrupt above USB: COMP 0, TIM1_CC 0, ADC DMA 1, control pass (SPI DMA) 2, USB 4 (moved
+in `run.h`; the core installs it at 1), FDCAN 7. `interrupt_setup.h` keeps `PASS_OFFSET_LAST`,
+`PASS_CYCLES_LAST/MAX` and `PASS_LATE` (passes that ended after the next match; must stay at the
+boot-time value) — read them through direct register access by symbol address when a build changes
+the pass.
+
+**Black box.** `cln17_v3_dev` compiles a `FlightRecorder` (`src/lib/flight_recorder.h`,
+`-D TP_TRACE_DEPTH=512`, 12 KiB RAM) that keeps the last 512 passes and freezes after a fault;
+`tools/tpcp_host.py trace <node>` dumps it (register `0x44`). Use it before theorising about a trip.
 
 ### `TunePulseHeart` (`src/lib/lib.h`)
 

@@ -414,6 +414,27 @@ pass, 5 check, 6 ready, 7 error, 8 reading the stored table, 9 storing) and
 progress runs 32→128 through the forward pass and 128→224 through the reverse
 pass, so a bar moves with the rotor. The flag bits are valid throughout.
 
+### 6.3a `0x44` Black box (development builds) **[decision]**
+
+The drive keeps the last N control passes (`TP_TRACE_DEPTH`, 512 in
+`cln17_v3_dev`; a release image answers NOT_IMPLEMENTED) and freezes the
+ring N/8 passes after the fault byte becomes non-zero, so the passes that
+led to a trip can be read afterwards. A record is 24 bytes, read in parts:
+`[1]` part, `[2..3]` record index (0 = oldest), `[4..7]` two u16 fields.
+
+| Part | `[4..5]`                    | `[6..7]`                         |
+| :--- | :-------------------------- | :------------------------------- |
+| 0    | valid records               | bit0 frozen, bits 8–15 fault at the freeze; `[2..3]` = depth |
+| 1    | electrical angle (65536/period) | measured Iq [mA] i16          |
+| 2    | measured Id [mA] i16        | commanded Uq [10 mV] i16         |
+| 3    | commanded Ud [10 mV] i16    | commanded Iq [mA] i16 (FOC frame)|
+| 4    | coil A current [mA] i16     | coil B current [mA] i16          |
+| 5    | commanded Uα [10 mV] i16    | commanded Uβ [10 mV] i16         |
+| 6    | supply [10 mV] i16          | position error [1/1000 rev] i16  |
+
+A fault reset thaws the ring. `tools/tpcp_host.py trace <node>` dumps it as
+CSV.
+
 ### 6.4 `0x50 – 0x58` Status
 
 | CMD    | Register          | Bytes 1–7                                                                                |
@@ -538,7 +559,7 @@ isVel:1, isAcc:1, isJrk:1; `[5..7]` time u24 [100 µs].
 | `4`  | BRAKE        | —                    | Immediate: short the phases                                   |
 | `5`  | S-CURVE      | position             | Point-to-point move shaped by the velocity / acceleration carried or the limits |
 | `6`  | PVT          | position, time       | Hermite segment ending at the position with the velocity carried |
-| `7`  | ANCHOR       | position             | Immediate: redefine "here" (absolute) or shift it (relative)  |
+| `7`  | ANCHOR       | position             | Immediate: redefine "here" (absolute) or shift it (relative) by changing the axis offset of `0x01/0x00` - the rotor does not move; save the node configuration to keep it |
 | `8`  | LIMIT        | —                    | Immediate: adopt the velocity / acceleration / jerk carried   |
 | `9`  | HOMING       | —                    | **not implemented**                                           |
 | `A`  | STEP-DIR     | —                    | **not implemented**                                           |
@@ -565,7 +586,9 @@ acceleration and jerk as the live limits.
 
 Absolute queued targets are converted to displacements by the control ISR
 against the end of the queue, so a mixed absolute / relative stream stays
-consistent.
+consistent. The queue end follows the live target whenever nothing is
+queued (after a velocity run, a setpoint, a stop, or while parked), so the
+first profiled move after any of those is sized from where the rotor is.
 
 ### 7.3 `0xCF` Save config
 

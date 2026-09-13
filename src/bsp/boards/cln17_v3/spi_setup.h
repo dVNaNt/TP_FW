@@ -243,12 +243,27 @@ static inline void SPI1_Init() {
     DMA1_Channel2->CCR = DMA_CCR_MINC | DMA_CCR_DIR | (2U << DMA_CCR_PL_Pos); // Read from memory, medium-high priority
 
     // SPI master, software NSS, 8-bit frame with RXNE pulse on byte boundary
-    // (FRXTH), DMA requests enabled. BR=5: PCLK2 / 64 -> ~2.66 MHz at 170 MHz.
+    // (FRXTH), DMA requests enabled.
     SPI1->CR2 = SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN | SPI_CR2_FRXTH | (7U << SPI_CR2_DS_Pos);
 
 #if (ENCODER_TYPE == ENCODER_MT6835)
-    // SPI mode 3 (CPOL=1, CPHA=1) as required by the MT6835
-    SPI1->CR1 = SPI_CR1_MSTR | SPI_CR1_SSM | SPI_CR1_SSI | SPI_CR1_CPOL | SPI_CR1_CPHA | (5U << SPI_CR1_BR_Pos);
+    // SPI mode 3 (CPOL=1, CPHA=1) as required by the MT6835.
+    //
+    // BR=3: PCLK2 / 16 = 10.6 MHz at 170 MHz (the sensor takes up to 16 MHz).
+    // The clock sets WHEN the control pass can start: the pass runs on the
+    // completion of this 6-byte frame, and at the former 2.66 MHz (BR=5) the
+    // frame took ~20 us of the 50 us period, after which the ~27 us pass
+    // ended right on the next period boundary. Whether it finished just
+    // before or just after decided whether the duty it computed reached the
+    // bridge one or two periods later, and that per-pass 1 <-> 2 period
+    // jitter of the loop delay - not any one build, mode or interrupt -
+    // destabilised the current loop on long profiled moves (the extra
+    // executor work pushed the end past the boundary on some passes only).
+    // At 10.6 MHz the frame is ~5 us and the pass ends ~18 us before the
+    // boundary, so the delay is one period every time. The CRC check on
+    // every frame (EncoderLink) guards the faster clock: a bad frame is
+    // dropped and counted in 0x43/0x07.
+    SPI1->CR1 = SPI_CR1_MSTR | SPI_CR1_SSM | SPI_CR1_SSI | SPI_CR1_CPOL | SPI_CR1_CPHA | (3U << SPI_CR1_BR_Pos);
 #else
     // SPI mode 1 (CPOL=0, CPHA=1) as required by the TLE5012B
     SPI1->CR1 = SPI_CR1_MSTR | SPI_CR1_SSM | SPI_CR1_SSI | SPI_CR1_CPHA | (5U << SPI_CR1_BR_Pos);
@@ -271,13 +286,16 @@ static inline void Encoder_Init() {
 
     SPI1_Init();
 
-    // DMA transfer-complete interrupt drives the control loop
+    // DMA transfer-complete interrupt drives the control loop. Priority 2:
+    // below the protections (0), the control timer (0) and the ADC data (1),
+    // above USB (moved to 4 in run.h) and the bus. Nothing a host does can
+    // stretch a pass, so the pass ends at the same point of every period.
     NVIC_DisableIRQ(DMA1_Channel1_IRQn);
     NVIC_ClearPendingIRQ(DMA1_Channel1_IRQn);
 
     NVIC_SetPriority(
         DMA1_Channel1_IRQn,
-        NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0)
+        NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 2, 0)
     );
 
     NVIC_EnableIRQ(DMA1_Channel1_IRQn);
