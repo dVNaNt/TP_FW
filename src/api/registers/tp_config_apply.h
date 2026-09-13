@@ -16,7 +16,7 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#include "../../lib/lib.h"  // TunePulseHeart and the drive mailbox
+#include "../../core/lib.h"  // TunePulseHeart and the drive mailbox
 #include "../tp_node.h"      // TpNodeConfig: the shadow being applied
 
 // ============================================================================

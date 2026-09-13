@@ -41,7 +41,7 @@
 
 #include <Arduino.h>     // delay(), millis()
 #include "stm32g4xx.h"   // CMSIS device header: SPI1, DMA1, GPIO registers
-#include "lib/dev_log.h" // TP_LOG* macros: USB CDC diagnostics over SerialUSB
+#include "core/dev_log.h" // TP_LOG* macros: USB CDC diagnostics over SerialUSB
 #include "bsp/chips/encoders/mt6835.h" // MT6835 frame decode and CRC-8 (target-agnostic)
 
 // ==============================================================================

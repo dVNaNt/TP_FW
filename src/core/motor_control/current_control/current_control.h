@@ -31,7 +31,7 @@
 
 #include <cmath>  // For sqrtf and fabsf
 #include "../../common.h"
-#include "../../drivers/pwm_driver/driver_pwm.h"
+#include "../../phy/pwm_driver/driver_pwm.h"
 #include "../../math/filters/pll.h"                  // Second-order PLL for smooth angular velocity
 #include "../../math/helpers/frequency_generator.h"  // Frequency generator for HFI
 #include "../../math/helpers/stability_check.h"      // Stability check for current monitoring

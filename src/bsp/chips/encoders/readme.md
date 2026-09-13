@@ -23,5 +23,5 @@ and lets the math layer treat all encoders identically without runtime
 rescaling.
 
 Reference implementation of the consumer side:
-`src/lib/drivers/encoder_phy/encoder.h` — `get_angle()` is documented as
+`src/core/phy/encoder_phy/encoder.h` — `get_angle()` is documented as
 *"Get the 'clean' angle (32 bits, left-aligned)"*.

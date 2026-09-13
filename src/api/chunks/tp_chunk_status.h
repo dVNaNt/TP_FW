@@ -182,7 +182,7 @@ static_assert(sizeof(TpDiagEncoderLink) == 8, "TpDiagEncoderLink must fill one f
 /**
  * @brief 0x44 Black box: one part of one control-rate record, or the ring's state.
  *
- * The drive keeps the last N closed-loop passes (lib/flight_recorder.h) and
+ * The drive keeps the last N closed-loop passes (core/flight_recorder.h) and
  * freezes them shortly after a fault. A record is 24 bytes and a frame
  * carries four data bytes, so it is read in parts: part 0 answers with the
  * ring's state (depth, valid count, frozen, fault byte), parts 1-6 with the

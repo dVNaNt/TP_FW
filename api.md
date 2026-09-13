@@ -78,13 +78,13 @@ For PVT mode time step between messages should be less than 8s. Iess = better. T
 
 Target position and velocity at time
 
-|  Name  |  Type   |  Size  |                      Description                      |
-| :----: | :-----: | :----: | :---------------------------------------------------: |
-|   RW   |  bool   | 1 bit  |                       Always 1                        |
-| burst  |  uint2  | 2 bit  |                       Always 11                       |
-| time21 | uint21  | 21 bit |                   Time mask [250us]                   |
-| vel18  | float16 | 16 bit |                    Velocity [RPS]                     |
-| pos24  | q1.7.16 | 24 bit | 7bit signed rotations + 16bit angle resolution (mask) |
+|  Name  |   Type   |  Size  |                      Description                      |
+| :----: | :------: | :----: | :---------------------------------------------------: |
+|   RW   |   bool   | 1 bit  |                       Always 1                        |
+| burst  |  uint2   | 2 bit  |                       Always 11                       |
+| time21 |  uint21  | 21 bit |                   Time mask [250us]                   |
+| vel16  | bfloat16 | 16 bit |                    Velocity [RPS]                     |
+| pos24  | q1.7.16  | 24 bit | 7bit signed rotations + 16bit angle resolution (mask) |
 
 #### PVcTF mode
 
@@ -466,15 +466,13 @@ Quick search homing settings
 
 Fine search homing settings
 
-|   Name   |   Type   |  Size  | Description                                                  |
-| :------: | :------: | :----: | :----------------------------------------------------------- |
-|   CMD    |  uint8   | 8 bit  | 0x01                                                         |
-|  SubCMD  |  uint8   | 8 bit  | 0x??                                                         |
-| Trigger  |   bool   | 1 bit  | External trigger for fine search (e.g. Endstop): `0`: Disable, `1`: Enabled |
-| Retract  | bfloat16 | 16 bit | Retract before fine search [rev]                             |
-| Reserved |   N/A    | 10 bit | Reserved                                                     |
-| Velocity | bfloat16 | 16 bit | First search speed, [rev/s]                                  |
-|  Torque  | bfloat16 | 16 bit | Torque threshold for stall detection, [Nm]                   |
+|   Name   |   Type   |  Size  | Description                                |
+| :------: | :------: | :----: | :----------------------------------------- |
+|   CMD    |  uint8   | 8 bit  | 0x01                                       |
+|  SubCMD  |  uint8   | 8 bit  | 0x??                                       |
+| Retract  | bfloat16 | 16 bit | Retract before fine search [rev]           |
+| Velocity | bfloat16 | 16 bit | First search speed, [rev/s]                |
+|  Torque  | bfloat16 | 16 bit | Torque threshold for stall detection, [Nm] |
 
 ##### 0x01??: CW Reference motion limit (R/W)
 

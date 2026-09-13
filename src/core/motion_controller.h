@@ -2,7 +2,7 @@
 
 
 /**
- * @file foc_vector_synthesis.h
+ * @file motion_controller.h
  * @brief Cascaded position/velocity torque-command synthesizer ("epsilon
  *        spring + damper") with a dynamic-bandwidth kinematic observer.
  *

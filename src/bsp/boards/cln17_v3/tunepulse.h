@@ -22,7 +22,7 @@
 
 #include <Arduino.h>
 
-#include "lib/lib.h"
+#include "core/lib.h"
 
 #include "target.h"
 
@@ -57,10 +57,10 @@ extern TunePulseHeart TP;
 #include "bsp/stm32g4/fdcan.h"        // CAN-FD driver + chunk API (CAN_BUS)
 #include "bsp/stm32g4/comp_dac.h"       // Comparator (hardware OC/OV) protection
 #include "bsp/stm32g4/cordic.h"     // CORDIC hardware trigonometry accelerator
-#include "bsp/stm32g4/crc.h"        // CRC unit backend of lib/math/crc.h (active with TP_CRC_HW)
+#include "bsp/stm32g4/crc.h"        // CRC unit backend of core/math/crc.h (active with TP_CRC_HW)
 #include "bsp/stm32g4/nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
 #include "bsp/stm32g4/tim1_pwm.h"  // TIM1 complementary PWM backend
-#include "lib/dev_log.h"      // TP_LOG*: bring-up messages exist only in DEV_LOG_ENABLE builds
+#include "core/dev_log.h"      // TP_LOG*: bring-up messages exist only in DEV_LOG_ENABLE builds
 
 /**
  * @brief LED apply callback for the CLN17-v3 tricolor element.

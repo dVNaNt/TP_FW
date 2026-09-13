@@ -31,7 +31,7 @@
 #pragma once // Prevent multiple compiler inclusions of this header file
 
 #include "../../common.h" // Include common project definitions, utilities, and macros
-#include "../../drivers/flash_eeprom.h" // EEPROM-emulation driver used for calibration-table persistence
+#include "../../phy/flash_eeprom.h" // EEPROM-emulation driver used for calibration-table persistence
 #include "../../math/crc.h"         // Crc::Stream: CRC-32 over the stored record
 
 #ifndef CAL_TABLE_CAPACITY // Check if CAL_TABLE_CAPACITY is not defined externally

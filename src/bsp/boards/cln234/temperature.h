@@ -3,7 +3,7 @@
  * @brief External NTC thermistor (TEMP = PC4 / ADC2_IN5) support for CLN234.
  *
  * Board glue for the generic Temperature driver
- * (lib/drivers/pwm_driver/temperature.h): provides the raw -> degC
+ * (core/phy/pwm_driver/temperature.h): provides the raw -> degC
  * conversion callback and the ISR feed helper. No lib changes: everything
  * below is CLN234-target-only code.
  *
@@ -17,7 +17,7 @@
  * @brief External NTC thermistor (TEMP = PC4 / ADC2_IN5) support for CLN234.
  *
  * Board glue for the generic Temperature driver
- * (lib/drivers/pwm_driver/temperature.h): provides the raw -> degC
+ * (core/phy/pwm_driver/temperature.h): provides the raw -> degC
  * conversion callback and the ISR feed helper. No lib changes: everything
  * below is CLN234-target-only code.
  *
@@ -51,7 +51,7 @@
 #define TEMPERATURE_CLN234_H
 
 #include "bsp/chips/temperature/ntc.h"            // Target-agnostic NTC template (NTC_GetCelsius)
-#include "lib/drivers/pwm_driver/temperature.h"  // Generic Temperature driver (callback API)
+#include "core/phy/pwm_driver/temperature.h"  // Generic Temperature driver (callback API)
 
 /**
  * @brief Raw -> degC conversion callback for the generic Temperature driver.

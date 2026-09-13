@@ -1239,3 +1239,20 @@ FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
 RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
 
 
+## 2026-09-13 - Repository restructuring
+**Changes:**
+- Renamed src/lib to src/core
+- Renamed src/core/drivers to src/core/phy
+- Renamed foc_vector_synthesis.h to motion_controller.h
+
+**Reasoning:**
+- Clearer naming: core for the hardware-agnostic control stack, phy for the physical-layer drivers
+
+**Notes:**
+- All include paths and documentation references updated
+- git history preserved via git mv
+
+FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
+RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
+
+

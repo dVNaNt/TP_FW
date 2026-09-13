@@ -23,7 +23,7 @@
  * Integration notes:
  * - FlashEEPROM (@c calibration_dump) is declared BEFORE AngleCalibrator so
  *   its address can be injected into the calibrator at construction time.
- * - LED handling is platform-independent through the LedDriver (drivers/led_driver.h):
+ * - LED handling is platform-independent through the LedDriver (phy/led_driver.h):
  *   a single apply callback registered by the board layer receives two packed
  *   RGB888 words, one per LED element (see tunepulse.h).
  * Copyright 2026, creapunk
@@ -31,10 +31,10 @@
  */
 
 #include "common.h"
-#include "drivers/encoder_phy/encoder.h"
-#include "drivers/led_driver.h"
-#include "drivers/pwm_driver/driver_pwm.h"
-#include "foc_vector_synthesis.h"  // Position-velocity cascaded controller
+#include "phy/encoder_phy/encoder.h"
+#include "phy/led_driver.h"
+#include "phy/pwm_driver/driver_pwm.h"
+#include "motion_controller.h"  // Position-velocity cascaded controller
 #include "math/helpers/frequency_generator.h"
 #include "math/motion/motion_executor.h"  // Real-time motion trajectory execution
 #include "math/motion/motion_governor.h"
@@ -46,7 +46,7 @@
 #include "motor_control/types.h"
 #include "flight_recorder.h"  // Control-rate black box (compiled in with TP_TRACE_DEPTH)
 
-#include "drivers/tunepulse_interlayer.h"
+#include "phy/tunepulse_interlayer.h"
 // Forward declaration of the board integration type (defined by target layer)
 struct TunePulseHeart;
 
