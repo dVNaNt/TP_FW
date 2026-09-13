@@ -108,7 +108,9 @@ private:
         // Precompute scale so that the conversions reduce to shifts:
         //   volts = (norm * scale_) >> 10 / 1000  ==  norm/2^15 * max_voltage_
         //   norm  = (mv << 10) / scale_           ==  mv/max_mv * 2^15
-        scale_ = (int32_t)(max_voltage_ * 1000.0) >> 5;
+        // 1000.0f, not 1000.0: a double literal here promoted the whole product to
+        // double and pulled 2 KiB of libgcc soft-float into the image.
+        scale_ = (int32_t)(max_voltage_ * 1000.0f) >> 5;
     }
 
     /**
@@ -132,7 +134,7 @@ private:
             // Convert filtered output to Q15. >>1 brings it to Q15 range.
             voltage_norm_ = filter_.get_output() >> 1;
 
-            voltage_v_ = (float)(((int32_t)voltage_norm_ * scale_) >> 10) * 0.001;
+            voltage_v_ = (float)(((int32_t)voltage_norm_ * scale_) >> 10) * 0.001f;  // float literal: keeps the FPU single-precision
 
             // OPTIMIZATION (P2.3): maintain the reciprocal here (slow path,
             // once per new sample) so volts2duty() stays multiply-only.

@@ -63,8 +63,13 @@ public:
         seg_cmd_start_vel_ = 0.0f;
         seg_cmd_end_vel_ = 0.0f;
         seg_torque_ = 0.0f;
-        
-        base_mode_ = MotionMode::FREERUN;
+
+        // A fresh queue is a HALTED queue: it holds the initial position at the
+        // anchor and starts the first segment the tick it arrives, exactly like
+        // a queue that ran dry. Starting in FREERUN instead bound the target to
+        // the measured position with a zero torque envelope, so an axis put in
+        // motion mode with nothing queued yet went limp until a segment came.
+        base_mode_ = static_cast<MotionMode>(0xFF);
         trigger_flags_ = 0;
         is_reversible_ = false;
 
@@ -139,6 +144,15 @@ public:
             }
         }
 
+        // A queue that ran dry (forward playback entered HALT above, or an
+        // earlier pass did) is halted: the caller keeps the full torque
+        // envelope so the axis HOLDS the anchor instead of going limp. Only the
+        // reverse path used to raise the flag, so a finished forward queue
+        // reported a zero torque limit and a loaded axis fell the moment its
+        // last segment completed.
+        if (static_cast<uint8_t>(base_mode_) == 0xFF) {
+            halt = true;
+        }
         if (!halt) {
             warn = (time_scale >= 0) ? (buf_.future_count() == 1) : (buf_.history_count() == 1);
         }
@@ -315,6 +329,17 @@ private:
                 
                 MotionCommandTM first;
                 if (buf_.peek_active(first)) enter_segment(first, now_us, v0);
+
+                // The segment has only just begun: leave unless it is one that
+                // finishes on the spot (ANCHOR, or a hold with a successor
+                // already queued). Falling through unconditionally treated the
+                // segment as complete in the same pass - its displacement was
+                // folded into the anchor untravelled, its successor was started
+                // with a start time one duration in the future, and the wrapped
+                // elapsed time then completed every following segment one tick
+                // apart until the queue was empty. Whatever had been queued by
+                // then was swallowed; whatever arrived later played normally.
+                if (!needs_forward_transition(0, 0, 0)) return;
                 continue;
             }
 
@@ -400,9 +425,9 @@ private:
             case MotionMode::HERMITE: {
                 if (seg_dur_us_ > 0) { // Regular Hermite or Hold Limited
                     uint32_t t = (t_in_seg > seg_dur_us_) ? seg_dur_us_ : t_in_seg;
-                    int32_t dp_q16_32 = 0;
-                    hermite_.eval(t, dp_q16_32, out.velocity_rps);
-                    out.position_q32 = anchor_q32_ + (int64_t)dp_q16_32;
+                    int64_t dp_q32 = 0;                    // Displacement from the segment start, Q32.32
+                    hermite_.eval(t, dp_q32, out.velocity_rps);
+                    out.position_q32 = sat_add_i64(anchor_q32_, dp_q32);
                     out.velocity_rps *= time_scale * inv_time_scale;
                 } else { // Hold Unlimited
                     out.position_q32 = anchor_q32_;

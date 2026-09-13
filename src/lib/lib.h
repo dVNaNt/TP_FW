@@ -214,6 +214,32 @@ public:
     int32_t err_sign = -1;    ///< Sign correction applied to the mechanical encoder position.
     int32_t encoder_pos = 0;  ///< Last corrected mechanical encoder position (counts).
 
+    /**
+     * @brief Sign that maps the loop's torque command onto the FOC q axis.
+     *
+     * The position and velocity loops work in encoder units: a positive
+     * command must move the reported position up. The FOC frame is fixed by
+     * physics instead: a positive q-axis current always advances the rotor
+     * in the direction the electrical angle grows, and the angle table makes
+     * that angle grow in the sense the sweep rotated the field. Which way the
+     * ENCODER counts for that rotation is exactly what Pass0 of the sweep
+     * measures and publishes as the motor direction (+1: the encoder counts
+     * down for a positive field rotation, -1: it counts up). With
+     * @c err_sign = -1 turning the raw count into the reported position, a
+     * positive q current moves the reported position by @c direction, so the
+     * loop's command has to be multiplied by that direction before it reaches
+     * the current controller. A hard-coded +1 was right for the motors the
+     * firmware was tuned on and made the position loop positive feedback on
+     * every direction = -1 motor: the rotor ran away from any setpoint at the
+     * voltage-limited speed with a small measured current.
+     *
+     * Only the FOC command and the reported measured q current cross this
+     * sign; everything the loops and the protocol see stays in encoder units.
+     */
+    float torque_sign() const {
+        return (motor_params.get_direction() < 0) ? -1.0f : 1.0f;  // Unknown (0) counts as +1
+    }
+
     // Position-hold target for the position controller. Captured at the moment
     // the angle calibration completes (and at every controller re-arm), so the
     // rotor HOLDS where it is instead of being yanked to the absolute
@@ -228,6 +254,11 @@ public:
     /// executor torque triggers and the telemetry snapshot, so a segment can
     /// end on a force condition without the control loop measuring anything new.
     float last_current_a_ = 0.0f;
+
+    /// True while the previous pass was routed to a runtime electrical
+    /// identification. The falling edge is where the front end is re-seeded:
+    /// the routine rotates the shaft, so the targets it froze are stale.
+    bool was_identifying_ = false;
 
     /// Endstop / probe input word handed to the trajectory triggers. No such
     /// inputs are wired on CLN17 v3 yet, so it stays zero; a board that adds
@@ -268,6 +299,14 @@ public:
         if (driver_phy.current.is_changed() & driver_phy.supply.is_changed()) {
             driver_phy.tick();
             counter++;
+            // A downed encoder link is a driver fault: the bridge goes Hi-Z
+            // and enabling is refused until the link is back. The encoder
+            // object keeps its flag raised for as long as the link is down,
+            // so a fault reset that comes too early is re-asserted here on
+            // the very next pass, like every other latched condition.
+            if (encoder.is_fault()) {
+                driver_phy.set_fault().encoder(true);
+            }
             led.set().led1().r(driver_phy.get_fault() ? 255 : 0);  // LED1 = fault indicator (red channel)
             uint32_t faulte = driver_phy.get_fault();
             // if (faulte) {
@@ -291,11 +330,16 @@ public:
             // ========================================================================
             bool flash_window = false;       // True when THIS pass leaves the bridge in a zero-current state
             float targt = current_target_a;  // Local working copy of the current target [A]
+            float foc_sign = 1.0f;           // Encoder-units -> FOC-frame sign applied to targt (closed loop only)
 
             // Closed loop is reachable only with a valid angle table; every
             // other state (boot, identification, angle sweep, fault) drives the
-            // bridge directly and bypasses the front end.
-            const bool closed_loop = (motor_status == MotorStatus::Success) && angle_calibrator.is_calibrated();
+            // bridge directly and bypasses the front end. An identification
+            // started at runtime (TP_CALIB_ELECTRICAL over the protocol) counts
+            // too: MotorCalibration owns the bridge until it reports Success.
+            const bool identifying = current_driver.is_identifying();
+            const bool closed_loop =
+                (motor_status == MotorStatus::Success) && angle_calibrator.is_calibrated() && !identifying;
             if (!closed_loop) {
                 // Still service the front end so commands arriving during boot
                 // or calibration are consumed rather than piling up in the
@@ -336,14 +380,82 @@ public:
                             // Pass0 step statistics ("Motion too inconsistent").
                             targt = 0.0f;
                             flash_window = true;  // Zero-current vector latched: NVM programming allowed
+                        } else if (angle_calibrator.is_failed() || angle_calibrator.is_parked()) {
+                            // A sweep that ended in error, or none requested yet
+                            // (the table was never stored and calibrate() has not
+                            // been called): release the rotor. Holding 0.5 A at
+                            // the angle the sweep stopped at pinned the shaft,
+                            // heated the coil and closed the NVM window until the
+                            // next reboot, so saves and erases were refused too.
+                            targt = 0.0f;
+                            flash_window = true;  // Zero-current vector latched: NVM programming allowed
                         }
                         break;
                     }
 
-                    // Real electrical angle (needed for closed loop and sync):
-                    // apply flash-stored correction then the polarity sign.
-                    angle_el_ = (uint16_t)((int16_t)(angle_calibrator.get_el_angle_correction(real_raw_ang)) *
-                                           -motor_params.get_direction());
+                    // ================================================================
+                    // Runtime electrical identification.
+                    //
+                    // The routine is advanced inside tick_control_foc(), which
+                    // supplies its own d/q test voltages and steers the angle
+                    // itself, so the pass skips the front end (serviced
+                    // inhibited above) and falls through to the FOC step with a
+                    // zero target. Before this branch existed the protocol could
+                    // arm the routine but the disabled drive took the Freewheel
+                    // return below and it never ran - until the stage was next
+                    // enabled, when it ran inside whatever mode that was.
+                    // ================================================================
+                    if (identifying) {
+                        was_identifying_ = true;
+                        // A fault releases the bridge but leaves the routine's
+                        // ramp voltage armed: the instant the fault cleared it
+                        // resumed at full voltage and tripped again, forever.
+                        // Abort instead; the boot path is untouched.
+                        if (driver_phy.get_fault() != 0u) {
+                            current_driver.abort_identification("DRIVER FAULT during runtime identification",
+                                                                (uint8_t)driver_phy.get_fault());
+                        }
+                        targt = 0.0f;                      // MotorCalibration commands the voltages
+                        break;                             // Straight to tick_control_foc()
+                    }
+                    if (was_identifying_) {
+                        // Identification just finished: the slow-rotation stage
+                        // moved the shaft while the front end's targets were
+                        // frozen, so re-seed them from the measured position or
+                        // the next enable would snap the rotor back to where it
+                        // was before the routine started.
+                        was_identifying_ = false;
+                        drive.rearm(real_pos, drive.now_us());
+                        pos_hold_target_ = real_pos;
+                    }
+
+                    // Real electrical angle (needed for closed loop and sync).
+                    //
+                    // The table returns the angle the sweep COMMANDED when the
+                    // rotor stood at this encoder value, counted in the sweep's
+                    // own rotation sense (the sense that makes the encoder count
+                    // up). Two direction-dependent steps turn it into the rotor's
+                    // electrical angle in the FOC frame:
+                    //
+                    //  1. De-rotate by the detected direction. The sweep ran the
+                    //     field at -direction * step per sample, so the commanded
+                    //     FOC angle at sample k is -direction * table angle.
+                    //  2. Add a quarter period. The sweep held the rotor with a
+                    //     q-axis current, whose field leads the commanded angle by
+                    //     90 degrees electrical, and a free rotor aligns its
+                    //     d-axis with that field.
+                    //
+                    // For direction = +1 this is exactly what the earlier fixed
+                    // "-90 degrees inside the table" produced, so nothing changes
+                    // for the motors it was tuned on; for direction = -1 that fixed
+                    // shift landed 180 degrees off and made the position loop
+                    // positive feedback - the rotor ran away from every setpoint
+                    // until the overcurrent comparator tripped.
+                    {
+                        const int32_t table_el = (int16_t)angle_calibrator.get_el_angle_correction(real_raw_ang);
+                        const int32_t rotor_el = (table_el * -(int32_t)motor_params.get_direction()) + 16384;
+                        angle_el_ = (uint16_t)rotor_el;
+                    }
 
                     // ================================================================
                     // Closed-loop dispatch through the drive front end.
@@ -364,15 +476,20 @@ public:
                     const bool nvm_window = motor_params.is_flash_busy();
                     const DriveOutput cmd = drive.tick(real_pos, last_current_a_, io_inputs_, nvm_window);
 
+                    // The front end and the loops work in encoder units; the
+                    // current they ask for crosses into the FOC frame through
+                    // torque_sign(). The sweep and the identification above
+                    // never reach this switch, so their frame is untouched.
+                    foc_sign = torque_sign();
                     switch (cmd.action) {
                         case DriveAction::RunPosition:
                             // Cascaded position loop against the resolved target.
-                            targt = position_controller.tick(real_pos, cmd.target_pos_q16, cmd.target_vel_rps,
-                                                             cmd.max_current_a, false);
+                            targt = foc_sign * position_controller.tick(real_pos, cmd.target_pos_q16, cmd.target_vel_rps,
+                                                                        cmd.max_current_a, false);
                             break;
                         case DriveAction::RunTorque:
                             // Position loop bypassed: command the q-axis current directly.
-                            targt = cmd.torque_target_a;
+                            targt = foc_sign * cmd.torque_target_a;
                             break;
                         case DriveAction::Tone: {
                             // The coils are a speaker: no regulator runs and the
@@ -464,7 +581,10 @@ public:
 
             // Final FOC step: convert (electrical angle, q-current target) into
             // an alpha-beta voltage vector and hand it to the physical layer.
-            last_current_a_ = targt;  // Remember what FOC was asked for: next pass feeds it to the triggers
+            // targt is already in the FOC frame; the remembered value is
+            // folded back into encoder units (foc_sign is +-1) so the
+            // trajectory triggers and the telemetry see the loop's own sign.
+            last_current_a_ = foc_sign * targt;  // What the loop asked for: next pass feeds it to the triggers
             pwm_voltage_ab = current_driver.tick_control_foc((int16_t)angle_el_, targt);
             driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
 

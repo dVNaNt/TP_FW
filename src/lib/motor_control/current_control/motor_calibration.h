@@ -32,6 +32,17 @@
 // ABC = 0, CBA = -16384, ACB = 32767
 
 static constexpr uint16_t CAL_OVERSAMPLING_POW2 = 64;  // 64 samples
+
+/** Why an electrical identification aborted (reported through 0x43/0x08). */
+enum IdentFailure : uint8_t {
+    IDENT_FAIL_NONE = 0,          ///< No abort since boot
+    IDENT_FAIL_PATTERN = 1,       ///< Phase currents match no known connection pattern
+    IDENT_FAIL_UNDERPOWER = 2,    ///< Injected power too small to measure (open phase, low bus)
+    IDENT_FAIL_OVERPOWER = 3,     ///< Slow-rotation power exceeded the motor's limit (stalled / loaded)
+    IDENT_FAIL_DRIVER_FAULT = 4,  ///< The driver raised a fault while the routine ran (fault byte recorded)
+    IDENT_FAIL_INDUCTANCE = 5,    ///< HFI inductance missing on a stage or inconsistent between the probe frequencies
+    IDENT_FAIL_UNKNOWN = 255      ///< Aborted through a path that did not classify itself
+};
 static constexpr uint8_t CAL_OVERSAMPLING_SHIFT = 6;   // log2(64) for shift optimization
 
 // ~0.1 % of maximum driver output power. Otherwise we can bound ADC resolution easily and cant control driver
@@ -152,6 +163,17 @@ private:
     float diag_ia_amps_;       // Filtered phase A current [A]
     float diag_ib_amps_;       // Filtered phase B current [A]
     float diag_supply_volts_;  // Supply (Vbus) voltage [V]
+
+    // ---- Last failure, machine readable ------------------------------------
+    // The console dump in set_error() is the full story, but the console is
+    // often not connected; these fields let the protocol report WHY the last
+    // identification aborted (0x43/0x08) without it.
+    uint8_t last_fail_code_ = 0;        // IdentFailure of the last abort (0 = none since boot)
+    uint8_t last_fail_stage_ = 0;       // MotorStatus that was active when it aborted
+    uint8_t last_fail_fault_ = 0;       // Driver fault byte handed to abort() (driver-fault aborts only)
+    float last_fail_ia_amps_ = 0.0f;    // Phase A current at the abort [A]
+    float last_fail_ib_amps_ = 0.0f;    // Phase B current at the abort [A]
+    float last_fail_volts_ = 0.0f;      // Injected voltage at the abort [V]
 
 public:
     // Constructor - initialize all calibration variables
@@ -336,6 +358,8 @@ public:
                     }
 
                     target_current_amps_ = measured_current_amps;
+                    TP_LOG_VALS("ELEC CAL: warmup end: V[V],I[A],P[W],Vbus[V],ticks_left", voltage_volts_, measured_current_amps,
+                                power_watts, supply_voltage_volts, timeout_.get_timeout());
 
                     timeout_.set_timeout(SETTLE_TIMEOUT);
                     status_tracker = MotorStatus::Settle;
@@ -384,7 +408,8 @@ public:
                     // low for this motor.
                     set_error(status_tracker, motor, setup_status,
                               "OVERPOWER: rotation power reached the max limit "
-                              "(rotor stalled/jammed? load or inertia too high? P_max too low?)");
+                              "(rotor stalled/jammed? load or inertia too high? P_max too low?)",
+                              IDENT_FAIL_OVERPOWER);
                     break;
                 }
 
@@ -449,6 +474,34 @@ public:
                 break;
         }
     }
+
+    /**
+     * @brief Abort a running identification into the CalibError terminal state.
+     *
+     * For an identification started at runtime: a driver fault mid-run holds
+     * the bridge released while the routine keeps its ramp voltage, so the
+     * moment the fault clears the routine resumes at full voltage and trips
+     * it again, and the drive is never released from the loop. Aborting
+     * instead reports the failure through CALIBRATION_STATUS and leaves the
+     * stage released until a reboot, which is the documented recovery.
+     */
+    void abort(MotorStatus& status_tracker, Motor& motor, DriverStatus& setup_status, const char* reason, uint8_t fault_bits = 0) {
+        last_fail_fault_ = fault_bits;                     // What the driver reported at that moment
+        set_error(status_tracker, motor, setup_status, reason, IDENT_FAIL_DRIVER_FAULT);
+    }
+
+    /// Why the last identification aborted (IdentFailure), 0 when none has since boot.
+    uint8_t last_failure_code() const { return last_fail_code_; }
+    /// MotorStatus stage that was active at the last abort.
+    uint8_t last_failure_stage() const { return last_fail_stage_; }
+    /// Driver fault byte handed to abort() at the last driver-fault abort.
+    uint8_t last_failure_fault() const { return last_fail_fault_; }
+    /// Phase A current at the last abort [A].
+    float last_failure_ia() const { return last_fail_ia_amps_; }
+    /// Phase B current at the last abort [A].
+    float last_failure_ib() const { return last_fail_ib_amps_; }
+    /// Injected voltage at the last abort [V].
+    float last_failure_volts() const { return last_fail_volts_; }
 
 private:
     void setup_hfi_state(MotorStatus target_state, MotorStatus& status_tracker, Motor& motor, uint32_t timeout_cycles) {
@@ -633,7 +686,8 @@ private:
                 // tick() drives zero current target in CalibError, and
                 // tunepulse_init() exits its wait loop on that status.
                 if (diff_d > HFI_MAX_SPREAD_RATIO || diff_q > HFI_MAX_SPREAD_RATIO) {
-                    set_error(status_tracker, motor, setup_status, "HFI inductance missing or inconsistent");
+                    set_error(status_tracker, motor, setup_status, "HFI inductance missing or inconsistent",
+                              IDENT_FAIL_INDUCTANCE);
                     return;
                 }
 
@@ -727,9 +781,17 @@ private:
      * @param setup_status   Driver status word (set to OperationStatus::Error).
      * @param reason         Short human-readable error description (RAM string).
      */
-    void set_error(MotorStatus& status_tracker, Motor& motor, DriverStatus& setup_status, const char* reason) {
+    void set_error(MotorStatus& status_tracker, Motor& motor, DriverStatus& setup_status, const char* reason,
+                   uint8_t code = IDENT_FAIL_UNKNOWN) {
         const MotorStatus failed_stage = status_tracker;  // Remember the stage that aborted
         const float applied_volts = voltage_volts_;       // Remember the injected voltage before reset
+
+        // Machine-readable copy of what the dump below prints, for 0x43/0x08.
+        last_fail_code_ = code;
+        last_fail_stage_ = (uint8_t)failed_stage;
+        last_fail_ia_amps_ = diag_ia_amps_;
+        last_fail_ib_amps_ = diag_ib_amps_;
+        last_fail_volts_ = applied_volts;
 
         setup_status.set_driver_status(OperationStatus::Error);
         status_tracker = MotorStatus::CalibError;
@@ -811,6 +873,11 @@ private:
         // Motor API still returns milliohms; inside the class we convert to ohms right away.
         uncorrected_total_resistance_ohms_ = motor.get_total_resistance();
 
+        // The two-pass correction below divides by (I1 - I2): these numbers are
+        // what to look at when it produces an absurd resistance.
+        TP_LOG_VALS("ELEC CAL: R pass 1: V[V],Ia[A],Ib[A],R_unc[Ohm],Vbus[V],P[W]", voltage_volts_, ia_amps, ib_amps,
+                    uncorrected_total_resistance_ohms_, diag_supply_volts_, diag_power_watts_);
+
         is_resistance_correction_ = true;
 
         voltage_volts_ *= 0.5f;
@@ -886,6 +953,8 @@ private:
                                     corrected_total_resistance_ohms);
                     }
                 }
+                TP_LOG_VALS("ELEC CAL: R pass 2: V[V],Ia[A],Ib[A],dI[A],R_corr[Ohm],Vbus[V],P[W]", voltage_volts_, ia_amps,
+                            ib_amps, delta_i_amps, corrected_total_resistance_ohms, supply_voltage_volts, power_watts);
 
                 // Diagnostic snapshot of the two-point fit that sets R for every
                 // subsequent stage (the HFI inductance maths divides by it).
@@ -907,6 +976,7 @@ private:
             // the else-branch when the injected power was too small to judge.
             const char* fail_reason =
                 "PHASE PATTERN NOT RECOGNIZED: measured currents match no known connection type (check phase wiring / motor type)";
+            uint8_t fail_code = IDENT_FAIL_PATTERN;      // Machine-readable twin of fail_reason
 
             if (power_watts >
                 (max_power_watts_ * CAL_UNDERPOWER_RATIO)) {  // We have sufficient power, current calculations are reliable
@@ -922,8 +992,14 @@ private:
                     // Set the timeout counter to 1800 cycles (time allocated for slow rotation)
                     timeout_.set_timeout(ROTATION_TIMEOUT);
 
+                    // What the first pass saw and what it decided, so the type /
+                    // pattern detection can be checked from the boot log alone.
+                    const bool balanced = (10.0f * fabsf(ib_amps - ia_amps) < (ia_amps + ib_amps));
+                    TP_LOG_VALS("ELEC CAL: pass 45deg: V[V],Ia[A],Ib[A],Ra[Ohm],Rb[Ohm],P[W],balanced", applied_voltage_volts,
+                                ia_amps, ib_amps, resistance_a_ohms, resistance_b_ohms, power_watts, (int)balanced);
+
                     // Stepper or BLDC motor, first pass: phases should be balanced (within ~15% of average)
-                    if (10.0f * fabsf(ib_amps - ia_amps) < (ia_amps + ib_amps)) {
+                    if (balanced) {
                         // Store temporary resistance as arithmetic mean of phases A and B
                         float average_resistance_ohms = (resistance_a_ohms + resistance_b_ohms) * 0.5f;
 
@@ -944,12 +1020,14 @@ private:
                         status_tracker = MotorStatus::SlowRotation;
 
                         if ((ia_amps * 0.25f) >= ib_amps) {
+                            TP_LOG("ELEC CAL: pass 45deg unbalanced, Ia dominant -> pattern CBA");
                             drv.motor_ctrl.set_phase_pattern(PhasePattern_CBA);
 
                             // Set target angle to -16384 (corresponds to CBA connection)
                             angle_ref = -CAL_ANGLE_90D;
                             return;
                         } else if ((ib_amps * 0.25f) >= ia_amps) {
+                            TP_LOG("ELEC CAL: pass 45deg unbalanced, Ib dominant -> pattern ACB");
                             drv.motor_ctrl.set_phase_pattern(PhasePattern_ACB);
 
                             // Set target angle to -32768 (corresponds to ACB connection)
@@ -973,6 +1051,7 @@ private:
 
                         // Set motor type in the selector as BLDC
                         drv.motor_ctrl.set_motor_type(MotorType_BLDC);
+                        TP_LOG_VALS("ELEC CAL: pass 90deg: Ia[A],Ib[A] -> BLDC", ia_amps, ib_amps);
 
                         trigger_resistance_correction(status_tracker, motor, ia_amps, ib_amps);
                         return;
@@ -982,6 +1061,7 @@ private:
                     // (Expected: iA — negative dominant, iB close to 0 (any sign). Resistance was already calculated in first
                     // pass)
                     else if ((ib_amps * 0.0625f) > ia_amps) {
+                        TP_LOG_VALS("ELEC CAL: pass 90deg: Ia[A],Ib[A] -> STEPPER, pattern kept", ia_amps, ib_amps);
                         trigger_resistance_correction(status_tracker, motor, ia_amps, ib_amps);
                         return;
                     }
@@ -1024,10 +1104,11 @@ private:
                             applied_voltage_volts);
                 TP_LOG("ELEC CAL: hint: phase wire disconnected? Vbus too low? winding resistance out of range?");
                 fail_reason = "UNDERPOWER: injected power below the reliable-measurement threshold";
+                fail_code = IDENT_FAIL_UNDERPOWER;
             }
 
             drv.motor_ctrl.set_motor_type(MotorType_Invalid);
-            set_error(status_tracker, motor, setup_status, fail_reason);
+            set_error(status_tracker, motor, setup_status, fail_reason, fail_code);
         }
     }
 };

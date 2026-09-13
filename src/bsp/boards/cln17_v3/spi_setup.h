@@ -42,6 +42,7 @@
 #include <Arduino.h>     // delay(), millis()
 #include "stm32g4xx.h"   // CMSIS device header: SPI1, DMA1, GPIO registers
 #include "lib/dev_log.h" // TP_LOG* macros: USB CDC diagnostics over SerialUSB
+#include "bsp/chips/encoders/mt6835.h" // MT6835 frame decode and CRC-8 (target-agnostic)
 
 // ==============================================================================
 // ENCODER SELECTION (set manually, no runtime auto-detection)
@@ -72,6 +73,12 @@ static uint8_t SPI1_TX_BUF[6] __attribute__((aligned(4))) = // MT6835 TX frame: 
 static volatile uint32_t POSITION_ENCODER_MT_RAW = 0; // 32-bit left-aligned angle (Q0.32 turn fraction)
 static volatile uint8_t  POSITION_MT_STATUS = 0;      // STATUS[2:0]: overspeed / weak field / undervoltage
 static volatile uint8_t  POSITION_MT_CRC = 0;         // CRC-8 received from the sensor
+
+// Frame validation: every burst frame carries the sensor's CRC-8 and the DMA
+// completion handler (board.cpp) checks it before publishing the angle. The
+// accept / drop policy and the statistics live in the generic Encoder object
+// (Encoder::accept_frame), so the protocol can report them without reaching
+// into board code; this header only decodes bytes.
 #else
 static uint8_t SPI1_TX_BUF[4] __attribute__((aligned(4))) = // TLE5012B TX frame: angle-read command
     {0x80, 0x20, 0xFF, 0xFF};
@@ -200,7 +207,22 @@ static inline void Encoder_Init() {
  * Important: start the next transfer only after the previous one completes.
  * Normally called from the control timer; the DMA IRQ invokes POSITION_Callback().
  */
+static volatile uint32_t ENCODER_OVERRUNS = 0;   // Control periods that found the previous transfer still in flight
+static volatile bool     ENCODER_RELINKING = false; // Bus reset in progress: no transfer may start
+
 static inline void Encoder_StartTransfer() {
+    // A transfer still in flight (CS still asserted: the completion handler
+    // has not released the bus yet, or a bus reset is under way) must not be
+    // restarted. Cutting a byte in half leaves a partial byte in the SPI
+    // receive FIFO and every following frame arrives shifted by one byte,
+    // failing its CRC until the peripheral is reset - which is exactly how a
+    // long control pass (a flash stall, a calibration step) turned into a
+    // permanently corrupted encoder link. Skip this period instead: the
+    // control pass repeats the last good angle, and the overrun is counted.
+    if (ENCODER_RELINKING || ((GPIOA->ODR & GPIO_PIN_4) == 0U)) {
+        ENCODER_OVERRUNS++;                // Previous frame not yet consumed
+        return;
+    }
     SPI1_ChipSelect(true);                 // Assert CS to frame the transaction
     DMA1_Channel1->CCR &= ~DMA_CCR_EN;     // Stop RX channel
     DMA1_Channel2->CCR &= ~DMA_CCR_EN;     // Stop TX channel
@@ -219,6 +241,38 @@ static inline void Encoder_StartTransfer() {
     DMA1_Channel1->CCR |= DMA_CCR_EN;
     DMA1_Channel2->CCR |= DMA_CCR_EN;
 }
+
+// ==============================================================================
+// BUS RESET (re-establish a corrupted link)
+// ==============================================================================
+/**
+ * @brief Reset the encoder SPI link: abort any transfer, flush the receive
+ *        FIFO, clear the DMA flags and re-enable the peripheral.
+ *
+ * Called from the completion handler when Encoder::accept_frame() reports
+ * that the link has been down for a run of frames. A byte left in the SPI
+ * receive FIFO shifts every later frame; disabling the SPI and draining the
+ * FIFO is the only way to realign it. The next timer trigger starts a fresh
+ * transfer. Cheap (a few microseconds) and idempotent, so it is safe to
+ * repeat while the sensor stays silent.
+ */
+static inline void Encoder_Relink() {
+    ENCODER_RELINKING = true;                                  // Hold off the timer-triggered start
+    DMA1_Channel1->CCR &= ~DMA_CCR_EN;                         // Stop RX channel
+    DMA1_Channel2->CCR &= ~DMA_CCR_EN;                         // Stop TX channel
+    SPI1->CR1 &= ~SPI_CR1_SPE;                                 // Disable: aborts the shift register
+    while (SPI1->SR & SPI_SR_FRLVL) {                          // Drain whatever the receive FIFO holds
+        (void)*(volatile uint8_t*)&SPI1->DR;                   // Byte-wide read pops one entry
+    }
+    (void)SPI1->SR;                                            // Clear OVR (read DR, then SR)
+    DMA1->IFCR = DMA_IFCR_CGIF1 | DMA_IFCR_CGIF2;              // Clear stale completion flags
+    SPI1_ChipSelect(false);                                    // Release the bus
+    SPI1->CR1 |= SPI_CR1_SPE;                                  // Enable the peripheral again
+    ENCODER_RELINKING = false;                                 // Transfers may start again
+}
+
+/** Control periods skipped because the previous transfer was still in flight. */
+static inline uint32_t Encoder_Overruns() { return ENCODER_OVERRUNS; }
 
 // ==============================================================================
 // ANGLE GETTER (32-bit Left Aligned)

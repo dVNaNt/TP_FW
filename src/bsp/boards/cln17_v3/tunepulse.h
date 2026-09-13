@@ -59,6 +59,7 @@ extern TunePulseHeart TP;
 #include "bsp/stm32g4/cordic.h"     // CORDIC hardware trigonometry accelerator
 #include "bsp/stm32g4/nvm_flash.h"        // Internal-flash NVM partitions (FlashG4_LL)
 #include "bsp/stm32g4/tim1_pwm.h"  // TIM1 complementary PWM backend
+#include "lib/dev_log.h"      // TP_LOG*: bring-up messages exist only in DEV_LOG_ENABLE builds
 
 /**
  * @brief LED apply callback for the CLN17-v3 tricolor element.
@@ -300,7 +301,8 @@ inline void tunepulse_init() {
         .ext_cb(PWM_Set_All_HiZ)
         .uv_cb(PWM_Set_All_HiZ)
         .ot_cb(PWM_Set_All_HiZ)   // Software overtemperature: same Hi-Z safe state as hardware faults
-        .op_cb(PWM_Set_All_HiZ).phase_cb(PWM_Set_All_HiZ);  // Software overpower: Hi-Z safe state on power/current limit violation
+        .op_cb(PWM_Set_All_HiZ).phase_cb(PWM_Set_All_HiZ)  // Software overpower: Hi-Z safe state on power/current limit violation
+        .enc_cb(PWM_Set_All_HiZ);                           // Position feedback lost: Hi-Z rather than a loop chasing a phantom
     TP.driver_phy.pwm.set_callback().apply_phases_cb(TIM1_Set_PWM_Values);
 
     delay(100);
@@ -310,7 +312,7 @@ inline void tunepulse_init() {
     // end_curnt_cal() ties them to GND (all low-side ON); in both states the
     // differential voltage is zero, so the ADC captures amplifier offsets only.
     TP.driver_phy.current.calibrate();
-    SerialUSB.println("Start current calibration");
+    TP_LOG("Start current calibration");
 
     // Bounded wait for completion. Completion is signalled from the ADC
     // interrupt; if no interrupt ever advances the state machine the drive is
@@ -321,13 +323,13 @@ inline void tunepulse_init() {
     while (TP.driver_phy.current.is_calibrated() == false) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
         if ((millis() - isense_t0) > TP_CURRENT_CAL_TIMEOUT_MS) {
-            SerialUSB.println("Current sensing calibration TIMED OUT - continuing de-energized");
+            TP_LOG("Current sensing calibration TIMED OUT - continuing de-energized");
             break;
         }
     }
 
     if (TP.driver_phy.current.is_calibrated()) {
-        SerialUSB.println("Current sensing setup complete");
+        TP_LOG("Current sensing setup complete");
     }
 
     // Motor (electrical-angle) calibration:
@@ -343,14 +345,14 @@ inline void tunepulse_init() {
     while (TP.current_driver.get_motor_status() != MotorStatus::Success) {
         BOOT::poll();  // hold SW1 for 3 s to enter the USB bootloader
         if (TP.current_driver.get_motor_status() == MotorStatus::CalibError) {
-            SerialUSB.println("Motor calibration Error");
+            TP_LOG("Motor calibration Error");
             break;
         }
         if ((millis() - motor_t0) > TP_MOTOR_CAL_TIMEOUT_MS) {
             // Same reasoning as the current-sense wait: a drive that cannot
             // identify its motor (none connected, open phase, dead encoder) is
             // far more useful reporting that over the protocol than hanging.
-            SerialUSB.println("Motor calibration TIMED OUT - continuing de-energized");
+            TP_LOG("Motor calibration TIMED OUT - continuing de-energized");
             break;
         }
     }

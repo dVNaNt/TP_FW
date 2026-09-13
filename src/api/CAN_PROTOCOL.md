@@ -5,7 +5,10 @@ Application protocol for TunePulse drives on CAN 2.0A and CAN-FD.
 Reference implementation: `src/api/` (header-only, hardware-independent except
 for `transport/`). The wire format lives entirely in `tp_wire.h` + `tp_chunks.h`;
 a host tool can include those two files and be bit-compatible with the drive
-without pulling in anything else.
+without pulling in anything else. `tools/tpcp_host.py` is the reference master.
+
+This document is the `api_final.md` design with every gap it left filled in.
+Each such decision is marked **[decision]** so it can be revisited.
 
 ---
 
@@ -13,679 +16,736 @@ without pulling in anything else.
 
 1. **Every frame is exactly 8 bytes.** That is the whole payload of a classic
    CAN 2.0A frame, so the protocol runs unchanged on a classic bus. On a CAN-FD
-   link the same 8-byte frames are sent as FD frames; payloads of 9–64 bytes
-   stay reserved for bulk transfer (v1.1).
-2. **Byte 0 is the opcode.** The one exception is the bit-packed motion burst
-   frame, which is marked by bit 7 of byte 0 — a bit no opcode ever sets.
-3. **Multi-byte integers are little-endian**, naturally aligned wherever the
-   layout allows. Sub-byte fields are allocated from the LSB upward. The single
-   documented exception is the motion burst frame (§6.2), which is a bit field.
-4. **Semantic length never rides in the DLC.** A DLC is not a byte count on
-   CAN-FD (sizes above 8 are quantized to 12/16/20/24/32/48/64), so anything
-   variable-length carries its length in the payload.
-5. **A node without an address is silent.** It accepts network management only
-   and transmits nothing until an address is assigned.
+   link the same 8-byte frames are sent as FD frames.
+2. **Byte 0 is the CMD**: a register address with two group bits folded in
+   (§3). The read form and the write form of a register differ only in bit 7.
+3. **Multi-byte integers are little-endian**, packed with no padding. Sub-byte
+   fields are allocated from the LSB upward. The single documented exception is
+   the burst frame (§8), which is a bit field laid out MSB-first.
+4. **Every write of a read/write register is answered with the read form of the
+   same register**, carrying the values now in force - so a clamped, rounded or
+   ignored field is visible in the acknowledgement itself. Write-only commands
+   are answered with ACK / NACK (§6.3).
+5. **A node without an address is silent.** It accepts the two discovery
+   registers only and transmits nothing else until an address is assigned.
 
 ---
 
 ## 2. Identifier map
 
 11-bit standard identifiers only. Lower identifier = higher bus priority. The
-map is ordered so a tripping drive outranks everything, network management comes
-next, commands outrank responses, and status telemetry can never delay a command.
+map is ordered so a tripping drive outranks everything, commands outrank
+responses, and status telemetry can never delay a command.
 
-| Range          | Direction      | Purpose                                    |
-| :------------- | :------------- | :----------------------------------------- |
-| `0x000 + node` | node → bus     | Emergency / fault report (highest priority)|
-| `0x100 – 0x10F`| master → bus   | Network management, sync, discovery        |
-| `0x200 + node` | master → node  | Real-time setpoint stream (never answered) |
-| `0x300 + node` | master → node  | Request / command channel                  |
-| `0x400 + node` | node → master  | Response channel                           |
-| `0x500 \| byte`| node → master  | Discovery byte arbitration                 |
-| `0x600 + node` | node → bus     | Heartbeat and cyclic telemetry             |
-| `0x700 – 0x7FF`| —              | Reserved: bulk transfer / firmware update  |
+| Range          | Direction      | Purpose                                      |
+| :------------- | :------------- | :------------------------------------------- |
+| `0x000 – 0x0FF`| —              | Reserved                                     |
+| `0x100 + node` | node → bus     | Emergency / fault report (highest priority)  |
+| `0x200 – 0x2FF`| —              | Reserved                                     |
+| `0x300 + node` | master → node  | Commands: registers, setpoints, flashing     |
+| `0x400 + node` | node → master  | Responses, discovery replies                 |
+| `0x500 + node` | node → bus     | PulseBeat and cyclic telemetry               |
+| `0x600 – 0x7FF`| —              | Reserved                                     |
 
-**Node addresses:** `0` = unassigned, `1–254` = assigned, `255` = broadcast.
-`0x2FF` and `0x3FF` therefore address every node at once.
-
-`0x100`, `0x300+n` and `0x400+n` are inherited verbatim from the original
-`can_api.md` draft. The discovery reply moved off `0x400` (where it collided
-with the response channel of an already-addressed node) onto its own `0x500`
-block.
+**Node addresses:** `0` = broadcast, `1–254` = assigned, `255` = unassigned.
+`0x300` therefore reaches every node at once, and an unassigned node listens on
+`0x3FF` and answers on `0x4FF`. **[decision]** The design's "0x2FF and 0x3FF
+address every node" line was a leftover of an earlier map; with 0 as the
+broadcast address it is `0x300`.
 
 ### Hardware filtering
 
 A node programs four FDCAN standard filter slots:
 
-| Slot | Type  | Accepts                        | Active when       |
-| :--- | :---- | :----------------------------- | :---------------- |
-| 0    | range | `0x100 – 0x10F`                | always            |
-| 1    | dual  | `0x200 + node`, `0x2FF`        | address assigned  |
-| 2    | dual  | `0x300 + node`, `0x3FF`        | address assigned  |
-| 3    | range | `0x000 – 0x7FF`                | promiscuous mode  |
+| Slot | Type | Accepts                     | Active when                    |
+| :--- | :--- | :-------------------------- | :----------------------------- |
+| 0    | dual | `0x300 + node`, `0x300`     | always (unassigned: `0x3FF`)   |
+| 1    | mask | `0x1xx`                     | promiscuous / gateway armed    |
+| 2    | mask | `0x4xx`                     | promiscuous / gateway armed    |
+| 3    | mask | `0x5xx`                     | promiscuous / gateway armed    |
 
-Everything else is rejected in hardware: traffic addressed to other drives costs
-this node no interrupts at all. Non-matching standard frames, extended frames
-and remote frames are all rejected globally.
+Slots 1–3 are the design's "master device" set: a node opens them only when it
+acts as a master itself, i.e. when it relays the bus to a USB host (§11).
+Everything else is rejected in hardware: traffic addressed to other drives
+costs this node no interrupts at all. Non-matching standard frames, extended
+frames and remote frames are all rejected globally.
 
 ---
 
-## 3. Data types
+## 3. CMD byte and groups
 
-| Name        | Bits | Encoding                                                     |
-| :---------- | :--- | :----------------------------------------------------------- |
-| `bf16`      | 16   | Top 16 bits of an IEEE-754 float. Full range, ~0.4 % error.   |
-| `f24`       | 24   | Top 24 bits of an IEEE-754 float. Full range, ~0.008 % error. |
-| `q1.31.16`  | 48   | Signed position in revolutions, 1/65536 steps, ±32768 rev.    |
-| `q1.7.16`   | 24   | Signed following error in revolutions, ±128 rev.              |
-| `q1.3.8`    | 12   | Signed time scale, 256 = 1.0×, range −8.0 … +7.996.           |
-| `q1.1.6`    | 8    | Signed normalized ratio, 64 = 1.0, range −2.0 … +1.98.        |
-| `volts_q2`  | 8    | Unsigned volts, 0.25 V per LSB, 0 … 63.75 V, saturating.      |
-| `temp_c`    | 8    | Signed whole degrees Celsius; `−128` means "no data".         |
+| Bit 7 | Bit 6 | Bit 5 | Range         | Group                            | Qty |
+| :---: | :---: | :---: | :------------ | :------------------------------- | :-: |
+|   0   |   0   |   x   | `0x00 – 0x3F` | Read of a read/write register    | 64  |
+|   1   |   0   |   x   | `0x80 – 0xBF` | Write of a read/write register   | 64  |
+|   0   |   1   |   x   | `0x40 – 0x7F` | Read-only register               | 64  |
+|   1   |   1   |   0   | `0xC0 – 0xDF` | Write-only register (command)    | 32  |
+|   1   |   1   |   1   | `0xE0 – 0xFF` | Burst mode (bit-packed stream)   | 1   |
+
+A read is a frame whose CMD is the register address; the payload is ignored
+except for the record selector of a keyed register (a sub identifier in byte 1,
+the IO function in byte 2, the table sample or the memory address). A write
+sets bit 7. Reads are answered even when broadcast (every node answers on its
+own `0x400 + node`); broadcast writes are executed by every node and answered
+by none.
+
+**Sub-spaces.** Registers `0x01`, `0x02`, `0x42` and `0x43` carry a sub
+identifier in byte 1 that selects one of several records behind one CMD.
+
+### Response policy (Bus Settings, `Comm` field)
+
+| Comm | Name           | Behaviour                                                              |
+| :--- | :------------- | :--------------------------------------------------------------------- |
+| 0    | silent         | Executes everything, transmits nothing (no beat, no emergency either)   |
+| 1    | on request     | Reads and register writes answered; accepted setpoints (motion tasks, burst) silent, rejected ones NACKed |
+| 2    | every message  | Everything answered, ACK per motion task and burst frame               |
+
+The default is 1.
+
+---
+
+## 4. Data types
+
+| Name        | Bits | Encoding                                                        |
+| :---------- | :--- | :-------------------------------------------------------------- |
+| `bf16`      | 16   | Top 16 bits of an IEEE-754 float. Full range, ~0.4 % error. NaN (`0x7FC0`) = "unknown" on reads, "leave unchanged" on writes |
+| `f24`       | 24   | Top 24 bits of an IEEE-754 float. Full range, ~0.008 % error. NaN = unused |
+| `q1.23.24`  | 48   | Signed revolutions, 24 fractional bits, ±8388608 rev             |
+| `q1.23.32`  | 56   | Signed revolutions, 32 fractional bits (raw encoder word + turns) |
+| `q1.15.32`  | 48   | Signed revolutions, 32 fractional bits, ±32768 rev               |
+| `q1.15.16`  | 32   | Signed revolutions, 16 fractional bits (the firmware's native unit) |
+| `q1.7.16`   | 24   | Signed revolutions, 16 fractional bits, ±128 rev                 |
+| `q1.3.8`    | 12   | Signed time scale, 256 = 1.0×, range −8.0 … +7.996               |
+| `q1.1.4`    | 6    | Signed normalized error, 16 = 1.0, range −2.0 … +1.94            |
+| `temp_u8`   | 8    | Degrees Celsius; `0` = no data, `255` = over range               |
+| `usage_i8`  | 8    | Signed fraction of a limit, 127 = 100 %; `−128` = overload       |
 
 `f24` and `bf16` are **truncations** of an IEEE-754 float, not fixed-point
-integers: decoding is a pure left shift, with no sign extension. Sign-extending
-them overwrites the exponent and turns every negative value into an infinity or
-a NaN — a bug the draft codec shipped with, now covered by `test/test_tpcp`.
+integers: decoding is a pure left shift, with no sign extension.
+
+**Torque units.** **[decision]** Every torque field is in N·m when the torque
+constant Kt (register `0x22`) is known and in **amperes** when it is zero. One
+rule for the whole protocol, so a bench without a Kt drives the current
+directly and nothing silently changes scale when Kt is entered.
+
+**Axis frame.** Every position, velocity and displacement leaves and enters
+through the axis offset and direction of register `0x01/0x00`: reported
+position = (native + offset) × direction; a commanded absolute target is
+converted back. Displacements and velocities take the sign only.
 
 ---
 
-## 4. Opcodes
+## 5. Read/write registers (`0x00 – 0x3F`, write at `+0x80`)
 
-`R` = read, answered with the same opcode. `W` = write, answered with `ACK`
-(`0x7E`) or `NACK` (`0x7F`) unless noted.
+### 5.1 `0x00` Direct register access
 
-### 4.1 Status and telemetry (`0x00 – 0x0F`)
+| Byte | Field   | Type   | Description                                             |
+| :--- | :------ | :----- | :------------------------------------------------------ |
+| 1–3  | Address | u24    | Window nibble in bits 23–20, byte offset in bits 19–0   |
+| 4–7  | Value   | u32    | Value read, or the value to write                       |
 
-These double as cyclic telemetry chunk identifiers.
+**[decision]** A 24-bit address cannot reach a 32-bit address space, so the
+top nibble selects a window: `0` flash `0x08000000` (read only), `1` SRAM
+`0x20000000`, `2` CCM `0x10000000`, `3` APB1 `0x40000000`, `4` APB2
+`0x40010000`, `5` AHB1 `0x40020000`, `6` AHB2 `0x48000000`, `7` AHB2/ADC
+`0x50000000`, `8` the firmware's `TunePulseHeart` object, `F` Cortex-M system
+space `0xE0000000`. Addresses must be word aligned. This is a developer port:
+an unmapped peripheral offset faults the MCU.
 
-| Op     | Access | Chunk                                                        |
-| :----- | :----- | :----------------------------------------------------------- |
-| `0x00` | —      | NOP. An all-zero frame is padding and is always ignored.      |
-| `0x01` | R      | Device Info: hardware revision, firmware version, device code |
-| `0x02` | R      | Device UID: the 56-bit identity discovery arbitrates on       |
-| `0x03` | R      | Device Status: uptime + the aggregated status word            |
-| `0x04` | R      | Motor Status: mode, type, phase order, poles, temperature     |
-| `0x05` | R      | Electric Status: efficiency, power, supply, current           |
-| `0x06` | R      | Motion Status 1: motion mode + 48-bit absolute position       |
-| `0x07` | R      | Motion Status 2: velocity, acceleration, torque               |
-| `0x08` | R      | Motion Status 3: following errors, queue depth, time scale    |
-| `0x09` | RW     | Motor Properties: thermal limit, R, L, Kt                     |
-| `0x0A` | R      | Encoder Status: raw angle, revolutions, health                |
-| `0x0B` | R      | Driver Status: state, mode, faults, warnings, sub-states      |
-| `0x0C` | R      | Calibration Status: routine, stage, progress, result flags    |
-| `0x0D` | R      | Comm Status: bus state, error counters, drops, rejects        |
-| `0x0E` | R      | Power Status: load, bus current, bus power, thermal headroom  |
-| `0x0F` | R      | Heartbeat (§7)                                                |
+### 5.2 `0x01` Axis and mechanics (sub-space)
 
-### 4.2 Real-time control (`0x10 – 0x1F`)
+**[decision]** The design lists these records under `0x01??`; the sub
+identifiers are allocated in the order given.
 
-Accepted on **both** the request channel (answered) and the setpoint stream
-(never answered). Identical behaviour on either.
+| Sub    | Record                     | Bytes 2–7                                                                    |
+| :----- | :------------------------- | :--------------------------------------------------------------------------- |
+| `0x00` | Axis Control               | `[2]` AxisID, `[3]` bit0 inverted, `[4..7]` offset q1.15.16                   |
+| `0x01` | LED Control                | `[2]` mode (0 steady, 1 blink, 2 firmware), `[3]` on:4 / off:4 [0.25 s], `[4]` LedID, `[5..7]` R G B |
+| `0x02` | Gearbox                    | `[2..3]` backlash bf16, `[4..5]` ratio mul i16, `[6..7]` ratio div u16        |
+| `0x03` | IO Control Map (keyed)     | `[2]` function, `[3]` on pin, `[4]` off pin, `[5]` bit0 on inverted, bit1 off inverted, bit2 state |
+| `0x04` | Encoder 1                  | `[2]` type:4 (0 absolute, 1 incremental) / interface:4, `[3]` bit0 CCW, bit1 index, `[4..7]` PPR u32 |
+| `0x05` | Encoder 2                  | same layout                                                                  |
+| `0x06` | Quick homing               | `[2..3]` flags: bits 0–1 mode, bit2 trigger, bit3 direction, bit4 bidir, bit5 validation, **bit6 fine-search trigger**; `[4..5]` velocity bf16, `[6..7]` torque bf16 |
+| `0x07` | Fine homing                | `[2..3]` retract bf16, `[4..5]` velocity bf16, `[6..7]` torque bf16           |
+| `0x08` | CW reference limit         | `[2..3]` offset bf16 (< 64 rev), `[4..7]` reference angle u32                 |
+| `0x09` | CCW reference limit        | same layout                                                                  |
+| `0x0A` | Position zero              | `[4..7]` reference angle u32                                                 |
+| `0x0B` | Zero offset CW             | `[2..7]` q1.15.32                                                            |
+| `0x0C` | Zero offset CCW            | `[2..7]` q1.15.32                                                            |
+| `0x0D` | Motion field CW            | `[2..7]` q1.15.32                                                            |
+| `0x0E` | Motion field CCW           | `[2..7]` q1.15.32                                                            |
+| `0x0F` | Internal position offset   | `[2..7]` q1.15.32                                                            |
 
-| Op     | Payload                                                          |
-| :----- | :--------------------------------------------------------------- |
-| `0x10` | Control Mode: `[1] mode`, `[2] enable`                            |
-| `0x11` | Target Position: `[1] flags`, `[2..7] q1.31.16`                   |
-| `0x12` | Target Velocity: `[1..3] f24 RPS`, `[4..5] bf16 accel`, `[6] flags`|
-| `0x13` | Target Torque: `[2..3] bf16 A`, `[4..5] bf16 limit`, `[1] flags`  |
-| `0x14` | Motion Limits: `[1..3] f24 vel`, `[4..5] bf16 acc`, `[6..7] bf16 jerk` |
-| `0x15` | Stop: `[1]` 0 hold, 1 freewheel, 2 brake, 3 quick stop            |
-| `0x16` | Anchor: `[2..7] q1.31.16` — redefine "here" without moving        |
-| `0x1A` | S-curve move: `[1] flags`, `[2..4] q1.7.16`, `[5..6] bf16 vel`    |
-| `0x1B` | Queue Control: `[1] action`, `[2..3] int16 time scale (Q10)`      |
-| `0x1C` | R — Queue Status: state, depth, free slots, time scale, drops     |
+The IO map is keyed: a read names the device function in byte 2 and gets that
+function's record. Functions: `0x00` StatusIO, `0x01` HardStop, `0x02` Home,
+`0x03` LimCW, `0x04` WarnCW, `0x05` LimCCW, `0x06` WarnCCW, `0x07`
+GearboxIDX, `0x08` Brake **[decision: the design left Brake unnumbered]**,
+`0x10–0x17` Probe1–8.
 
-`0x18` and `0x19` are **acknowledgement labels only**: a PVT / PVcTF segment
-needs all 64 bits and travels as the bit-packed burst frame (§6.2), so it has no
-opcode byte to echo. Sending `0x18` or `0x19` as a request is rejected with
-`TP_ERR_UNKNOWN_OPCODE`.
+**[decision]** The design's fine-homing record is 75 bits and does not fit a
+frame; its trigger bit moved into bit 6 of the quick-homing flags word.
 
-Flags: `0x11` bit 0 = relative, bit 1 = also switch to POSITION mode. `0x12`
-and `0x13` bit 1 = also switch to the matching mode. `0x1A` bit 0 = relative
-(the only form supported), bit 2 = append.
+All of these records are stored and reported. The firmware applies Axis
+Control (to every position and velocity on the wire) and LED Control; the
+gearbox, IO map, encoder declarations, homing settings and reference limits
+are held for the features that will consume them.
 
-Queue actions: `0` nop, `1` clear, `2` pause, `3` resume, `4` set time scale.
+### 5.3 `0x02` Telemetry slots (sub = slot 0–3)
 
-### 4.3 Registers and persistence (`0x20 – 0x2F`)
+**[decision]** The design names the cyclic telemetry channel but no way to
+configure it.
 
-| Op     | Payload                                                       |
-| :----- | :------------------------------------------------------------ |
-| `0x20` | Register read: `[2..3] id` → `[1] type`, `[4..7] value`        |
-| `0x21` | Register write: `[2..3] id`, `[4..7] value` → value now in force|
-| `0x22` | Register info: `[2..3] id` → type, access flags, group, count  |
-| `0x28` | Save: `[1] target` (0 all, 1 config, 2 motor profile)          |
-| `0x29` | Load: `[1] target`                                             |
-| `0x2A` | Restore defaults: `[1] target`, `[4..7]` key `0x54455344`      |
-| `0x2B` | R — Persistence status. State bits: 0 busy, 1 config restored at boot, 2 motor profile restored, 3 last save failed (set only once a save has actually run) |
+| Byte | Field   | Description                                                   |
+| :--- | :------ | :------------------------------------------------------------ |
+| 2    | Register| Read register to emit (`0x00–0x7F`); 0 frees the slot          |
+| 3    | Flags   | bit0 enable, bit1 emit on bus time sync instead of on a timer  |
+| 4–5  | Period  | Emission period [ms]                                          |
 
-### 4.4 Calibration and system (`0x30 – 0x3F`)
+A sub-space register named in a slot emits its record 0.
 
-| Op     | Payload                                                        |
-| :----- | :-------------------------------------------------------------- |
-| `0x30` | Calibration start: `[1] kind`, `[2] flags` (bit0 persist — reserved; bit1 force) |
-| `0x31` | Calibration abort — **not implemented**, see §9                  |
-| `0x32` | R — Calibration result: R, Ld, Lq, validity flags                |
-| `0x38` | Enable: `[1]` 0 disable / 1 enable                               |
-| `0x39` | Fault reset: `[1] mask` (0 = all)                                |
-| `0x3A` | Reboot: `[1]` 0 warm / 1 USB DFU, `[4..7]` key `0x544F4F42`      |
-| `0x3B` | Node address: `[1] id`, `[2] flags`, `[4..7]` UID guard          |
-| `0x3C` | Telemetry slot: `[1] slot`, `[2] opcode`, `[3] flags`, `[4..5] ms`|
-| `0x3D` | Watchdog: `[1] action`, `[2] flags`, `[4..5] timeout ms`         |
+### 5.4 `0x10` Bus settings
 
-Calibration kinds: `0` current-sense offset, `1` electrical identification,
-`2` angle sweep, `3` full (**not implemented**, see §9).
+| Byte | Field    | Description                                                                  |
+| :--- | :------- | :--------------------------------------------------------------------------- |
+| 1    | Type/Comm| bits 0–3 bus type (0 classic, 1 FD, 2 FD without BRS), bits 4–7 comm mode (§3) |
+| 2    | Baud1    | Arbitration rate code (0 keep, 1 125k, 2 250k, 3 500k, 4 1M)                 |
+| 3    | Baud2    | Data-phase rate code (0 keep, 5 2M, 6 4M, 7 5M, 8 8M; 1–4 accepted too)      |
+| 4–7  | Sync     | Master time [50 µs]; a non-zero write re-bases the node clock and fires sync-triggered telemetry |
 
-`0x3B` with address byte `0` is a **read** (0 is the unassigned address and is
-never a legal assignment target). A write requires the low 32 bits of the
-device UID in bytes 4–7; without that guard a broadcast frame could renumber
-the whole bus at once.
+Bus type and bit rates take effect at the next boot (save them first); the comm
+mode takes effect at once. A read returns the node clock in the Sync field.
 
-`0x3C` and `0x3D` use **bit 7 of the flags byte as an apply bit**. Without it
-the frame reads the slot back. An all-zero body is exactly how a telemetry slot
-gets switched off, so it cannot also mean "read".
+### 5.5 `0x11` Discovery assignment
 
-### 4.5 Generic replies
+| Byte | Field     | Description                          |
+| :--- | :-------- | :----------------------------------- |
+| 1    | Addr      | Node address                         |
+| 2–7  | HashUID48 | 48-bit device identity, little-endian|
 
-| Op     | Payload                                                   |
-| :----- | :--------------------------------------------------------- |
-| `0x7E` | ACK: `[1]` opcode executed, `[3]` context                  |
-| `0x7F` | NACK: `[1]` opcode refused, `[2]` error code, `[3]` context|
+- **Write:** `HashUID48 = this node` → adopt `Addr` (1–254 assign, 255 return
+  to discovery); persisted at once. `HashUID48 = 0` and `Addr = 255` → reset
+  to discovery: broadcast resets the whole bus, directed resets every node that
+  answers to that address (the collision case). A wildcard with any other
+  address is ignored. A directed assignment is confirmed with the read form on
+  the **new** address.
+- **Read:** `HashUID48 = this node` or `0` → the node answers with its address
+  and identity. Broadcast with a specific HashUID pings one node; broadcast
+  with 0 inventories every addressed node; sent to `0x3FF` with 0 it is the
+  one-node fast path of a sweep.
 
-### 4.6 Error codes
+### 5.6 `0x12` Discovery search
 
-| Code   | Meaning                                     |
-| :----- | :------------------------------------------ |
-| `0x01` | Unknown opcode                              |
-| `0x02` | Frame shorter than the opcode requires      |
-| `0x03` | Undefined value in a payload field          |
-| `0x04` | Write on a read-only register               |
-| `0x05` | Read on a write-only register               |
-| `0x06` | Unknown register identifier                 |
-| `0x07` | Value rejected by the register range check  |
-| `0x08` | Not permitted in the current drive state    |
-| `0x09` | Subsystem busy (flash write, calibration)   |
-| `0x0A` | Motion queue full                           |
-| `0x0B` | Reserved but not implemented in this build  |
-| `0x0C` | Guard key missing, or stage must be disabled|
-| `0x0D` | Refused: a latched fault is pending         |
-| `0x0E` | Persistent storage failure                  |
-| `0x0F` | Refused: the drive is not calibrated        |
+| Byte | Field     | Description                                    |
+| :--- | :-------- | :--------------------------------------------- |
+| 1    | Depth     | Number of prefix bits that must match (0–48)   |
+| 2–7  | HashUID48 | Prefix bits, little-endian, bit 0 first        |
 
----
+Every unassigned node whose HashUID starts with the first `Depth` bits of the
+prefix answers with `Depth + 1` and **the prefix it matched** (the same
+`Depth` bits, the rest zero). An assigned node ignores broadcast searches but
+answers a search sent to its own address, which is how a master checks two
+drives were not given the same number.
 
-## 5. Network management (`0x100 – 0x10F`)
+**[decision]** The design has the reply carry the first `Depth + 1` bits of
+each node's own HashUID. Two nodes disagreeing on that extra bit collide in
+the data field, which CAN does not arbitrate - both frames are destroyed and
+the master cannot tell "no node here" from "two nodes here". Echoing the
+matched prefix makes every reply in a subtree bit-identical, so CAN merges
+them and a reply means exactly "this subtree is populated". The master then
+walks the tree: probe `(d+1, P|0)` and `(d+1, P|1)`; a probe at depth 48 is
+answered by one node with its full HashUID. At most 96 probes per node, a
+few hundred milliseconds on a 1 Mbit/s bus.
 
-| ID      | Payload                                                            |
-| :------ | :----------------------------------------------------------------- |
-| `0x100` | Discovery begin — arm the UID search on every unaddressed node      |
-| `0x101` | Discovery prefix — `[0]` prefix length, `[1..7]` prefix bytes       |
-| `0x102` | Discovery assign — `[0..6]` full UID, `[7]` address to assign       |
-| `0x103` | Discovery end — resume normal filtering                            |
-| `0x104` | Global control — `[0]` sub-command, `[4..7]` key when required     |
-| `0x105` | SYNC — latch setpoints, emit SYNC-triggered telemetry              |
-| `0x106` | TIME — `[0..3]` master wall clock in µs (informational)            |
+### 5.7 `0x20` System control
 
-Global sub-commands: `0` emergency stop, `1` disable, `2` enable, `3` fault
-reset, `4` emit one heartbeat, `5` reboot (needs the reboot key).
+| Byte | Field       | Write                                                       | Read                          |
+| :--- | :---------- | :---------------------------------------------------------- | :---------------------------- |
+| 1    | Enable      | `0xE1` enable, `0x0F` disable, 0 no change                  | `0xE1` / `0x0F`               |
+| 2    | Burst step  | Burst period [250 µs]; 0 = time-tagged PVT stream (always applied) | current value          |
+| 3    | Calibration | `TP_CAL_*` bits to start (§5.7.1)                           | bits whose result is valid    |
+| 4    | Action      | `0xC1` fault reset, `0xB0` reboot, `0xDF` reboot to DFU, 0 none | bits of routines running  |
+| 5–7  | —           | reserved                                                    | 0                             |
 
-### 5.1 Discovery
+**[decision]** The design's bytes 4–7 were "TBD"; fault reset and reboot had
+no home elsewhere, and the magic values guard against a stray write the same
+way the enable byte does. A reboot is executed 20 ms after the reply leaves.
+The fault reset runs before the enable, so one frame can clear and re-arm.
 
-The master isolates one node at a time by walking the UID tree:
+#### 5.7.1 Calibration bits
 
-1. Broadcast `0x100`. Every node **without an address** arms its search.
-2. For step *i* = 0…6, broadcast `0x101` carrying the prefix resolved so far.
-   Every node whose UID starts with that prefix replies with a **data-less
-   frame** on identifier `0x500 | UID[i]`.
+| Bit    | Name  | Routine                                                             |
+| :----- | :---- | :------------------------------------------------------------------ |
+| `0x01` | P_CAL | Encoder angle sweep (always a physical sweep, the stored table is ignored) |
+| `0x02` | I_CAL | Current-sense offset calibration                                     |
+| `0x04` | E_CAL | Phase connection and motor check ┐                                   |
+| `0x08` | R_CAL | Resistance identification         ├ one routine serves all three     |
+| `0x10` | L_CAL | Inductance identification        ┘                                   |
+| `0x20` | F_CAL | Flux calibration - **not implemented** (NACK)                        |
+| `0x40` | M_CAL | Mechanical calibration - **not implemented** (NACK)                  |
 
-   CAN arbitrates identifiers bit by bit and a dominant bit wins, so the frame
-   that survives arbitration is automatically the one carrying the **lowest**
-   byte value. The bus performs the minimum search itself, at zero software
-   cost. The master records that byte and moves to step *i+1*.
-3. After seven steps the master holds a complete UID. It sends `0x102` with the
-   full UID plus the address to assign. The matching node adopts the address,
-   reprograms its filters, persists the address, replies `ACK` on its **new**
-   `0x400 + node`, and stays quiet for the rest of the sweep.
-4. Repeat from step 2 to find the next device; finish with `0x103`.
+Requesting an electrical bit together with P_CAL runs the identification
+first and starts the sweep when it succeeds. Every request first drops the
+queued trajectory, selects DISABLED and releases the stage: calibration owns
+the bridge. Progress is read from `0x43/0x01`.
 
-A node that loses arbitration must not let the controller re-send its stale
-reply into the next round, where it would answer a question that was never
-asked. The reference implementation aborts any pending transmission before each
-reply. Disabling automatic retransmission (DAR) on the master's link makes that
-unnecessary, but the protocol does not require it — and a drive must **not**
-run with DAR globally enabled, because losing arbitration is the normal case for
-ordinary traffic and every such frame would then be dropped instead of retried.
+### 5.8 `0x21` Motor properties 1
 
-The UID is 56 bits folded from the MCU's 96-bit factory identifier with an
-FNV-1a mix: deterministic across reboots, and every input bit reaches every
-output bit so two dies differing only in wafer coordinate land far apart.
+| Byte | Field                | Description                                                           |
+| :--- | :------------------- | :-------------------------------------------------------------------- |
+| 1    | Mode / Type          | bits 0–3 control mode (§7.1), bits 4–7 motor type (0 unchanged, 1 stepper, 2 BLDC, 3 error) |
+| 2–3  | Conn / Dir / Poles   | bits 0–1 phase connection (0 unchanged, 1 ABC, 2 CAB, 3 ACB), bits 2–3 direction (2-bit signed: `01` +1, `11` −1, else unchanged), bits 4–15 pole pairs (0 unchanged) |
+| 4–5  | Max voltage          | bf16 [V]                                                              |
+| 6–7  | Max current          | bf16 [A]: continuous rating, this is the control current envelope (never above the peak of `0x27`) |
 
----
+A machine identity field that differs from the current value is refused while
+the stage is enabled or an identification runs; a field equal to the current
+value is not a change, so a read-modify-write that only touches the mode is
+accepted on a live drive. The mode goes through the control mailbox.
 
-## 6. Motion
+### 5.9 `0x22` Motor properties 2 (writable only while disabled)
 
-### 6.1 Modes
+`[1]` temperature rating u8 [°C], `[2..3]` resistance bf16 [Ω], `[4..5]`
+inductance bf16 [H] (sets Ld = Lq), `[6..7]` Kt bf16 [N·m/A]. An R or L that
+differs from the reported value re-tunes the current loop at once and is
+refused during an identification or an angle sweep; an unchanged value is
+ignored, so a read-modify-write of the other fields never rebuilds the loop.
 
-| Mode | Name     | Behaviour                                                |
-| :--- | :------- | :------------------------------------------------------- |
-| `0`  | DISABLED | Output stage held in the configured safe state            |
-| `1`  | TORQUE   | Direct q-axis current command, position loop bypassed     |
-| `2`  | VELOCITY | Velocity command; the position target ramps at that rate  |
-| `3`  | POSITION | Absolute position command                                 |
-| `4`  | MOTION   | Trajectory queue executed by the motion executor          |
+### 5.10 `0x23` Power limits and overdrive
 
-Mode entry is **bumpless**: every mode re-seeds the state it integrates from, so
-the first pass in a new mode commands exactly what the last pass of the old one
-did. Velocity commands are slewed under the configured acceleration limit, so a
-step in the velocity command never becomes a torque step.
+`[1]` overdrive duration u8 [s] (0 disables), `[2..3]` power baseline bf16 [W],
+`[4..5]` peak power bf16 [W] (the overpower trip), `[6..7]` overpower capacity
+bf16 [J]. Zero, NaN and infinity leave a field unchanged. Only the peak is
+enforced by the firmware today; the baseline, capacity and duration are
+stored for the I²t budget.
 
-### 6.2 Motion burst frame (PVT / PVcTF)
+### 5.11 `0x24` Motor thermal protection
 
-The streaming trajectory format needs 22 + 24 + 16 = 62 payload bits plus two
-format flags — the whole 64-bit frame, with nothing left over for an opcode
-byte. The flags therefore live in the two most significant bits of byte 0, and
-because every opcode is ≤ `0x7F`, "byte 0 has bit 7 set" unambiguously marks a
-burst frame. This is the one frame laid out **MSB-first**.
+`[1]` motor temperature (read only, `temp_u8`), `[2]` baseline u8 [°C],
+`[3]` limit u8 [°C], `[4..5]` derating bf16 [%/°C], `[6..7]` Rth bf16 [°C/W].
+Without a winding sensor the temperature is **estimated** as driver
+temperature + I²R × Rth once Rth is set; until then it reads "no data".
 
-| Byte  | Bits  | Field                                                       |
-| :---- | :---- | :---------------------------------------------------------- |
-| 0     | 7     | `burst`, always 1                                            |
-| 0     | 6     | `const_t`: 0 = PVT (bytes 6–7 are a duration), 1 = PVcTF     |
-| 0     | 5–0   | displacement bits 21–16                                      |
-| 1–2   | 7–0   | displacement bits 15–0 — `q1.5.16`, ±32 rev, 1/65536 steps   |
-| 3–5   | 7–0   | end velocity, `f24`, revolutions per second                  |
-| 6–7   | 7–0   | duration in 100 µs units, or normalized force when `const_t` |
+### 5.12 `0x25` Driver thermal protection
 
-- **PVT** (`const_t = 0`): a time-parameterized Hermite segment. Duration in
-  100 µs units keeps a 16-bit field useful out to 6.5 s per segment.
-- **PVcTF** (`const_t = 1`): open loop until the displacement is reached, with
-  the trailing field capping the torque — a move that ends on contact rather
-  than on the clock.
+`[1]` driver temperature (read only), `[2]` OT warning [°C], `[3]` OT fault
+[°C], `[4]` hysteresis [°C]. Zero leaves a field unchanged.
 
-Burst frames are accepted on both the setpoint stream and the request channel.
+### 5.13 `0x26` Supply voltage protection (disabled only)
 
-### 6.3 Queue behaviour
+`[1..2]` hysteresis bf16 [V], `[3]` recovery [100 µs] (0 ignored), `[4..5]` OV
+bf16 [V], `[6..7]` UV bf16 [V]. The hysteresis also sets the width of the
+supply warning band.
 
-The executor queue holds 32 segments. When it runs dry the drive **holds** the
-last commanded position: a starved queue reports zero segment torque, and the
-drive deliberately keeps the full current envelope in that state so a loaded
-axis cannot fall.
+### 5.14 `0x27` Driver current protection (disabled only)
 
-`Motion Status 3` and the heartbeat both report the remaining depth, saturating
-at 15, and `TP_WARN_QUEUE_LOW` is raised with one segment left.
+`[1]` allowed disbalance (0–255 = 0–100 %), `[2]` disbalance filter alpha, `[3]`
+recovery [100 µs], `[4..5]` peak current bf16 [A] (ceiling of the envelope),
+`[6..7]` OC trip bf16 [A]. **[decision]** The OC trip is programmed on phases
+A and B; phase C, which carries their sum on a stepper, keeps the board's
+1.55 ratio above it. Disbalance and recovery are stored, not yet enforced.
 
----
+### 5.15 `0x2A` System motion limits, `0x2B` Error motion limits
 
-## 7. Heartbeat and telemetry
+`[1..3]` velocity f24 [RPS], `[4..5]` acceleration bf16 [RPS²], `[6..7]` jerk
+bf16 [RPS³]. `0x2A` is the live envelope every profile is shaped by; `0x2B`
+is stored for fault handling.
 
-The heartbeat (opcode `0x0F`) is emitted cyclically on `0x600 + node` and,
-**unchanged**, on `0x000 + node` the instant the fault byte changes. A master
-needs exactly one decoder for both channels.
+### 5.16 `0x2D` Watchdog and PulseBeat
 
-| Byte | Field                                                        |
-| :--- | :----------------------------------------------------------- |
-| 0    | `0x0F`                                                        |
-| 1    | bits 0–3 drive state, bits 4–7 control mode                   |
-| 2    | fault flags (1:1 with the driver's fault byte, 0 = healthy)   |
-| 3    | warning flags                                                 |
-| 4    | supply voltage, `volts_q2`                                    |
-| 5    | temperature, `temp_c`                                         |
-| 6    | load, signed; `−128` = overload                               |
-| 7    | bits 0–3 sequence counter, bits 4–7 queued segments           |
+| Byte | Field           | Description                                                           |
+| :--- | :-------------- | :-------------------------------------------------------------------- |
+| 1    | Retry           | bit7 force retry, bits 0–6 failed beats before a FaultBeat (0 none, 127 unchanged) |
+| 2–3  | PulseBeat period| bf16 [s]; 0 off, NaN unchanged                                        |
+| 4–5  | Delay           | bf16 [s] from a bus time sync to the next beat                        |
+| 6–7  | Watchdog timeout| bf16 [s] since the last command before the safe state; 0 off, NaN unchanged |
 
-> The draft's 64-bit heartbeat is replaced by this 7-byte layout because the
-> heartbeat now has its own identifier and no longer needs a 4-bit opcode
-> squeezed into the payload. Time scale and following error moved to
-> `Motion Status 3` (`0x08`), which is where a master looks for them anyway.
+### 5.17 `0x2F` Calibration table (read only)
 
-**Drive states:** `0` boot, `1` calibrating, `2` idle, `3` ready, `4` running,
-`5` fault, `6` config/discovery, `7` rebooting.
-
-**Warning bits:** `0x01` not calibrated, `0x02` NVM busy, `0x04` watchdog
-expired, `0x08` queue low, `0x10` segment dropped, `0x20` comm degraded,
-`0x40` temperature above 80 % of the trip, `0x80` supply near a rail limit.
-
-### Cyclic telemetry
-
-Four independent slots, each configured with `0x3C`: which status opcode to
-emit, on a millisecond timer or on every `SYNC`. Telemetry sits below the
-request and response channels in priority, so it can never delay a command.
+`[1]` bits 0–1 mode, bit2 absolute, bits 3–4 resolution, bits 5–7 table (0
+encoder; others not present → NACK); `[2..3]` sample; `[4..7]` data. A read
+with data `0xCA1B513E` returns the table size in the sample field. Writing the
+table is not implemented.
 
 ---
 
-### Power-on behaviour
+## 6. Read-only registers (`0x40 – 0x7F`)
 
-A drive does **not** energize by itself. After calibration it sits in
-`DISABLED` with the configured safe state on the bridge until the master sends
-`0x10` (control mode + enable) or `0x38` (enable). Set bit 0 of register
-`0x0003` to make it energize itself in `POSITION` mode, holding wherever the
-calibration left the rotor, as soon as the angle table is valid and no fault is
-latched — for a machine that has to come back up unattended after a power cycle.
+### 6.1 `0x40` Batch read, `0x41` Range read
+
+`0x40`: bytes 1–7 list up to seven read registers; `0x40` itself is the
+filler. A trailing filler is ignored; a single filler **between** two registers
+spans them: `[01 40 08 40 40 40 40]` reads `0x01` through `0x08`. The node
+answers one frame per register, paced at a few frames per service pass so a
+long list cannot flood the transmit queue. A sub-space register in a batch
+emits every record.
+
+`0x41`: `[1]` register, `[2..4]` first record, `[5..7]` last record (u24,
+inclusive). Walks sub identifiers for a sub-space, addresses in 4-byte steps
+for `0x00`, samples for `0x2F`; a plain register is emitted once. Bounded to
+4096 replies.
+
+### 6.2 `0x42` System currents (sub-space)
+
+`[2..3]` supply current bf16 [A], then `0x42/0x00`: `[4..5]` Iq, `[6..7]` Id;
+`0x42/0x01`: `[4..5]` Ia (alpha / coil A), `[6..7]` Ib (beta / coil B);
+`0x42/0x02`: `[4..5]` third sensed channel current (raw channel order), `[6..7]` sum of the three
+sensed channels, the Kirchhoff residual the phase-balance supervision trips on (NaN while a
+channel is masked by a high duty).
+
+### 6.3 `0x43` Diagnostics (sub-space) **[decision]**
+
+The design reserves `0x42–0x4F` for sub-spaces; this one holds what a bench
+needs and the design did not list.
+
+| Sub    | Record             | Bytes 2–7                                                                          |
+| :----- | :----------------- | :--------------------------------------------------------------------------------- |
+| `0x00` | Communication      | `[2]` bus state (bit0 error-passive, bit1 bus-off, bit2 warning, bit3 gateway armed), `[3]` TEC, `[4]` REC, `[5]` dropped, `[6..7]` NACKs sent |
+| `0x01` | Calibration        | `[2]` running bits, `[3]` stage, `[4]` progress 0–255, `[5]` flags (bit0 table valid, bit1 settling, bit2 persisting, bit3 failed, bit4 identified, bit5 profile loaded), `[6]` cal id, `[7]` pole pairs |
+| `0x02` | Queue              | `[2]` state (bit0 enabled, bit1 paused, bit2 halted, bit3 starving), `[3]` queued, `[4]` free, `[5..6]` time scale i16 Q10, `[7]` dropped |
+| `0x03` | Persistence        | `[2]` state (bit0 busy, bit1 config restored, bit2 profile restored, bit3 last save failed), `[3]` record version, `[4]` cal id, `[5..6]` free bytes |
+| `0x04` | Encoder            | `[2..3]` raw single-turn angle (top 16 bits), `[4..7]` turns i32                    |
+| `0x05` | Calibration result | `[2..3]` R bf16, `[4..5]` Ld bf16, `[6..7]` Lq bf16                                 |
+| `0x06` | FOC frame          | `[2..3]` electrical angle the current loop uses (65536 per period), `[4..5]` u_d bf16 [V], `[6..7]` u_q bf16 [V] |
+| `0x08` | Identification failure | `[2]` reason (0 none, 1 pattern not recognised, 2 underpower, 3 overpower in rotation, 4 driver fault, 5 HFI inductance missing or inconsistent between the probe frequencies, 255 unclassified), `[3]` stage at abort (MotorStatus), `[4]` driver fault byte at abort, `[5]` test voltage 0.1 V, `[6]` Ia 0.05 A i8, `[7]` Ib 0.05 A i8 |
+| `0x07` | Encoder link       | `[2]` flags (bit0 integrity check proven and failing frames dropped, bit1 link down = encoder fault, bit2 sensor overspeed, bit3 weak magnetic field, bit4 sensor undervoltage), `[3]` bus resets since boot, `[4..5]` frames failed u16, `[6..7]` frames passed u16 (wraps) |
+
+Stage and progress follow whichever routine owns the bridge. While the
+electrical identification runs, `stage` is its MotorStatus value and progress
+counts its stages. Otherwise `stage` is the angle sweep's CalStage with bit 7
+set (`0x80 | CalStage`: 1 set-up, 2 direction test, 3 forward pass, 4 reverse
+pass, 5 check, 6 ready, 7 error, 8 reading the stored table, 9 storing) and
+progress runs 32→128 through the forward pass and 128→224 through the reverse
+pass, so a bar moves with the rotor. The flag bits are valid throughout.
+
+### 6.4 `0x50 – 0x58` Status
+
+| CMD    | Register          | Bytes 1–7                                                                                |
+| :----- | :---------------- | :--------------------------------------------------------------------------------------- |
+| `0x50` | Device info       | `[1]` HW version, `[2..3]` FW version, `[4..7]` device code                               |
+| `0x51` | System status     | `[1]` IO word, `[2..3]` uptime bf16 [s], `[4..7]` fault word: bits 0–7 faults, 8–15 warnings, 16–19 state, 20–23 mode |
+| `0x52` | Motor status      | `[1]` state:4 / mode:4, `[2]` type:2, phase:2, bit4 CCW, bit5 enabled, bit6 identified, bit7 calibrated, `[3]` motor temp_u8, `[4..5]` power bf16 [W], `[6..7]` torque bf16 |
+| `0x53` | Motion status 1   | `[1..3]` position error q1.7.16, `[4..5]` velocity error bf16, `[6..7]` queue:4 / time scale q1.3.8 |
+| `0x54` | Motion status 2   | `[1]` executing motion mode (0xFF halted), `[2..7]` position q1.23.24                     |
+| `0x55` | Motion status 3   | `[1..3]` velocity f24, `[4..5]` acceleration bf16, `[6..7]` torque bf16                  |
+| `0x56` | Homing travel     | **not implemented** → NACK                                                               |
+| `0x57` | Encoder position  | `[1..7]` q1.23.32: turns above the raw 32-bit single-turn word                            |
+| `0x58` | Driver status     | `[1]` faults, `[2]` warnings, `[3]` operation status, `[4]` driver temp_u8, `[5]` usage_i8, `[6..7]` supply bf16 [V] |
+
+**[decision]** The design numbers Driver Status `0x45`, which lies inside the
+sub-space block; it lives at `0x58` so byte 1 can carry the fault byte. Its
+reserved word holds the warning byte and the operation status. Motor Status
+byte 1 (design: TBD) packs state and mode, byte 2 the identity bits.
+
+**Fault bits** (1:1 with the driver): `0x01` overvoltage, `0x02` overcurrent,
+`0x04` overheat, `0x08` external, `0x10` undervoltage, `0x20` overpower,
+`0x40` phase, `0x80` encoder (position feedback lost: the link failed its integrity check for 64
+consecutive frames; the drive resets the sensor bus and clears the bit by itself once 256 valid
+frames are back, a fault reset then releases the latch). **Warning bits:** `0x01` not calibrated, `0x02` NVM busy, `0x04`
+watchdog expired, `0x08` queue low, `0x10` segment dropped, `0x20` comm
+degraded, `0x40` temperature above the warning threshold, `0x80` supply
+inside the hysteresis band of a rail limit. **States:** `0` boot, `1`
+calibrating, `2` idle, `3` ready, `4` running, `5` fault, `6` unaddressed, `7`
+rebooting.
+
+### 6.5 `0x5E` ACK, `0x5F` NACK **[decision]**
+
+The design defines no reply for write-only commands. `[1]` the CMD the reply
+refers to, `[2]` error code (0 in an ACK), `[3]` detail (sub id, segment id,
+fault mask).
+
+| Code   | Meaning                                       |
+| :----- | :-------------------------------------------- |
+| `0x01` | Unknown CMD                                   |
+| `0x02` | Frame shorter than the command requires       |
+| `0x03` | Undefined value in a payload field            |
+| `0x04` | Write on a read-only register                 |
+| `0x05` | Read on a write-only register                 |
+| `0x06` | Unknown sub identifier                        |
+| `0x07` | Value rejected by the range check             |
+| `0x08` | Not permitted in the current drive state      |
+| `0x09` | Subsystem busy (flash, calibration, mailbox)  |
+| `0x0A` | Motion queue full                             |
+| `0x0B` | Defined but not implemented in this build     |
+| `0x0C` | Guard key missing, or the stage must be off   |
+| `0x0D` | Refused: a latched fault is pending           |
+| `0x0E` | Persistent storage failure                    |
+| `0x0F` | Refused: the drive is not calibrated          |
+| `0x10` | Motion task part does not match the segment being assembled |
+
+### 6.6 `0x7x` PulseBeat
+
+Emitted cyclically on `0x500 + node` and, unchanged, on `0x100 + node` the
+instant the fault byte changes. One decoder serves both channels.
+
+| Bits    | Field      | Description                                            |
+| :------ | :--------- | :----------------------------------------------------- |
+| 0:7–4   | CMD        | `0x7`                                                  |
+| 0:3–0   | Beats      | Sequence counter                                       |
+| 1–2:3–0 | CMDQ       | Queued segments (saturating at 15)                      |
+| 1–2:15–4| TimeScale  | q1.3.8                                                 |
+| 3:3–0   | Status     | Drive state                                            |
+| 3:7–4   | Fault      | Group: 0 none, 1 OV, 2 OC, 3 OT, 4 external, 5 UV, 6 OP, 7 phase, F several |
+| 4–5:3–0 | Warn       | Group: 0 none, else 1 + index of the highest warning bit |
+| 4–5:9–4 | Mode       | Control mode                                           |
+| 4–5:15–10| Error     | Following error / spring width, q1.1.4                 |
+| 6       | Load       | usage_i8 of the current envelope; −128 overload         |
+| 7       | IO         | Input word                                             |
+
+**FaultBeat:** when the transport refuses the beat `nRetry` times in a row
+(register `0x2D`), the beat is sent on the emergency identifier instead.
 
 ---
 
-## 8. Safety
+## 7. Write-only registers (`0xC0 – 0xDF`)
 
-- **Master-liveness watchdog.** Configure with `0x3D` or register `0x0005`. Any
-  frame addressed to this node reloads it. On expiry the drive enters its
-  configured safe state (freewheel / brake / hold) and raises the watchdog
-  warning; it stays there until a new command arrives.
-- **Emergency frames.** `0x000 + node` is the lowest identifier on the bus, so
-  a drive that trips announces it ahead of every command and every other node's
-  telemetry.
-- **Enable guards.** Energizing is refused while the drive is uncalibrated
-  (`0x0F`) or has a latched fault (`0x0D`).
-- **Register guards.** Registers marked `D` are writable only while the output
-  stage is disabled — programming an analog protection threshold under load
-  would move a trip point beneath a live current.
+### 7.1 Control modes
+
+| Mode | Name     | Behaviour                                                   |
+| :--- | :------- | :---------------------------------------------------------- |
+| `0`  | DISABLED | Output stage held in the configured safe state               |
+| `1`  | TORQUE   | Direct q-axis current command                                |
+| `2`  | VELOCITY | Velocity command; the position target ramps at that rate     |
+| `3`  | POSITION | Absolute position command                                    |
+| `4`  | MOTION   | Trajectory queue executed by the motion executor             |
+| `5`  | TONE     | Coils driven as a speaker (MIDI control)                     |
+
+The mode is written through `0x21`, but **the frame kind implies it**
+**[decision]**: a single-frame position task selects POSITION, a velocity task
+VELOCITY, a torque-only task TORQUE, and anything that lands in the queue
+(multi-frame segments, burst frames) MOTION. Enable is separate (`0x20`).
+
+### 7.2 `0xC0 – 0xC3` Motion tasks
+
+A segment is up to four frames sharing one non-zero **SegmentID**; the header
+(`0xC0`) announces which parts follow and the segment is queued as soon as the
+last of them arrives, in any order. A new header with a different SegmentID
+discards an unfinished segment (counted in `0x43/0x02`). **SegmentID 0** marks
+a single-frame setpoint applied at once. **AxisID** 0 addresses this node; any
+other value is executed only by nodes whose Axis Control (`0x01/0x00`) carries
+the same id, so one broadcast path drives several axes.
+
+**`0xC0` Motion task 1** - `[1]` SegmentID, `[2]` AxisID, `[3..4]` flags
+(LSB first): mode:4, isAbs:1, PosMode:2, TorqMode:2, TimeMode:2, io_trig:1,
+isVel:1, isAcc:1, isJrk:1; `[5..7]` time u24 [100 µs].
+
+| Mode | Name         | Needs                | Effect                                                        |
+| :--- | :----------- | :------------------- | :------------------------------------------------------------ |
+| `0`  | HOLD         | —                    | Hold position, for the time when TimeMode is set, else until the next segment |
+| `1`  | FREERUN      | velocity             | Constant velocity until a trigger (position, torque, time, IO) |
+| `2`  | FREERUN_LERP | velocity             | Velocity interpolated to the end value until a trigger        |
+| `3`  | FREEWHEEL    | —                    | Immediate: release the bridge                                 |
+| `4`  | BRAKE        | —                    | Immediate: short the phases                                   |
+| `5`  | S-CURVE      | position             | Point-to-point move shaped by the velocity / acceleration carried or the limits |
+| `6`  | PVT          | position, time       | Hermite segment ending at the position with the velocity carried |
+| `7`  | ANCHOR       | position             | Immediate: redefine "here" (absolute) or shift it (relative)  |
+| `8`  | LIMIT        | —                    | Immediate: adopt the velocity / acceleration / jerk carried   |
+| `9`  | HOMING       | —                    | **not implemented**                                           |
+| `A`  | STEP-DIR     | —                    | **not implemented**                                           |
+| `F`  | RESET        | —                    | Immediate: clear the queue and hold                           |
+
+PosMode: 1 target, 2 trigger (the run ends when the position is reached).
+TorqMode: 1 limit, 2 trigger (the run ends when the torque is reached).
+TimeMode: 1 duration, 2 trigger. Parts required: task 2 when PosMode ≠ 0,
+task 3 when isVel or TorqMode ≠ 0, task 4 when isAcc, isJrk or io_trig.
+
+**`0xC1` Motion task 2** - `[1]` SegmentID, `[2..7]` position q1.23.24
+(absolute, or a displacement when isAbs = 0). Single frame: absolute position
+setpoint (CSP).
+
+**`0xC2` Motion task 3** - `[1]` SegmentID, `[2..3]` torque bf16 (NaN unused),
+`[4]` reserved, `[5..7]` velocity f24 (NaN unused). Single frame: velocity
+setpoint (CSV) when the velocity is finite - a finite torque beside it caps
+the current envelope - otherwise a torque setpoint (CST).
+
+**`0xC3` Motion task 4** - `[1]` SegmentID, `[2..3]` acceleration bf16,
+`[4..5]` jerk bf16, `[6]` IO mask (probes that end the segment when active),
+`[7]` IO mask (probes that end it when inactive). Single frame: adopts the
+acceleration and jerk as the live limits.
+
+Absolute queued targets are converted to displacements by the control ISR
+against the end of the queue, so a mixed absolute / relative stream stays
+consistent.
+
+### 7.3 `0xCF` Save config
+
+`[1..3]` catalog u24 (bit0 node configuration, bit1 motor profile, `0xFFFFFF`
+all), `[4..7]` keyword: `0x000010AD` save, `0x0000DEF0` restore the compiled-in
+defaults into the live shadow (keeps the address) **[decision]**, `0x0000E7A5`
+erase the stored configuration - a factory reset that surrenders the address
+**[decision]**. Every keyword is refused while the stage is enabled: flash
+programming stalls the CPU with whatever vector is latched on the bridge.
+
+### 7.4 `0xD0` MIDI control
+
+`[1]` waveform:4 (0 sine; others rejected) / mode:4, `[2]` MIDI note (69 = A4;
+0 = silence), `[3]` volume 0–255, `[4..5]` duration bf16 [ms] (0 = until the
+next command), `[6]` attack share 0–255, `[7]` decay share 0–255. Selects TONE
+mode and enables the stage by itself; the note is bounded to 40–2000 Hz and the
+amplitude to a quarter of the bus voltage.
+
+---
+
+## 8. Burst mode (`0xE0 – 0xFF`)
+
+One segment per frame, MSB first, for dense synchronous streaming. The format
+is selected by the burst step of System Control: 0 = PVT (time-tagged),
+otherwise PVcTF with that fixed period.
+
+| Byte | Bits | PVT                                  | PVcTF                            |
+| :--- | :--- | :----------------------------------- | :------------------------------- |
+| 0    | 7–5  | `111`                                | `111`                            |
+| 0    | 4–0  | time21 bits 20–16                    | frame counter                    |
+| 1–2  |      | time21 bits 15–0                     | force bf16                       |
+| 3–4  |      | velocity bf16 [RPS]                  | velocity bf16 [RPS]              |
+| 5–7  |      | position, low 24 bits of q1.15.16    | position, low 24 bits of q1.15.16|
+
+`time21 = (system time [µs] / 250) mod 2²¹`: an **absolute** tag, so a lost
+frame shifts nothing; the master's clock is handed to the node through the
+Sync field of Bus Settings. Each PVT segment lasts the distance to the
+previous tag (or to the node clock for the first point). Each PVcTF segment
+lasts `steps × burst step × 250 µs`, where `steps` is the counter distance to
+the previous frame - a lost frame stretches the segment instead of shifting
+everything after it.
+
+The position is the low 24 bits of the absolute position; the node resolves
+the absolute value nearest the end of its queue, which is unambiguous while a
+segment stays under 128 revolutions (the design asks for under 8). Keep
+segments under 8 s. **[decision]** The design's "float16" velocity is bf16,
+like every other 16-bit float in the protocol.
+
+Burst frames select MOTION mode by themselves. In comm mode 1 they are silent
+unless rejected.
+
+---
+
+## 9. Safety
+
+- **Master-liveness watchdog.** Any command frame addressed to this node
+  reloads it. On expiry the drive enters its configured safe state and raises
+  the watchdog warning; it stays there until a new command arrives.
+- **Emergency frames.** `0x100 + node` outranks every command and every other
+  node's telemetry.
+- **Enable guards.** Energizing is refused while uncalibrated (`0x0F`), with a
+  latched fault (`0x0D`) or during an identification (`0x09`).
+- **Register guards.** Protection thresholds and the machine identity are
+  writable only while the output stage is disabled (`0x08`).
 - **Flash guards.** Every NVM write waits for the de-energized programming
-  window that the control loop publishes. Flash programming stalls the
-  single-bank CPU for milliseconds with the control ISR frozen and whatever
-  vector is latched still on the bridge. Save commands are refused while the
-  stage is enabled, and a save that never finds a window is abandoned after 2 s
-  and reported as a failed write.
-- **Bus-off recovery.** A bus-off event latches `CCCR.INIT` in hardware; the
-  service call clears it to start the mandated recovery sequence, so a wiring
-  fault is not permanent until reboot.
+  window the control loop publishes; a save that never finds one is abandoned
+  after 2 s and reported in `0x43/0x03`.
+- **Bus-off recovery.** Handled in the transport service call.
 
 ---
 
-## 9. What v1 does not implement
+## 10. What v1 does not implement
 
-Stated explicitly so a master can plan around it rather than discover it:
-
-- **`0x31` Calibration abort** → `TP_ERR_NOT_IMPLEMENTED`. Neither calibration
-  state machine exposes an abort entry point; both run to their own terminal
-  state. Reboot (`0x3A`) is the way to stop one.
-- **`0x30` without the force flag on a known motor** does not sweep. When a motor
-  profile is loaded the drive reloads its stored angle table by Cal-ID and returns
-  to Ready without turning the shaft — the right default, since re-sweeping a known
-  motor on every boot would move machinery for no reason. Set `[2]` bit1
-  (`TP_CALIB_FLAG_FORCE`) to demand a physical sweep, which is what you want after
-  the mechanics change.
-- **`0x30` kind 3 (full calibration)** → `TP_ERR_NOT_IMPLEMENTED`. Starting both
-  engines at once would run the HFI identification and the angle sweep
-  concurrently on the same bridge. The master sequences it: start kind `1`, poll
-  `0x0C` until the stage reports success, then start kind `2`.
-- **`0x1A` absolute S-curve targets** → `TP_ERR_BAD_PARAM`. The queue works in
-  displacements; only relative moves are expressible as a queued segment.
-- **`0x40 – 0x6F` bulk transfer / firmware update** → `TP_ERR_NOT_IMPLEMENTED`.
-  Identifier range `0x700 – 0x7FF` is reserved for it. USB DFU (`0x3A` mode 1)
-  is the field update path in v1.
-- **`0x04` Motor Status is read-only.** Its fields are writable through the
-  register map (`0x0100`–`0x0103`), where each gets a range check and the
-  disabled-stage guard.
-- **Encoder health (`0x0A` byte 1) always reads 0.** MT6835 status bits and CRC
-  are captured by the driver but not yet validated (see `suggestions.md` S8).
+- `0x56` Homing travel, `0xC0` modes HOMING / STEP-DIR, F_CAL / M_CAL,
+  writing `0x2F`, tables other than the encoder table → `TP_ERR_NOT_IMPLEMENTED`.
+- The disbalance, recovery-time, I²t budget, error-limit and motor-derating
+  fields are **stored and reported** but not yet enforced.
+- Gearbox, IO map, encoder declarations, homing settings and reference limits
+  are stored for the features that will consume them; the IO word of `0x51`
+  and the PulseBeat reads 0 on CLN17 v3, which wires no inputs.
+- Bit-rate and bus-type changes take effect after a save and a reboot.
+- Calibration abort: reboot (`0x20` action `0xB0`) is the way to stop one.
 
 ---
 
-## 10. Register map
+## 11. Transports and the USB-to-CAN gateway
 
-Value payloads are 32 bits; the type field of every reply says how to read them.
-`P` = persisted, `D` = writable only while disabled, `B` = takes effect after a
-save and a reboot.
+The engine names no peripheral: it moves frames through function pointers, so
+the same protocol runs over anything that carries an identifier and eight
+bytes. Three bindings ship: **CAN** (`transport/tp_can.h`), **HID**
+(`transport/tp_hid.h`, the control transport: 64-byte reports of up to six
+ten-byte records `id_lo, id_hi | len<<4, d0..d7`) and **Serial**
+(`transport/tp_serial.h`, framed `A5 5A | id_lo id_hi | d0..d7 | xor` on the
+CDC console). A response goes back to the transport that asked; unsolicited
+frames go to all of them.
 
-### `0x00xx` — identity and communication
-
-| ID       | Type | Access | Description                          |
-| :------- | :--- | :----- | :----------------------------------- |
-| `0x0000` | u8   | RW P   | Node address (0 = unassigned)        |
-| `0x0001` | u32  | RW P B | Arbitration bit rate [bit/s]         |
-| `0x0002` | u32  | RW P B | CAN-FD data-phase bit rate [bit/s]   |
-| `0x0003` | u8   | RW P B | Link flags: bit 0 auto-enable, bit 1 promiscuous, bit 2 classic CAN |
-| `0x0004` | u16  | RW P   | Heartbeat period [ms], 0 = off       |
-| `0x0005` | u16  | RW P   | Watchdog timeout [ms], 0 = off       |
-| `0x0006` | u8   | RW P   | Watchdog action (safe state)         |
-| `0x0007` | u8   | RW P   | Safe state while disabled            |
-| `0x0008` | u8   | R      | Hardware revision                    |
-| `0x0009` | u16  | R      | Firmware version                     |
-| `0x000A` | u32  | R      | Device code                          |
-| `0x000B` | u32  | R      | Uptime [s]                           |
-| `0x000C` | u16  | R      | Protocol version                     |
-| `0x000D` | u32  | R      | Device UID, low 32 bits              |
-| `0x000E` | u32  | R      | Device UID, high 24 bits             |
-
-### `0x01xx` — motor identity
-
-| ID       | Type | Access | Description                              |
-| :------- | :--- | :----- | :--------------------------------------- |
-| `0x0100` | u8   | RW D   | Motor type (4 stepper, 6 BLDC)           |
-| `0x0101` | u16  | RW D   | Pole pairs                               |
-| `0x0102` | u8   | RW D   | Phase order (1 ABC, 2 CAB, 3 ACB)        |
-| `0x0103` | i8   | RW D   | Direction (+1 / −1)                      |
-| `0x0104` | f32  | RW     | Winding resistance [Ω]                   |
-| `0x0105` | f32  | RW     | d-axis inductance [H]                    |
-| `0x0106` | f32  | RW     | q-axis inductance [H]                    |
-| `0x0107` | f32  | RW     | Torque constant Kt [N·m/A]               |
-| `0x0108` | f32  | RW     | PM flux linkage [Wb]                     |
-| `0x0109` | u8   | R      | Calibration table identifier             |
-| `0x010A` | i32  | R      | Angle calibration offset                 |
-| `0x010B` | f32  | RW     | Motor torque rating [N·m]                |
-
-### `0x02xx` — protection limits
-
-| ID       | Type | Access | Description                        |
-| :------- | :--- | :----- | :--------------------------------- |
-| `0x0200` | f32  | RW P   | Control current envelope [A]       |
-| `0x0201` | f32  | RW     | Motor voltage rating [V]           |
-| `0x0202` | f32  | RW     | Motor power rating [W]             |
-| `0x0203` | f32  | RW P D | Phase-A hardware overcurrent [A]   |
-| `0x0204` | f32  | RW P D | Phase-B hardware overcurrent [A]   |
-| `0x0205` | f32  | RW P D | Phase-C hardware overcurrent [A]   |
-| `0x0206` | f32  | RW P D | Overvoltage trip [V]               |
-| `0x0207` | f32  | RW P D | Undervoltage trip [V]              |
-| `0x0208` | f32  | RW P   | Overtemperature trip [°C]          |
-| `0x0209` | f32  | RW P   | Overtemperature hysteresis [°C]    |
-| `0x020A` | f32  | RW P   | Overpower trip [W]                 |
-| `0x020B` | f32  | RW P   | Bus overcurrent trip [A]           |
-| `0x020C` | u8   | RW     | Motor thermal rating [°C]          |
-| `0x020D` | f32  | RW D   | Identification current [mA]        |
-
-### `0x03xx` — control loop
-
-| ID       | Type | Access | Description                                  |
-| :------- | :--- | :----- | :------------------------------------------- |
-| `0x0300` | u8   | RW     | Control mode                                 |
-| `0x0301` | u8   | RW     | Output stage enable                          |
-| `0x0302` | f32  | RW     | Spring saturation width [rev]                |
-| `0x0303` | f32  | RW     | Velocity damper gain                         |
-| `0x0304` | f32  | RW     | Damper softening velocity [RPS]              |
-| `0x0305` | f32  | RW     | Observer bandwidth at standstill [Hz]        |
-| `0x0306` | f32  | RW     | Observer bandwidth at speed [Hz]             |
-| `0x0307` | f32  | RW     | Observer bandwidth slope [Hz per rev/s]      |
-| `0x0308` | f32  | RW     | Observer bandwidth slew rate [Hz/s]          |
-| `0x0309` | f32  | RW     | Observer acceleration clamp [rev/s²]         |
-
-### `0x04xx` — motion envelope
-
-| ID       | Type | Access | Description                              |
-| :------- | :--- | :----- | :--------------------------------------- |
-| `0x0400` | f32  | RW P   | Velocity envelope [RPS]                  |
-| `0x0401` | f32  | RW P   | Acceleration envelope [RPS²]             |
-| `0x0402` | f32  | RW P   | Jerk envelope [RPS³]                     |
-| `0x0403` | i16  | RW     | Trajectory playback rate, Q10            |
-| `0x0404` | u8   | R      | Queued segments                          |
-| `0x0405` | q16  | RW     | Position target [rev]                    |
-| `0x0406` | f32  | RW     | Velocity target [RPS]                    |
-| `0x0407` | f32  | RW     | q-axis current target [A]                |
-
-### `0x05xx` — live telemetry (read only)
-
-| ID       | Type | Description                          |
-| :------- | :--- | :----------------------------------- |
-| `0x0500` | q16  | Measured position [rev]              |
-| `0x0501` | f32  | Observed velocity [RPS]              |
-| `0x0502` | f32  | Current commanded to the FOC loop [A]|
-| `0x0503` | f32  | DC bus voltage [V]                   |
-| `0x0504` | f32  | Motor power [W]                      |
-| `0x0505` | f32  | Driver temperature [°C]              |
-| `0x0506` | u8   | Fault flags                          |
-| `0x0507` | u32  | Raw encoder angle                    |
-| `0x0508` | i32  | Accumulated revolutions              |
-| `0x0509` | u32  | Completed control passes             |
-| `0x050A` | f32  | DC bus current [A]                   |
-
-> Registers routed through the control mailbox (targets, mode, enable) take
-> effect on the next control pass, so a write reply can still show the previous
-> value. Read the register again to confirm one of those.
-
----
-
-## 11. Persistence
-
-Node configuration lives in its **own** 2 KiB flash partition
-(`NVM_CONFIG_SECTION_SIZE`), separate from the calibration table and the motor
-profile. The motor-profile engine erases its whole partition when it runs out of
-slots (roughly 60 saves); a node address stored there would be destroyed by an
-unrelated profile save, and a drive that forgets its bus address is a field
-failure.
-
-Records are 64 bytes (two flash blocks) with a magic word, a layout version and
-a CRC-32. They are appended, so a save never has to erase; the newest valid
-record wins the boot scan. Reads are memory-mapped and never stall the CPU.
-
-`0x2A` (restore defaults) has two strengths, both guarded by the key and both
-refused while the output stage is enabled:
-
-- target `config` (1) resets the **live shadow only** and keeps the node
-  address. Reversible until saved, so a bench never loses contact mid-session.
-- target `all` (0) additionally **erases the stored record**, so the node
-  really does come back on compiled-in defaults after a reboot. This surrenders
-  the node address — the drive returns unaddressed and must be found by a
-  discovery sweep again. That is what a factory reset means, and why it needs
-  the key.
+The gateway relays between USB and CAN: command frames the host sends for
+other nodes or the broadcast go down, node → master frames (`0x1xx`, `0x4xx`,
+`0x5xx`) come up. It arms on the first USB protocol frame and opens the master
+filter slots. Discovery works through it because every reply is a plain "this
+subtree is populated": identical replies merge on the bus, this node adds its
+own while unaddressed, and the host sees one answer either way.
 
 ---
 
 ## 12. Worked examples
 
-Bring a drive up on a fresh bus and jog it:
-
 ```text
-# 1. Discovery (drive has no address)
-→ 0x100  00 00 00 00 00 00 00 00        begin
-→ 0x101  00 00 00 00 00 00 00 00        prefix length 0
-← 0x5A3                                 (arbitrated: UID[0] = 0xA3)
-→ 0x101  01 A3 00 00 00 00 00 00        prefix = A3
-← 0x517                                 (UID[1] = 0x17)
-  ... five more rounds ...
-→ 0x102  A3 17 .. .. .. .. .. 07        assign UID -> node 7
-← 0x407  7E 3B 00 07 00 00 00 00        ACK, now addressed as node 7
-→ 0x103  00 00 00 00 00 00 00 00        end
+# 1. Discovery on a fresh bus (drive has no address)
+→ 0x300  12 00 00 00 00 00 00 00        search depth 0
+← 0x4FF  12 01 00 00 00 00 00 00        populated
+→ 0x300  12 01 00 00 00 00 00 00        probe prefix bit0 = 0
+← 0x4FF  12 02 00 00 00 00 00 00        populated ... walk to depth 48
+→ 0x300  12 30 A3 17 5C 02 B9 41        probe the full identity
+← 0x4FF  12 30 A3 17 5C 02 B9 41        exactly one node
+→ 0x300  91 07 A3 17 5C 02 B9 41        assign node 7 (write of 0x11)
+← 0x407  11 07 A3 17 5C 02 B9 41        confirmed on the NEW address
+→ 0x300  11 00 A3 17 5C 02 B9 41        double-check: ping by identity
+← 0x407  11 07 A3 17 5C 02 B9 41
 
 # 2. Configure: 1 A envelope, 200 ms watchdog, 20 Hz position telemetry
-→ 0x307  21 00 00 02 00 00 80 3F        REG_WRITE 0x0200 = 1.0 A
-← 0x407  21 06 00 02 00 00 80 3F
-→ 0x307  3D 00 81 00 C8 00 00 00        watchdog: apply, enabled, 200 ms
-← 0x407  3D 00 01 00 C8 00 00 00
-→ 0x307  3C 00 06 81 32 00 00 00        slot 0: emit 0x06 every 50 ms
-← 0x407  3C 00 06 01 32 00 00 00
-← 0x607  06 03 .. .. .. .. .. ..        telemetry starts flowing
+→ 0x307  A1 00 00 00 00 00 80 3F        Motor Properties 1 write: max current 1.0 A
+← 0x407  21 ..                          read-back
+→ 0x307  AD 7F C0 7F C0 7F 4D 3E        Watchdog write: timeout 0.2 s (period / delay NaN = unchanged)
+← 0x407  2D ..
+→ 0x307  82 00 54 01 32 00 00 00        Telemetry slot 0: emit 0x54 every 50 ms
+← 0x407  02 00 54 01 32 00 00 00
+← 0x507  54 ..                          telemetry starts flowing
 
-# 3. Enable in position mode and move one revolution
-→ 0x307  10 03 01 00 00 00 00 00        mode = POSITION, enable
-← 0x407  7E 10 00 00 00 00 00 00
-→ 0x207  11 01 00 00 01 00 00 00        +1.0 rev, relative (setpoint stream)
+# 3. Enable and move one revolution (CSP: a lone Motion Task 2)
+→ 0x307  A0 E1 00 00 00 00 00 00        System Control: enable
+← 0x407  20 E1 00 07 00 00 00 00
+→ 0x307  C1 00 00 00 00 01 00 00        position 1.0 rev, absolute
+                                        (silent: an accepted setpoint in comm mode 1)
 
-# 4. Stream a trajectory instead (MOTION mode, PVT segments)
-→ 0x307  10 04 01 00 00 00 00 00        mode = MOTION
-→ 0x207  80 40 00 41 20 00 03 E8        +0.25 rev, 10 RPS, 100 ms
-→ 0x207  80 40 00 41 20 00 03 E8        ... and the next segment
+# 4. Queue a point-to-point move (S-curve segment, two frames)
+→ 0x307  C0 05 00 35 10 00 00 00        segment 5: S-CURVE, absolute, pos target, no time
+→ 0x307  C1 05 00 00 00 02 00 00        target 2.0 rev -> queued, MOTION mode selected
 
-# 5. Park and persist
-→ 0x307  15 00 00 00 00 00 00 00        stop, hold
-→ 0x307  38 00 00 00 00 00 00 00        disable (opens the flash window)
-→ 0x307  28 01 00 00 00 00 00 00        save the node configuration
-← 0x407  7E 28 00 00 00 00 00 00
+# 5. Stream PVT (burst step 0)
+→ 0x307  E0 00 28 41 20 00 40 00        t=40 x 250 us, 10 RPS, pos 0x004000 = 0.25 rev
+→ 0x307  E0 00 50 41 20 00 80 00        t=80, 10 RPS, 0.5 rev
+
+# 6. Park and persist
+→ 0x307  C0 00 00 00 00 00 00 00        lone task 1, HOLD
+→ 0x307  A0 0F 00 00 00 00 00 00        disable (opens the flash window)
+→ 0x307  CF 01 00 00 AD 10 00 00        save the node configuration
+← 0x407  5E CF 00 01 00 00 00 00        ACK
 ```
 
 ---
 
 ## 13. Implementation map
 
-Each umbrella header aggregates a subfolder; include the umbrella, not the parts.
-
-| File                                      | Contents                                       |
-| :---------------------------------------- | :--------------------------------------------- |
-| `src/api/tp_wire.h`                       | Umbrella: everything that appears on the bus    |
-| `src/api/wire/tp_ids.h`                   | Protocol identity, identifier map, predicates   |
-| `src/api/wire/tp_opcodes.h`               | The opcode space and its guard keys             |
-| `src/api/wire/tp_enums.h`                 | Error, state, warning and selector enums        |
-| `src/api/wire/tp_codecs.h`                | Fixed-point and mini-float codecs               |
-| `src/api/tp_chunks.h`                     | Umbrella + `union TpFrame`                      |
-| `src/api/chunks/tp_chunk_status.h`        | `0x01–0x0F` status and telemetry layouts        |
-| `src/api/chunks/tp_chunk_motion.h`        | `0x10–0x1F` control, targets, trajectory        |
-| `src/api/chunks/tp_chunk_config.h`        | `0x20–0x2F` register access and persistence     |
-| `src/api/chunks/tp_chunk_system.h`        | `0x30–0x3F` calibration, system, replies        |
-| `src/api/tp_registers.h`                  | Umbrella: the register layer                    |
-| `src/api/registers/tp_register_desc.h`    | Descriptor model, context, value helpers        |
-| `src/api/registers/tp_register_ids.h`     | The `TpRegId` identifier space                  |
-| `src/api/registers/tp_register_table.h`   | `TP_REGISTERS` + lookup + normalization         |
-| `src/api/registers/tp_config_apply.h`     | `tp_apply_config`: shadow → hardware            |
-| `src/api/tp_node.h`                       | Umbrella: the node layer                        |
-| `src/api/node/tp_node_config.h`           | Persisted record and build-time defaults        |
-| `src/api/node/tp_node_identity.h`         | The 56-bit UID folded from the die id           |
-| `src/api/node/tp_node_store.h`            | Flash-backed load / save engine                 |
-| `src/api/node/tp_discovery.h`             | Byte-by-byte UID search participant             |
-| `src/api/tp_engine.h`                     | `TpProtocol` declaration and state              |
-| `src/api/engine/*_impl.h`                 | Its method bodies, nine files by concern        |
-| `src/api/transport/tp_can.h`              | FDCAN1 binding, transport mux and bring-up      |
-| `src/api/transport/tp_serial.h`           | Framed transport over the USB CDC console       |
-| `src/api/transport/tp_hid.h`              | Report transport over the vendor HID endpoints  |
-| `src/target/cln17_v3/usb_hid_setup.h`     | Composite USB device: CDC console + HID pipe    |
-| `src/lib/motor_control/drive_control.h`   | Mode machine, command mailbox, trajectory       |
-| `src/target/cln17_v3/can_setup.h`         | FDCAN1 driver, filtering, bus-off recovery      |
-| `test/test_tpcp/test_wire.cpp`            | Host-side wire-format conformance tests         |
-
-A host tool needs only `tp_wire.h` and `tp_chunks.h`; both are free of any
-firmware dependency, and nothing either of them reaches may include `src/lib/` —
-that invariant is what keeps the host suite compiling. Run it with
-`pio test -e native_tpcp`.
-
-### Transports
-
-The engine names no peripheral: it moves frames through four function pointers,
-so the same protocol runs over anything that can carry an identifier and eight
-bytes. Three bindings ship:
-
-- **CAN** (`transport/tp_can.h`) — the deployment transport.
-- **HID** (`transport/tp_hid.h`) — the control transport, over the vendor HID interrupt
-  endpoints of the composite USB device. Each 64-byte report carries a count
-  byte and up to six ten-byte records:
-
-  | Offset | Field                                                  |
-  | :----- | :----------------------------------------------------- |
-  | `0`    | record count, `0..6`                                   |
-  | `1+`   | per record: `id_lo`, `id_hi(2:0) \| len(7:4)`, `d0..d7` |
-
-- **Serial** (`transport/tp_serial.h`) — the same protocol over the board's USB CDC
-  console, framed as `A5 5A | id_lo id_hi | d0..d7 | xor`. Because the sync
-  byte has bit 7 set and the log output is ASCII, protocol frames and console
-  text share one endpoint with no mode switch.
-
-They are multiplexed: a **response** goes back to whichever transport delivered
-the request, while unsolicited frames (telemetry, emergencies) go to all of
-them. Discovery works on all three. On CAN the reply is a data-less frame whose
-identifier is the answer, resolved between competing nodes by bit-level
-arbitration; a point-to-point USB link has nobody to arbitrate against, so the
-single reply is the answer. Routing it this way is what makes an unaddressed
-node reachable on a bench at all.
-
-HID is the transport to use for control. A report is a message, not a byte
-stream, so it arrives whole or not at all — there is no framing, no checksum and
-no resynchronization — and the host is paced by the endpoint's own flow control
-rather than by a guess. The CDC transport has neither property: the host cannot
-see how much room the board has, so `tools/tpcp_host.py` streams trajectory
-bursts over it four frames at a time with a sleep between batches, because any
-faster overruns the receive buffer silently and any slower starves the queue
-mid-move. Over HID the same burst goes out at full speed, six frames per 1 ms
-transfer.
-
-Both USB transports cover everything above the physical layer: dispatch,
-registers, telemetry, motion, calibration, persistence, the watchdog, and the
-discovery handshake. Neither exercises bit timing, arbitration between real
-competing nodes, hardware filtering or bus-off recovery — those need a bus.
+| File                                      | Contents                                        |
+| :---------------------------------------- | :---------------------------------------------- |
+| `src/api/tp_wire.h`                       | Umbrella: everything that appears on the bus     |
+| `src/api/wire/tp_ids.h`                   | Identity, identifier map, predicates             |
+| `src/api/wire/tp_cmds.h`                  | CMD groups, register addresses, sub ids, keys    |
+| `src/api/wire/tp_enums.h`                 | Error, state, warning and selector enums         |
+| `src/api/wire/tp_codecs.h`                | Fixed-point and mini-float codecs                |
+| `src/api/tp_chunks.h`                     | Umbrella + `union TpFrame`                       |
+| `src/api/chunks/tp_chunk_config.h`        | `0x00–0x3F` read/write register layouts          |
+| `src/api/chunks/tp_chunk_status.h`        | `0x40–0x7F` read-only registers, ACK, PulseBeat  |
+| `src/api/chunks/tp_chunk_motion.h`        | Motion tasks, save, MIDI, burst                  |
+| `src/api/tp_registers.h`                  | Umbrella: register map + config apply            |
+| `src/api/registers/tp_register_map.h`     | `TP_REGISTERS`: access rules, sub-space sizes    |
+| `src/api/registers/tp_config_apply.h`     | `tp_apply_config`: shadow → hardware             |
+| `src/api/tp_node.h`                       | Umbrella: the node layer                         |
+| `src/api/node/tp_node_config.h`           | Persisted record and build-time defaults         |
+| `src/api/node/tp_node_identity.h`         | The 48-bit HashUID folded from the die id        |
+| `src/api/node/tp_node_store.h`            | Flash-backed load / save engine (256 B records)  |
+| `src/api/node/tp_discovery.h`             | Binary HashUID search participant                |
+| `src/api/tp_engine.h`                     | `TpProtocol` declaration and state               |
+| `src/api/engine/*_impl.h`                 | Its method bodies, eight files by concern        |
+| `src/api/transport/tp_can.h`              | FDCAN1 binding, transport mux, USB-CAN gateway   |
+| `src/api/transport/tp_serial.h`           | Framed transport over the USB CDC console        |
+| `src/api/transport/tp_hid.h`              | Report transport over the vendor HID endpoints   |
+| `test/test_tpcp/test_wire.cpp`            | Host-side wire-format conformance tests          |
+| `tools/tpcp_host.py`                      | Reference master (CLI)                           |
+| `tools/tpcp_mcp.py`                       | The same master as MCP tools                     |
 
 ### Threading model
 

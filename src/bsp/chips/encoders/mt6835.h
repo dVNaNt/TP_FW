@@ -119,6 +119,33 @@ inline constexpr uint32_t Angle(uint8_t b0, uint8_t b1, uint8_t b2) {
 /** Extract STATUS[2:0] from the third burst payload byte. */
 inline constexpr uint8_t Status(uint8_t b2) { return (uint8_t)(b2 & 0x7U); }
 
+/**
+ * CRC-8 of one angle burst frame, as the sensor computes it for REG_ANGLE4.
+ *
+ * Polynomial x^8 + x^2 + x + 1 (0x07), initial value 0x00, no reflection and
+ * no final XOR, over the 24 payload bits ANGLE[20:0] + STATUS[2:0] in wire
+ * order (b0, b1, b2). Bit-serial on purpose: three bytes are 24 shift steps,
+ * cheap enough for a 20 kHz interrupt and free of any lookup table.
+ *
+ * @param b0 First payload byte  (ANGLE[20:13])
+ * @param b1 Second payload byte (ANGLE[12:5])
+ * @param b2 Third payload byte  (ANGLE[4:0] << 3 | STATUS[2:0])
+ * @return CRC-8 to compare with the fourth burst byte (REG_ANGLE4)
+ */
+inline constexpr uint8_t Crc8(uint8_t b0, uint8_t b1, uint8_t b2) {
+    uint32_t data = ((uint32_t)b0 << 16) | ((uint32_t)b1 << 8) | b2;  // 24 payload bits, MSB first
+    uint8_t crc = 0;                                                    // Initial value 0x00
+    for (int i = 23; i >= 0; --i) {                                     // One shift per payload bit
+        const uint8_t bit = (uint8_t)(((data >> i) & 1U) ^ (crc >> 7));  // Feed the next bit into the register
+        crc = (uint8_t)(crc << 1);                                      // Shift the register
+        if (bit) {
+            crc ^= 0x07U;                                               // Reduce by the polynomial
+        }
+    }
+    return crc;
+}
+static_assert(Crc8(0x00, 0x00, 0x00) == 0x00, "CRC-8 of an all-zero frame is zero");
+
 
 
 }  // namespace MT6835

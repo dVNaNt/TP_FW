@@ -19,8 +19,13 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-// Define DEV_LOG_ENABLE in your project settings or uncomment the line below
-#define DEV_LOG_ENABLE 1
+// DEV_LOG_ENABLE is a BUILD flag (platformio.ini), not a header switch:
+// cln17_v3_release leaves it undefined, so every macro below compiles to
+// nothing and the console costs no flash (~8 KiB of code and strings);
+// cln17_v3_dev and cln17_v3_bench pass -D DEV_LOG_ENABLE=1. Console code that
+// lives outside these macros - the run.h banner and heartbeat, the board's
+// irq_log() - must sit inside #ifdef DEV_LOG_ENABLE as well, because
+// tp_log_room() and TP_LOG_TX_MARGIN only exist when logging is compiled in.
 
 #ifdef DEV_LOG_ENABLE
 

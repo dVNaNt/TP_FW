@@ -14,6 +14,11 @@
  * faults on the bus, while the USB console stays a read-only diagnostic
  * channel.
  *
+ * The console (boot banner, 1 Hz heartbeat) exists only when DEV_LOG_ENABLE is
+ * defined (cln17_v3_dev / cln17_v3_bench). The release image prints nothing,
+ * skips the wait for a host to open the CDC port, and is reached over TPCP
+ * alone - the CDC endpoint still carries the binary protocol (tp_serial.h).
+ *
  * The layering is strict: can_setup.h owns the FDCAN1 peripheral, src/api/
  * owns the protocol (wire format, registers, discovery, telemetry) and
  * drive_control.h turns protocol commands into control-loop targets. This file
@@ -33,6 +38,7 @@
 
 #include "api/transport/tp_can.h"   // TunePulse CAN Protocol bound to FDCAN1
 
+#ifdef DEV_LOG_ENABLE
 /** Max time run_setup() waits for the USB host to open the CDC port [ms]. */
 static constexpr uint32_t USB_ATTACH_TIMEOUT_MS = 5000;
 
@@ -62,10 +68,10 @@ static uint32_t hb_last_ticks = 0;
  * SPI1 ISR produces.
  */
 static void print_heartbeat() {
-    // One report is roughly 190 characters; if that much room is not free the
+    // One report is roughly 230 characters; if that much room is not free the
     // line is skipped entirely, which keeps run_loop() - and therefore the CAN
     // protocol service - free of any host-paced stall.
-    if (!tp_log_room(200)) {
+    if (!tp_log_room(240)) {
         hb_last_ms = millis();                           // Skip this window, keep the cadence
         hb_last_ticks = TP.counter;                      // ... and the rate baseline
         return;
@@ -122,6 +128,14 @@ static void print_heartbeat() {
     SerialUSB.print((unsigned long)TP_HID.tx_count());                // Frames packed into HID reports
     SerialUSB.print(" drop=");
     SerialUSB.print((unsigned long)(TP_HID.dropped() + TP_HID.overruns()));  // Lost to a full ring
+    SerialUSB.print("] gw[on=");
+    SerialUSB.print((unsigned)tp_gateway_armed);                      // USB<->CAN relay armed
+    SerialUSB.print(" down=");
+    SerialUSB.print((unsigned long)tp_gateway_down);                  // Host frames copied to the bus
+    SerialUSB.print(" up=");
+    SerialUSB.print((unsigned long)tp_gateway_up);                    // Bus answers copied to the host
+    SerialUSB.print(" lost=");
+    SerialUSB.print((unsigned long)tp_gateway_lost);                  // Relays dropped on a full ring
     SerialUSB.print("] mode=");
     DriveTelemetry dt;                                                // Live control snapshot
     TP.drive.read_telemetry(dt);
@@ -131,6 +145,7 @@ static void print_heartbeat() {
     SerialUSB.print(" q=");
     SerialUSB.println((unsigned)dt.queue_depth);                      // Queued motion segments
 }
+#endif  // DEV_LOG_ENABLE
 
 /**
  * @brief One-time initialization: bootloader button, USB, motor stack, protocol.
@@ -156,6 +171,7 @@ inline void run_setup() {
         // over CAN, which is the point of not stopping here.
     }
 
+#ifdef DEV_LOG_ENABLE
     // Wait for the host to actually OPEN the port (DTR asserted) before
     // printing anything. USBSerial::write() silently discards every byte
     // while !CDC_connected(), so a banner emitted right after begin() is
@@ -186,6 +202,7 @@ inline void run_setup() {
     SerialUSB.println(" B");
     SerialUSB.println("  Bringing up peripherals + calibration...");
     SerialUSB.println("========================================================");
+#endif  // DEV_LOG_ENABLE
 
     tunepulse_init();
 
@@ -194,14 +211,14 @@ inline void run_setup() {
     // tunepulse_init() programmed, so the persisted values are the ones that
     // end up in force. It also starts the link at the stored bit rates.
     if (!tp_can_begin(TP)) {
-        SerialUSB.println("CAN protocol init FAILED");
+        TP_LOG("CAN protocol init FAILED");
     }
 
     // A node with no address answers network management only, which is exactly
     // what makes it discoverable; say so once so an unconfigured board on the
     // bench is not mistaken for a dead one.
     if (TP_API.config().node_id == TP_NODE_UNASSIGNED) {
-        SerialUSB.println("  CAN: no node address stored - awaiting discovery (0x100..0x103)");
+        TP_LOG("  CAN: no node address stored - listening on 0x3FF for discovery (registers 0x11 / 0x12)");
     }
 }
 
@@ -232,11 +249,13 @@ inline void run_loop() {
     }
 #endif
 
+#ifdef DEV_LOG_ENABLE
     // Periodic liveness + control-rate report. Dropped rather than blocked
     // when the console is not draining (see print_heartbeat).
     if ((millis() - hb_last_ms) >= HEARTBEAT_PERIOD_MS) {
         print_heartbeat();
     }
+#endif
 }
 
 #endif  // RUN_CLN17V3_H

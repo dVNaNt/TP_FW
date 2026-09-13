@@ -50,6 +50,7 @@
 #define BSP_STM32G4_COMP_DAC_H
 
 #include <Arduino.h>
+#include "lib/dev_log.h"   // TP_LOG_VAL: threshold echo exists only in DEV_LOG_ENABLE builds
 #include "bsp/stm32g4/chip.h"
 #include "stm32g4xx_hal.h"
 #include "stm32g4xx_ll_bus.h"
@@ -106,31 +107,27 @@ static inline void MX_DAC3_Init(void) {         // Begin function to initialize 
 void DAC_Set_COMP2_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase A overcurrent threshold
     DAC1->DHR12R2 =
         (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC1 CH2 register
-        SerialUSB.print("Set COMP2: ");
-        SerialUSB.println(threshold);
+    TP_LOG_VAL("Set COMP2: ", threshold);                // Console echo of the new threshold (DEV_LOG_ENABLE builds only)
 
 }  // End of DAC_Set_COMP2_OC_Threshold function
 
 void DAC_Set_COMP1_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase B overcurrent threshold
     DAC1->DHR12R1 =
         (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC1 CH1 register
-        SerialUSB.print("Set COMP1: ");
-        SerialUSB.println(threshold);
+    TP_LOG_VAL("Set COMP1: ", threshold);                // Console echo of the new threshold (DEV_LOG_ENABLE builds only)
     }  // End of DAC_Set_COMP1_OC_Threshold function
 
 void DAC_Set_COMP4_OC_Threshold(uint16_t threshold) {  // Function to dynamically update Phase C overcurrent threshold
     DAC3->DHR12R2 =
         (threshold >> 4) & 0x0FFF;  // Right shift by 4, mask safely to 12 bits, and write directly to DAC3 CH2 register
-                SerialUSB.print("Set COMP4: ");
-        SerialUSB.println(threshold);
+    TP_LOG_VAL("Set COMP4: ", threshold);                // Console echo of the new threshold (DEV_LOG_ENABLE builds only)
 }  // End of DAC_Set_COMP4_OC_Threshold function
 
 void DAC_Set_COMP3_OV_Threshold(uint16_t threshold) {   // Function to dynamically update overvoltage threshold without blocking code
     if ((DAC3->CR & DAC_CR_EN1) != 0U) {            // Safely verify that DAC3 Channel 1 is actually enabled to prevent hardfaults
         DAC3->DHR12R1 = (threshold >> 4) & 0x0FFF;  // Perform 16-to-12-bit downscaling safely and update threshold register
     }  // End of hardware enable check condition
-            SerialUSB.print("Set COMP3 OV: ");
-        SerialUSB.println(threshold);
+    TP_LOG_VAL("Set COMP3 OV: ", threshold);                // Console echo of the new threshold (DEV_LOG_ENABLE builds only)
 }  // End of DAC_Set_COMP3_OV_Threshold function
 
 static inline void MX_COMPS_INIT(void) {          // Begin function to initialize all four analog comparators simultaneously

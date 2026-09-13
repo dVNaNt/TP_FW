@@ -8,10 +8,12 @@
  * partition; begin() restores the stored configuration and applies it; poll()
  * is the whole thread-mode half of the protocol.
  *
- * poll() runs five bounded stages per call - drain at most MAX_FRAMES_PER_POLL
- * frames, check for a fault edge, service telemetry timers, advance a pending
- * flash save, then fire an armed reboot. Every stage is bounded so one busy
- * burst can never monopolize loop().
+ * poll() runs its stages in a fixed order, every one bounded: drain at most
+ * MAX_FRAMES_PER_POLL frames, check for a fault edge, emit at most
+ * REPLY_BUDGET batch replies, service the PulseBeat and telemetry timers,
+ * advance a pending flash save, sequence a multi-step calibration, shape the
+ * MIDI envelope, then fire an armed reboot. One busy burst can therefore
+ * never monopolize loop().
  *
  * Part of TpProtocol, declared in tp_engine.h. Including that header pulls this
  * one in at the end; including this one first pulls tp_engine.h, whose own
@@ -24,16 +26,11 @@
 
 #include "../tp_engine.h"  // class TpProtocol - the declarations these bodies define
 
-inline void TpProtocol::attach(TunePulseHeart* tp,
-                               TpFrameRead rd,
-                               TpFrameWrite wr,
-                               TpFrameWriteEmpty wr_id,
-                               TpBindFilters filters) {
-    tp_ = tp;             // Firmware state
-    read_ = rd;           // RX path
-    write_ = wr;          // TX path
-    write_id_ = wr_id;    // Discovery TX path
-    bind_filters_ = filters;  // Filter control
+inline void TpProtocol::attach(TunePulseHeart* tp, TpFrameRead rd, TpFrameWrite wr, TpBindFilters filters) {
+    tp_ = tp;                  // Firmware state
+    read_ = rd;                // RX path
+    write_ = wr;               // TX path
+    bind_filters_ = filters;   // Filter control
 }
 
 inline void TpProtocol::bind_platform(FlashEEPROM* cfg_flash, TpRebootFn reboot) {
@@ -42,7 +39,7 @@ inline void TpProtocol::bind_platform(FlashEEPROM* cfg_flash, TpRebootFn reboot)
 }
 
 inline void TpProtocol::begin() {
-    identity_.init();                      // Fold the factory UID down to 56 bits
+    identity_.init();                      // Fold the factory UID down to 48 bits
     config_.set_defaults();                // Start from the compiled-in defaults
     const bool restored = store_.load(config_);  // Overlay the stored record, if any
 
@@ -55,8 +52,8 @@ inline void TpProtocol::begin() {
     verify_register_table();               // Catch an unsorted map at bring-up, not in the field
 
     TP_LOG_VALS("TPCP: node/uid/config", (unsigned)config_.node_id,
-                (unsigned long)identity_.guard(), restored ? "stored" : "defaults");
-    hb_next_ms_ = millis();                // First heartbeat on the next service pass
+                (unsigned long)(uint32_t)identity_.raw(), restored ? "stored" : "defaults");
+    hb_next_ms_ = millis();                // First PulseBeat on the next service pass
 }
 
 inline void TpProtocol::poll() {
@@ -76,32 +73,20 @@ inline void TpProtocol::poll() {
     // ---- Emergency: report a fault the instant it changes -------------
     emit_emergency_on_change();
 
-    // ---- Cyclic telemetry --------------------------------------------
+    // ---- Batch and range replies still queued ------------------------
+    service_batch();
+
+    // ---- PulseBeat and cyclic telemetry ------------------------------
     service_telemetry(now);
 
     // ---- Persistence -------------------------------------------------
-    // Programming is skipped internally unless the control loop reports a
-    // de-energized bridge, so this call is cheap while the drive is live.
-    if (store_.is_busy()) {
-        if (!store_.service()) {
-            // Still draining. A save that can never find a programming
-            // window (the drive was re-energized before it completed) would
-            // otherwise leave the engine busy forever and block every later
-            // save, so it is abandoned after a bounded wait and reported
-            // through PARAM_STATUS as a failed write.
-            if (save_deadline_ms_ == 0u) {
-                save_deadline_ms_ = now + SAVE_TIMEOUT_MS;
-            } else if ((int32_t)(now - save_deadline_ms_) >= 0) {
-                store_.abort();
-                save_deadline_ms_ = 0u;
-                TP_LOG("TPCP: configuration save abandoned - no programming window");
-            }
-        } else {
-            save_deadline_ms_ = 0u;      // Finished: arm a fresh deadline next time
-        }
-    } else {
-        save_deadline_ms_ = 0u;          // Idle: nothing to time out
-    }
+    service_store(now);
+
+    // ---- Multi-step calibration --------------------------------------
+    service_calibration();
+
+    // ---- MIDI envelope -----------------------------------------------
+    service_midi(now);
 
     // ---- Auto-enable -------------------------------------------------
     service_auto_enable();
@@ -117,7 +102,7 @@ inline void TpProtocol::poll() {
 
 inline void TpProtocol::verify_register_table() const {
     for (uint32_t i = 1; i < TP_REGISTER_COUNT; ++i) {
-        if (TP_REGISTERS[i - 1u].id >= TP_REGISTERS[i].id) {
+        if (TP_REGISTERS[i - 1u].cmd >= TP_REGISTERS[i].cmd) {
             TP_LOG_VAL("TPCP: REGISTER TABLE NOT SORTED at index", (unsigned)i);
             return;                                      // One report is enough
         }

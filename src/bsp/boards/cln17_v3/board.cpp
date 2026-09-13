@@ -108,20 +108,35 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
         SPI1_ChipSelect(false); // Deassert CS to latch the packet
 
 #if (ENCODER_TYPE == ENCODER_MT6835)
-        // Assemble 21-bit angle {RX[2], RX[3], RX[4][7:3]} and capture status / CRC
-        POSITION_ENCODER_MT_RAW =
-            ((uint32_t)SPI1_RX_BUF[2] << 13) |
-            ((uint32_t)SPI1_RX_BUF[3] << 5)  |
-            ((uint32_t)SPI1_RX_BUF[4] >> 3);
-        POSITION_ENCODER_MT_RAW <<= 11; // Left-align into 32-bit Q0.32 representation
+        // Validate the frame against the sensor's CRC-8 before anything of it
+        // is published; Encoder::accept_frame() decides whether a frame that
+        // failed is dropped (it is, once the check has proven itself on this
+        // boot) and keeps the statistics. A dropped frame leaves the previous
+        // angle in place for this control period.
+        const uint8_t b0 = SPI1_RX_BUF[2];   // ANGLE[20:13]
+        const uint8_t b1 = SPI1_RX_BUF[3];   // ANGLE[12:5]
+        const uint8_t b2 = SPI1_RX_BUF[4];   // ANGLE[4:0] << 3 | STATUS[2:0]
+        if (TP.encoder.accept_frame(MT6835::Crc8(b0, b1, b2) == SPI1_RX_BUF[5])) {
+            // Assemble 21-bit angle {RX[2], RX[3], RX[4][7:3]} and capture status / CRC
+            POSITION_ENCODER_MT_RAW =
+                ((uint32_t)b0 << 13) |
+                ((uint32_t)b1 << 5)  |
+                ((uint32_t)b2 >> 3);
+            POSITION_ENCODER_MT_RAW <<= 11; // Left-align into 32-bit Q0.32 representation
 
-        POSITION_MT_STATUS = (uint8_t)(SPI1_RX_BUF[4] & 0x07U); // Status bits: overspeed / weak field / undervoltage
-        POSITION_MT_CRC    = SPI1_RX_BUF[5];                    // Received CRC-8 for diagnostics
+            POSITION_MT_STATUS = (uint8_t)(b2 & 0x07U); // Status bits: overspeed / weak field / undervoltage
+            POSITION_MT_CRC    = SPI1_RX_BUF[5];        // Received CRC-8 for diagnostics
+            TP.encoder.set_sensor_status(MT6835::Status(b2)); // Weak field / undervoltage reach the diagnostics
 
-        // Raise the encoder fault while any sensor status bit is set: the
-        // atomic flag fires the registered fault action once on the rising
-        // edge, so a healthy reading clears it on the next frame.
-        TP.encoder.set_fault(POSITION_MT_STATUS != 0U);
+            // Raise the encoder fault while any sensor status bit is set: the
+            // atomic flag fires the registered fault action once on the rising
+            // edge, so a healthy reading clears it on the next frame. Only an
+            // ACCEPTED frame gets here, so this never clears the fault that
+            // accept_frame() holds while the link itself is down.
+            TP.encoder.set_fault(POSITION_MT_STATUS != 0U);
+        } else if (TP.encoder.take_relink_request()) {
+            Encoder_Relink();                           // Link down for a run of frames: realign the bus
+        }
 #else
         // TLE5012B: 15-bit left-aligned angle from RX[2..3]
         POSITION_ENCODER_TLE = ((uint16_t)SPI1_RX_BUF[2] << 9) | ((uint16_t)SPI1_RX_BUF[3] << 1);
@@ -137,13 +152,47 @@ extern "C" void DMA1_Channel1_IRQHandler(void) {
 // From bsp/stm32g4/comp_dac.h
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief One console line from a protection interrupt, never blocking.
+ *
+ * Prints the event and the last conversion's coil currents and bus voltage
+ * so a trip can be read against what the drive was doing. The whole line is
+ * skipped when the CDC queue lacks room: a USBSerial write that has to wait
+ * for the host would stall inside a protection vector.
+ *
+ * Compiled to nothing without DEV_LOG_ENABLE: the fault still reaches the
+ * master as an emergency frame, only the console echo is gone.
+ *
+ * @param what Event name.
+ */
+static void irq_log(const char* what) {
+#ifdef DEV_LOG_ENABLE
+    if (!tp_log_room(96)) {
+        return;                                                    // Host not draining: drop, never wait
+    }
+    const Vec2D_f32 i = TP.driver_phy.motor_ctrl.get_current_ab_amps();  // Coil currents of the last conversion [A]
+    SerialUSB.print("[IRQ] ");
+    SerialUSB.print(what);
+    SerialUSB.print(" Ia=");
+    SerialUSB.print(i.a, 2);
+    SerialUSB.print(" Ib=");
+    SerialUSB.print(i.b, 2);
+    SerialUSB.print(" Vbus=");
+    SerialUSB.print(TP.driver_phy.supply.get_voltage(), 2);
+    SerialUSB.print(" faults=0x");
+    SerialUSB.println((unsigned)TP.driver_phy.get_fault(), HEX);
+#else
+    (void)what;                                                        // Console disabled: nothing to echo
+#endif
+}
+
 extern "C" void COMP1_2_3_IRQHandler(void) {
     // Check COMP1 (Phase B overcurrent) - EXTI line 21
     if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_21)) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_21);  // Clear pending flag
 
         TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        SerialUSB.println("B");
+        irq_log("COMP1 phase B overcurrent");
     }
 
     // Check COMP2 (Phase A overcurrent) - EXTI line 22
@@ -151,7 +200,7 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_22);  // Clear pending flag
 
         TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        SerialUSB.println("A");
+        irq_log("COMP2 phase A overcurrent");
     }
 
     // Check COMP3 (Overvoltage) - EXTI line 29
@@ -164,7 +213,7 @@ extern "C" void COMP1_2_3_IRQHandler(void) {
         } else {
             TP.driver_phy.set_fault().overvoltage(false);  // Clear overvoltage error
         }
-        SerialUSB.println("V");
+        irq_log((LL_COMP_ReadOutputLevel(COMP3) == LL_COMP_OUTPUT_LEVEL_HIGH) ? "COMP3 overvoltage SET" : "COMP3 overvoltage CLEARED");
     }
 }
 
@@ -174,7 +223,7 @@ extern "C" void COMP4_IRQHandler(void) {
         LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_30);  // Clear pending flag
 
         TP.driver_phy.set_fault().overcurrent(true);  // Set fatal overcurrent error
-        SerialUSB.println("C");
+        irq_log("COMP4 phase C overcurrent");
     }
 }
 
@@ -186,8 +235,8 @@ extern "C" void EXTI15_10_IRQHandler(void) {
         // FIXED: Request logic. The signal is active-low.
         // Rising edge (pin HIGH) -> false (clear the flag)
         // Falling edge (pin LOW) -> true (set the flag)
-        bool is_fault = (LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_10) == 0U); 
-        SerialUSB.println("E");
+        bool is_fault = (LL_GPIO_IsInputPinSet(GPIOB, LL_GPIO_PIN_10) == 0U);
+        irq_log(is_fault ? "DRV_FAULT asserted (nFAULT low)" : "DRV_FAULT released");
         TP.driver_phy.set_fault().external(is_fault);
     }
 }

@@ -174,6 +174,15 @@ public: // Make the following methods public for external module access
     uint16_t get_sample_count() const { return (uint16_t)cal_size; }
 
     /**
+     * @brief Read one stored calibration sample by index (protocol table access).
+     * @param index Sample index, 0 .. get_sample_count()-1.
+     * @return The sample value; 0 when the index is out of range.
+     */
+    uint16_t get_sample(size_t index) const {
+        return (index < cal_size) ? get_val_by_idx(index) : 0u;  // Bounds-checked read of the table
+    }
+
+    /**
      * @brief Truncates the RAM table to exactly @p n samples
      *
      * Used to align the collected sample count to a multiple of the
@@ -563,13 +572,22 @@ public: // Make the following methods public for external module access
             idl_pos1 = idl_pos2; // Left bound ideal becomes old right bound
         } // End of bounded segment search
 
-        // Compute mechanical angle mapped into one electrical period safely
-    uint16_t el = (uint16_t)(((uint32_t)result * (uint32_t)cal_size) / (uint32_t)el_angle_div);
-
-    // Compensate for the first calibration sample being taken after +1 electrical step
-    const uint16_t phase_shift = (uint16_t)(0x10000u / (uint32_t)el_angle_div);
-
-    return (uint16_t)(el - phase_shift);    } // End of correct_el_angle() method
+        // Map the mechanical angle into one electrical period. This is the
+        // angle the SWEEP commanded when the rotor sat at this encoder value,
+        // measured from the sweep's start, in the sweep's own rotation sense.
+        // It is deliberately NOT the rotor's electrical angle: the sweep holds
+        // the rotor with a q-axis current, so the rotor sits a quarter period
+        // ahead of the commanded angle, and the sweep runs in whichever sense
+        // makes the encoder count up. Both corrections depend on the detected
+        // direction, which this table does not know - the control loop applies
+        // them (see TunePulseHeart::tick), so that a motor whose encoder counts
+        // up with a positive field rotation and one whose encoder counts down
+        // land on the same rotor angle. A fixed quarter-period shift applied
+        // here was right for one direction and 180 degrees off for the other,
+        // which turned the position loop into positive feedback on every
+        // direction = -1 motor.
+        return (uint16_t)(((uint32_t)result * (uint32_t)cal_size) / (uint32_t)el_angle_div);
+    } // End of correct_el_angle() method
 
     /**
      * @brief Fast O(1) raw-angle correction using the ECC table

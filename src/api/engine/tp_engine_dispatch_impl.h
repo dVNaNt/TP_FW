@@ -2,24 +2,24 @@
 
 /**
  * @file tp_engine_dispatch_impl.h
- * @brief Frame routing: identifier class, then opcode.
+ * @brief Frame routing: identifier, then CMD group, then register.
  *
- * dispatch() classifies by identifier - network management, the setpoint
- * stream, or the request channel - and handle_request() fans the request
- * channel out by opcode into every other group.
+ * dispatch() accepts only the command channel (0x300 + node and the 0x300
+ * broadcast), reloads the watchdog, and - for an unaddressed node - lets
+ * nothing but the two discovery registers through. handle_frame() then fans
+ * out by CMD group: burst, write-only command, read, or register write.
  *
- * Two orderings here are load-bearing. A bit-packed motion burst is tested for
- * FIRST, because it carries no opcode byte at all. And MOTOR_PROPERTIES is
- * handled before the generic "read a status chunk" shortcut, because it is the
- * one opcode that is both readable and writable.
+ * Two orderings here are load-bearing. A burst frame is tested for FIRST,
+ * because its CMD byte is the top of the stream's time / counter field. And
+ * the discovery registers are handled before the generic register path,
+ * because an unaddressed node must answer them while refusing everything
+ * else, and because their replies leave on the address the frame changed.
  *
  * respond() and nack() live here too: they are the reply mechanism the whole
- * dispatch tree shares, and nack() is what counts a rejection.
+ * dispatch tree shares, nack() is what counts a rejection, and answers() is
+ * where the Bus Settings response policy is enforced.
  *
- * Part of TpProtocol, declared in tp_engine.h. Including that header pulls this
- * one in at the end; including this one first pulls tp_engine.h, whose own
- * include of this file is then skipped by #pragma once - so the class is always
- * complete before these definitions are parsed, whichever order is used.
+ * Part of TpProtocol, declared in tp_engine.h.
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
@@ -28,306 +28,359 @@
 #include "../tp_engine.h"  // class TpProtocol - the declarations these bodies define
 
 inline void TpProtocol::dispatch(uint16_t id, const TpFrame& f, uint8_t len) {
-    if (tp_is_nmt(id)) {
-        handle_nmt(id, f, len);                     // Broadcast network management
-        return;
+    (void)len;                                      // Every protocol frame is 8 bytes; short frames arrive zero-padded
+    if (!tp_is_command_for(id, config_.node_id)) {
+        return;                                     // Another node's traffic (promiscuous filter) or an answer
+    }
+    const bool broadcast = tp_is_broadcast(id);     // 0x300 reaches every node
+    feed_watchdog();                                // The master is alive
+    if (handled_ != 0xFFFFu) {
+        handled_++;                                 // Saturating: a wrapped counter hides a storm
+    }
+    if (handle_discovery(f, broadcast)) {
+        return;                                     // Discovery registers answer their own way
     }
     if (config_.node_id == TP_NODE_UNASSIGNED) {
-        return;                                     // No address: answer nothing else
+        return;                                     // No address: nothing but discovery is accepted
     }
-    if (tp_is_setpoint_for(id, config_.node_id)) {
-        feed_watchdog();                            // The master is alive
-        handle_control(f, false);                   // Fire and forget: never answered
-        return;
-    }
-    if (tp_is_request_for(id, config_.node_id)) {
-        feed_watchdog();                            // The master is alive
-        if (handled_ != 0xFFFFu) {
-            handled_++;                             // Saturating: a wrapped counter hides a storm
-        }
-        const bool broadcast = (id == (uint16_t)(TP_ID_REQUEST_BASE + TP_NODE_BROADCAST));
-        handle_request(f, broadcast);
-        return;
-    }
-    // Anything else reached us through the promiscuous filter: ignore it.
+    handle_frame(f, broadcast);
 }
 
-inline void TpProtocol::handle_nmt(uint16_t id, const TpFrame& f, uint8_t len) {
-    switch (id) {
-        case TP_NMT_DISCOVER_BEGIN:
-            // Only nodes without an address take part, so a running system
-            // is never disturbed by a discovery sweep on the same bus.
-            if (config_.node_id == TP_NODE_UNASSIGNED) {
-                discovery_.begin();
-            }
-            break;
-
-        case TP_NMT_DISCOVER_PREFIX: {
-            if (len < 1u) {
-                break;                              // Prefix length byte missing
-            }
-            const uint8_t plen = f.b8[0];           // Bytes of UID already resolved
-            if (plen > TP_DISCOVER_PREFIX_MAX) {
-                break;                              // Nothing left to disclose
-            }
-            uint16_t reply = 0;                     // Identifier that carries our next UID byte
-            if (discovery_.on_prefix(identity_, &f.b8[1], plen, reply) && (write_id_ != nullptr)) {
-                write_id_(reply);                   // CAN arbitration finds the lowest byte for us
-            }
-            break;
-        }
-
-        case TP_NMT_DISCOVER_ASSIGN: {
-            if (len < 8u) {
-                break;                              // Needs the full UID plus the address
-            }
-            uint8_t assigned = 0;                   // Address the master wants us to take
-            if (!discovery_.on_assign(identity_, f.b8, assigned)) {
-                break;                              // Meant for a different drive
-            }
-            if ((assigned == TP_NODE_UNASSIGNED) || (assigned == TP_NODE_BROADCAST)) {
-                break;                              // Reserved addresses are not assignable
-            }
-            adopt_node_id(assigned, true);          // Take it, refilter, persist
-            TpFrame tx;                             // Confirmation frame
+inline bool TpProtocol::handle_discovery(const TpFrame& f, bool broadcast) {
+    const uint8_t cmd = f.b8[0];                    // CMD as received
+    const uint8_t reg = tp_cmd_register(cmd);       // Address with the write bit stripped
+    if (reg == TP_REG_DISCOVERY_SEARCH) {
+        // A search is a question whichever group bit it carries: the answer
+        // is the read form, and an addressed node only takes part when the
+        // master asked it directly (an address-collision check).
+        uint8_t reply_depth = 0;                    // Depth to answer with
+        uint64_t reply_prefix = 0;                  // Prefix to answer with
+        const uint64_t prefix = tp_unpack_uid(f.search.prefix);  // Prefix the master sent
+        if (TpDiscovery::on_search(identity_, config_.node_id, !broadcast, f.search.depth, prefix,
+                                   reply_depth, reply_prefix)) {
+            TpFrame tx;                             // Reply under construction
             tx.u64 = 0;
-            tx.ack.cmd = TP_OP_ACK;
-            tx.ack.opcode = TP_OP_SYS_NODE_ID;
-            tx.ack.detail = assigned;
-            respond(tx);                            // Answered on our brand-new address
-            break;
+            tx.search.cmd = TP_REG_DISCOVERY_SEARCH;
+            tx.search.depth = reply_depth;
+            tp_pack_uid(tx.search.prefix, reply_prefix);
+            respond(tx);                            // On 0x4FF while unassigned
         }
-
-        case TP_NMT_DISCOVER_END:
-            discovery_.end();                       // Back to normal operation
-            break;
-
-        case TP_NMT_GLOBAL_CONTROL:
-            if (len >= 1u) {
-                handle_global(f);
-            }
-            break;
-
-        case TP_NMT_SYNC:
-            on_sync();                              // Latch and emit synchronized telemetry
-            break;
-
-        case TP_NMT_TIME:
-        default:
-            break;                                  // Informational or reserved
+        return true;
     }
+    if (reg != TP_REG_DISCOVERY_ASSIGN) {
+        return false;                               // Not a discovery register
+    }
+    const uint64_t uid = tp_unpack_uid(f.discovery.uid);  // HashUID the master named
+    if (tp_cmd_is_read(cmd)) {
+        // A read pings: a matching HashUID (or the wildcard 0 on a directed
+        // request, which asks "who are you") is answered with this node's
+        // address and identity. An unassigned node answers a wildcard too -
+        // that is the one-node fast path of a discovery sweep.
+        const bool mine = (uid == identity_.raw());  // Named this drive
+        const bool who = (uid == 0ull);              // Asked whoever hears it
+        if (!mine && !who) {
+            return true;                            // Meant for a different drive
+        }
+        TpFrame tx;                                 // Reply under construction
+        tx.u64 = 0;
+        tx.discovery.cmd = TP_REG_DISCOVERY_ASSIGN;
+        tx.discovery.addr = config_.node_id;
+        tp_pack_uid(tx.discovery.uid, identity_.raw());
+        respond(tx);
+        return true;
+    }
+    // A write assigns, resets or re-addresses.
+    uint8_t assign = 0;                             // Address the master wants us to take
+    if (!TpDiscovery::on_assign(identity_, uid, f.discovery.addr, broadcast, assign)) {
+        return true;                                // Meant for a different drive, or a bad wildcard
+    }
+    if ((assign != TP_NODE_UNASSIGNED) && ((assign < TP_NODE_MIN) || (assign > TP_NODE_MAX))) {
+        TpFrame tx;                                 // Reject: the broadcast address is not assignable
+        nack(tx, cmd, TP_ERR_BAD_PARAM, assign);
+        if (!broadcast) {
+            respond(tx);
+        }
+        return true;
+    }
+    adopt_node_id(assign, true);                    // Take it, refilter, persist
+    if (!broadcast && (assign != TP_NODE_UNASSIGNED)) {
+        TpFrame tx;                                 // Confirmation on the NEW address
+        tx.u64 = 0;
+        tx.discovery.cmd = TP_REG_DISCOVERY_ASSIGN;
+        tx.discovery.addr = config_.node_id;
+        tp_pack_uid(tx.discovery.uid, identity_.raw());
+        respond(tx);
+    }
+    return true;
 }
 
-inline void TpProtocol::handle_global(const TpFrame& f) {
-    if (tp_ == nullptr) {
-        return;                                     // Not bound to a drive
-    }
-    switch (f.b8[0]) {
-        case TP_GLOBAL_STOP:
-            tp_->drive.post_u32(DriveReq::Stop, TP_STOP_QUICK);   // Clear the queue and hold
-            tp_->drive.post_u32(DriveReq::SetEnable, 0u);         // Then de-energize
-            break;
-        case TP_GLOBAL_DISABLE:
-            tp_->drive.post_u32(DriveReq::SetEnable, 0u);         // Output stage off
-            break;
-        case TP_GLOBAL_ENABLE:
-            tp_->drive.post_u32(DriveReq::SetEnable, 1u);         // Output stage on
-            break;
-        case TP_GLOBAL_FAULT_RESET:
-            clear_faults();                                       // Drop latched faults
-            break;
-        case TP_GLOBAL_HEARTBEAT:
-            emit_chunk(TP_OP_HEARTBEAT);                          // Answer an inventory sweep
-            break;
-        case TP_GLOBAL_REBOOT:
-            if (read_u32(f, 4) == TP_REBOOT_KEY) {
-                arm_reboot(0u);                                   // Guarded warm reset
-            }
-            break;
-        default:
-            break;                                                // Unknown sub-command
-    }
-}
-
-inline void TpProtocol::handle_request(const TpFrame& f, bool broadcast) {
+inline void TpProtocol::handle_frame(const TpFrame& f, bool broadcast) {
+    const uint8_t cmd = f.b8[0];       // CMD byte
     TpFrame tx;                        // Reply under construction
     tx.u64 = 0;                        // Start from a clean frame
-    bool reply = true;                 // Cleared by handlers that answer nothing
 
-    // Bit-packed motion segments are legal on the request channel too;
-    // byte 0 with bit 7 set can never be an opcode.
-    if (tp_burst_is(f.b8)) {
-        const TpError e = queue_burst(f);
-        // Name the kind of segment in the acknowledgement: the request
-        // carried no opcode byte to echo, so this is the only way the
-        // master can tell a PVT accept from a PVcTF accept.
-        const uint8_t label = ((f.b8[0] & TP_BURST_CONST_T) != 0u) ? (uint8_t)TP_OP_MOTION_PVCTF
-                                                                   : (uint8_t)TP_OP_MOTION_PVT;
+    // ---- Burst stream: bits 7..5 set, no register address at all -------
+    if (tp_cmd_is_burst(cmd)) {
+        const TpError e = handle_burst(f);
         if (e != TP_ERR_NONE) {
-            nack(tx, label, e, 0u);
+            nack(tx, cmd, e, 0u);
         } else {
-            ack(tx, label);
+            ack(tx, cmd, 0u);
         }
-        if (!broadcast) {
+        if (!broadcast && answers(false, e == TP_ERR_NONE)) {
             respond(tx);
         }
         return;
     }
 
-    const uint8_t op = f.b8[0];        // Opcode being requested
-
-    // Motor Properties is the one opcode that is both a status chunk and a
-    // writable one, so it MUST be taken before the read shortcut below -
-    // otherwise a write would be silently answered with the unchanged
-    // state and never applied.
-    if (op == TP_OP_MOTOR_PROPERTIES) {
-        const TpError e = apply_motor_properties(f);
-        if (e != TP_ERR_NONE) {
-            nack(tx, op, e, 0u);
-        } else {
-            pack_chunk(TP_OP_MOTOR_PROPERTIES, tx);  // Answer with the applied state
+    // ---- Write-only commands ---------------------------------------
+    if (tp_cmd_is_write_only(cmd)) {
+        TpError e = TP_ERR_UNKNOWN_CMD;             // Result of the command
+        bool setpoint = false;                      // Streaming frame under the response policy
+        switch (cmd) {
+            case TP_CMD_MOTION_TASK_1:
+            case TP_CMD_MOTION_TASK_2:
+            case TP_CMD_MOTION_TASK_3:
+            case TP_CMD_MOTION_TASK_4:
+                e = handle_motion_task(f);
+                setpoint = true;
+                break;
+            case TP_CMD_SAVE_CONFIG:
+                e = handle_save(f);
+                break;
+            case TP_CMD_MIDI:
+                e = handle_midi(f);
+                break;
+            default:
+                break;                              // Unknown write-only register
         }
-        if (!broadcast) {
+        if (e != TP_ERR_NONE) {
+            nack(tx, cmd, e, f.b8[1]);
+        } else {
+            ack(tx, cmd, f.b8[1]);
+        }
+        // A broadcast write is executed by every node but answered by none:
+        // 250 simultaneous acknowledgements would be a burst, not information.
+        if (!broadcast && answers(false, setpoint && (e == TP_ERR_NONE))) {
             respond(tx);
         }
         return;
     }
 
-    // Status chunks: pure reads, always answered, safe to broadcast.
-    if (pack_chunk(op, tx)) {
-        respond(tx);                   // Even a broadcast read gets an answer:
-        return;                        // every node replies on its own identifier.
+    // ---- Reads: registers, batch and range requests -------------------
+    if (tp_cmd_is_read(cmd)) {
+        if (cmd == TP_REG_BATCH_READ) {
+            const TpError e = handle_batch_read(f);  // Replies flow from service_batch()
+            if ((e != TP_ERR_NONE) && !broadcast) {
+                nack(tx, cmd, e, 0u);
+                respond(tx);
+            }
+            return;
+        }
+        if (cmd == TP_REG_RANGE_READ) {
+            const TpError e = handle_range_read(f);  // Replies flow from service_batch()
+            if ((e != TP_ERR_NONE) && !broadcast) {
+                nack(tx, cmd, e, f.b8[1]);
+                respond(tx);
+            }
+            return;
+        }
+        const TpRegDesc* d = tp_find_register(cmd); // Look the register up
+        if (d == nullptr) {
+            nack(tx, cmd, TP_ERR_UNKNOWN_CMD, 0u);
+        } else {
+            const uint8_t sub = ((d->flags & TP_RF_SUB) != 0u) ? f.b8[1] : 0u;  // Record selector
+            const TpError e = read_register(cmd, sub, f, tx);
+            if (e != TP_ERR_NONE) {
+                nack(tx, cmd, e, sub);
+            }
+        }
+        // Even a broadcast read gets an answer: every node replies on its
+        // own identifier, which is exactly how a master inventories a bus.
+        if (answers(true, false)) {
+            respond(tx);
+        }
+        return;
     }
 
-    switch (op) {
-        // ---- Real-time control ---------------------------------------
-        case TP_OP_CONTROL_MODE:
-        case TP_OP_TARGET_POSITION:
-        case TP_OP_TARGET_VELOCITY:
-        case TP_OP_TARGET_TORQUE:
-        case TP_OP_MOTION_LIMITS:
-        case TP_OP_STOP:
-        case TP_OP_ANCHOR:
-        case TP_OP_MOTION_SCURVE:
-        case TP_OP_MOTION_QUEUE_CTL: {
-            const TpError e = handle_control(f, true);
-            if (e == TP_ERR_NONE) {
-                ack(tx, op);
-            } else {
-                nack(tx, op, e, 0u);
-            }
-            break;
-        }
-
-        // ---- Registers -----------------------------------------------
-        case TP_OP_REG_READ:
-            handle_reg_read(f, tx);
-            break;
-        case TP_OP_REG_WRITE:
-            handle_reg_write(f, tx);
-            break;
-        case TP_OP_REG_INFO:
-            handle_reg_info(f, tx);
-            break;
-
-        // ---- Persistence ---------------------------------------------
-        case TP_OP_PARAM_SAVE:
-        case TP_OP_PARAM_LOAD:
-        case TP_OP_PARAM_DEFAULTS: {
-            const TpError e = handle_persistence(f);
-            if (e == TP_ERR_NONE) {
-                ack(tx, op);
-            } else {
-                nack(tx, op, e, 0u);
-            }
-            break;
-        }
-
-        // ---- Calibration ---------------------------------------------
-        case TP_OP_CALIB_START:
-        case TP_OP_CALIB_ABORT: {
-            const TpError e = handle_calibration(f);
-            if (e == TP_ERR_NONE) {
-                ack(tx, op);
-            } else {
-                nack(tx, op, e, 0u);
-            }
-            break;
-        }
-
-        // ---- System --------------------------------------------------
-        case TP_OP_SYS_ENABLE:
-            if (tp_ == nullptr) {
-                nack(tx, op, TP_ERR_WRONG_STATE, 0u);
-            } else if ((f.sys.arg != 0u) && !tp_->angle_calibrator.is_calibrated()) {
-                // Energizing without an angle table would command an
-                // arbitrary electrical angle: refuse rather than jerk.
-                nack(tx, op, TP_ERR_NOT_CALIBRATED, 0u);
-            } else if ((f.sys.arg != 0u) && (tp_->driver_phy.get_fault() != 0u)) {
-                nack(tx, op, TP_ERR_FAULT_ACTIVE, tp_->driver_phy.get_fault());
-            } else {
-                tp_->drive.post_u32(DriveReq::SetEnable, (f.sys.arg != 0u) ? 1u : 0u);
-                ack(tx, op);
-            }
-            break;
-        case TP_OP_SYS_FAULT_RESET:
-            clear_faults();
-            ack(tx, op);
-            break;
-        case TP_OP_SYS_REBOOT:
-            if (f.reboot.key != TP_REBOOT_KEY) {
-                nack(tx, op, TP_ERR_ACCESS_DENIED, 0u);
-            } else {
-                arm_reboot(f.reboot.mode);
-                ack(tx, op);
-            }
-            break;
-        case TP_OP_SYS_NODE_ID:
-            handle_node_id(f, tx);
-            break;
-        case TP_OP_SYS_TELEMETRY:
-            handle_telemetry_cfg(f, tx);
-            break;
-        case TP_OP_SYS_WATCHDOG:
-            handle_watchdog_cfg(f, tx);
-            break;
-
-        // ---- Reserved for bulk transfer / firmware update -------------
-        case 0x40u:
-        case 0x41u:
-        case 0x42u:
-            nack(tx, op, TP_ERR_NOT_IMPLEMENTED, 0u);
-            break;
-
-        case TP_OP_NOP:
-            reply = false;                       // A zero frame is padding, not a command
-            break;
-
-        default:
-            nack(tx, op, TP_ERR_UNKNOWN_OPCODE, 0u);
-            break;
+    // ---- Register writes ------------------------------------------------
+    const TpError e = write_register(f, tx);        // Apply, then read back into tx
+    if (e != TP_ERR_NONE) {
+        nack(tx, cmd, e, f.b8[1]);
     }
-
-    // A broadcast write is executed by every node but answered by none:
-    // 250 simultaneous acknowledgements would be a burst, not information.
-    if (reply && !broadcast) {
+    if (!broadcast && answers(false, false)) {
         respond(tx);
     }
 }
 
+inline bool TpProtocol::answers(bool is_read, bool is_setpoint) const {
+    switch (config_.comm_mode) {
+        case TP_COMM_SILENT:
+            return false;                            // Never a word
+        case TP_COMM_EVERY:
+            return true;                             // Everything is acknowledged
+        case TP_COMM_ON_REQUEST:
+        default:
+            // Reads and register writes are requests and get their answer; an
+            // accepted setpoint is streaming traffic and stays silent, a
+            // rejected one is still worth a NACK.
+            return is_read || !is_setpoint;
+    }
+}
+
 inline void TpProtocol::respond(const TpFrame& f) {
-    if (write_ != nullptr) {
+    if ((write_ != nullptr) && (config_.comm_mode != TP_COMM_SILENT)) {
         write_((uint16_t)(TP_ID_RESPONSE_BASE + config_.node_id), f);
     }
 }
 
-inline void TpProtocol::nack(TpFrame& f, uint8_t opcode, TpError err, uint8_t detail) {
+inline void TpProtocol::nack(TpFrame& f, uint8_t cmd, TpError err, uint8_t detail) {
     f.u64 = 0;                     // Reserved bytes transmit as zero
-    f.ack.cmd = TP_OP_NACK;        // Generic failure reply
-    f.ack.opcode = opcode;         // What was refused
+    f.ack.cmd = TP_CMD_NACK;       // Generic failure reply
+    f.ack.echo = cmd;              // What was refused
     f.ack.error = (uint8_t)err;    // Why it was refused
-    f.ack.detail = detail;         // Context: register id, fault mask, stage
+    f.ack.detail = detail;         // Context: sub id, segment id, fault mask
     if (rejected_ != 0xFFFFu) {
         rejected_++;               // Saturating: a wrapped counter hides a storm
+    }
+}
+
+// ============================================================================
+// Batch and range reads
+// ============================================================================
+
+inline TpError TpProtocol::handle_batch_read(const TpFrame& f) {
+    uint8_t prev = 0xFFu;                            // Previous explicit register (0xFF = none)
+    bool range_open = false;                         // A filler followed an explicit register
+    bool any = false;                                // At least one readable register named
+    for (uint32_t i = 0; i < 7u; ++i) {
+        const uint8_t r = f.batch.regs[i];           // Entry under consideration
+        if (r == TP_REG_BATCH_READ) {
+            range_open = (prev != 0xFFu);            // One filler between two registers spans them
+            continue;
+        }
+        if (r > 0x7Fu) {
+            return TP_ERR_BAD_PARAM;                 // Not a read register
+        }
+        uint8_t first = r;                           // First register to mark
+        if (range_open && (r > prev)) {
+            first = (uint8_t)(prev + 1u);            // Fill the span after the previous one
+        }
+        range_open = false;
+        for (uint32_t k = first; k <= r; ++k) {
+            const TpRegDesc* d = tp_find_register((uint8_t)k);  // Only real registers are queued
+            if ((d != nullptr) && ((d->flags & TP_RF_READ) != 0u)) {
+                batch_bits_[k >> 3] |= (uint8_t)(1u << (k & 7u));
+                any = true;
+            }
+        }
+        prev = r;
+    }
+    if (!any) {
+        return TP_ERR_BAD_PARAM;                     // Nothing readable was named
+    }
+    batch_pending_ = true;
+    return TP_ERR_NONE;
+}
+
+inline TpError TpProtocol::handle_range_read(const TpFrame& f) {
+    const TpRegDesc* d = tp_find_register(f.range.reg);  // Register to walk
+    if ((d == nullptr) || ((d->flags & TP_RF_READ) == 0u) || (f.range.reg > 0x7Fu)) {
+        return TP_ERR_UNKNOWN_CMD;                   // Not a readable register
+    }
+    uint32_t start = tp_unpack_u24(f.range.start);   // First record
+    uint32_t end = tp_unpack_u24(f.range.end);       // Last record, inclusive
+    if (end < start) {
+        return TP_ERR_BAD_PARAM;                     // Empty range
+    }
+    if ((d->flags & TP_RF_SUB) != 0u) {
+        if (start >= d->subs) {
+            return TP_ERR_UNKNOWN_SUB;               // Beyond the sub-space
+        }
+        if (end >= d->subs) {
+            end = d->subs - 1u;                      // Clamp to the last record
+        }
+    } else if (f.range.reg == TP_REG_DIRECT) {
+        start &= ~3u;                                // Word aligned
+        end &= ~3u;
+    } else if (f.range.reg != TP_REG_CAL_TABLE) {
+        start = 0u;                                  // A plain register has one record
+        end = 0u;
+    }
+    if ((end - start) > 4095u) {
+        return TP_ERR_OUT_OF_RANGE;                  // Bound a runaway walk
+    }
+    range_active_ = true;                            // service_batch() emits from here on
+    range_cmd_ = f.range.reg;
+    range_cursor_ = start;
+    range_end_ = end;
+    return TP_ERR_NONE;
+}
+
+inline void TpProtocol::service_batch() {
+    if (config_.node_id == TP_NODE_UNASSIGNED) {
+        return;                                      // A node must stay silent without an address
+    }
+    uint32_t budget = REPLY_BUDGET;                  // Replies this call may emit
+
+    // ---- Range walk first: it was asked for as one unit ---------------
+    while (range_active_ && (budget > 0u)) {
+        TpFrame req;                                 // Synthesized request naming the record
+        req.u64 = 0;
+        req.b8[0] = range_cmd_;
+        uint8_t sub = 0;                             // Record selector for sub-spaces
+        if (range_cmd_ == TP_REG_DIRECT) {
+            tp_pack_u24(req.direct.addr, range_cursor_);  // Address under the cursor
+        } else if (range_cmd_ == TP_REG_CAL_TABLE) {
+            req.cal_table.sample = (uint16_t)range_cursor_;  // Sample under the cursor
+        } else {
+            sub = (uint8_t)range_cursor_;            // Sub identifier under the cursor
+            req.b8[1] = sub;
+        }
+        TpFrame tx;                                  // Reply under construction
+        tx.u64 = 0;
+        const TpError e = read_register(range_cmd_, sub, req, tx);
+        if (e != TP_ERR_NONE) {
+            nack(tx, range_cmd_, e, sub);            // Say which record could not be read
+        }
+        respond(tx);
+        budget--;
+        if (range_cursor_ >= range_end_) {
+            range_active_ = false;                   // Walk complete
+        } else {
+            range_cursor_ += (range_cmd_ == TP_REG_DIRECT) ? 4u : 1u;
+        }
+    }
+
+    // ---- Batch bitmap ---------------------------------------------------
+    while (batch_pending_ && (budget > 0u)) {
+        uint32_t k = 0;                              // Lowest pending register
+        while ((k < 0x80u) && ((batch_bits_[k >> 3] & (1u << (k & 7u))) == 0u)) {
+            k++;
+        }
+        if (k >= 0x80u) {
+            batch_pending_ = false;                  // Bitmap drained
+            break;
+        }
+        const TpRegDesc* d = tp_find_register((uint8_t)k);  // Register to emit
+        const uint8_t subs = ((d != nullptr) && ((d->flags & TP_RF_SUB) != 0u)) ? d->subs : 1u;
+        // A sub-space register is emitted record by record.
+        TpFrame req;                                 // Synthesized request
+        req.u64 = 0;
+        req.b8[0] = (uint8_t)k;
+        req.b8[1] = batch_sub_;
+        TpFrame tx;                                  // Reply under construction
+        tx.u64 = 0;
+        const TpError e = read_register((uint8_t)k, batch_sub_, req, tx);
+        if (e != TP_ERR_NONE) {
+            nack(tx, (uint8_t)k, e, batch_sub_);
+        }
+        respond(tx);
+        budget--;
+        batch_sub_++;
+        if (batch_sub_ >= subs) {
+            batch_sub_ = 0u;                         // Next register starts at record 0
+            batch_bits_[k >> 3] &= (uint8_t)~(1u << (k & 7u));  // This one is done
+        }
     }
 }

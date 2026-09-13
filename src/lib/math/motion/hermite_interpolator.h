@@ -3,9 +3,10 @@
  * @brief Fixed-point cubic Hermite segment evaluator.
  *
  * prepare() precomputes the four Hermite basis coefficients from displacement,
- * duration and boundary velocities; eval() then produces position (Q16.32-ish
- * fixed point) and velocity per microsecond tick using only multiplies and
- * shifts - suitable for the ISR-hot trajectory path.
+ * duration and boundary velocities; eval() then produces position (Q32.32
+ * fixed point, 64 bits so a segment may span any displacement) and velocity
+ * per microsecond tick using only multiplies and shifts - suitable for the
+ * ISR-hot trajectory path.
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
@@ -116,8 +117,10 @@ public:
         const uint32_t scale_bits = uint32_t(fb + 127) << 23;
         const float sc = __builtin_bit_cast(float, scale_bits);
 
-        const int32_t m0_sc = __builtin_lroundf(m0 * sc);
-        const int32_t m1_sc = __builtin_lroundf(m1 * sc);
+        // lrintf (round-to-nearest-even, one vcvtr) instead of lroundf (a libm call):
+        // the two differ only on exact .5 ties, irrelevant for coefficient quantisation.
+        const int32_t m0_sc = __builtin_lrintf(m0 * sc);
+        const int32_t m1_sc = __builtin_lrintf(m1 * sc);
 
         // Compute pure integer coefficients. Integer cancellation eliminates any floating-point accumulation drift.
         c1_ = 2 * m0_sc;
@@ -146,10 +149,17 @@ public:
      * * @note [HOT PATH] If the segment is flagged as static, this function bypasses all tracking math
      * and writes zero outputs immediately. Uses compiler hints to ensure zero branch-prediction overhead.
      * * @param[in]  t_us_in_seg      Current elapsed time from the start of this segment, in microseconds.
-     * @param[out] out_p_rel_q16_32 Target reference output position (relative to segment start), in Q16 format.
+     * @param[out] out_p_rel_q32  Target reference output position relative to the segment start,
+     *                            revolutions with 32 fractional bits (the executor's Q32.32 basis).
+     *                            64 bits wide on purpose: the raw polynomial value is bounded by the
+     *                            coefficient magnitude, which prepare() keeps under 2^30, so the
+     *                            left shift that restores the 32-bit fraction is exact in 64 bits,
+     *                            while a 32-bit result could hold at most half a revolution and
+     *                            wrapped on any longer segment - the trajectory folded back on itself
+     *                            half way through a one-turn move.
      * @param[out] out_v_rps        Target reference output velocity, in physical Revolutions Per Second (RPS).
      */
-    __attribute__((always_inline)) void eval(uint32_t t_us_in_seg, int32_t& out_p_rel_q16_32, float& out_v_rps) const {
+    __attribute__((always_inline)) void eval(uint32_t t_us_in_seg, int64_t& out_p_rel_q32, float& out_v_rps) const {
         
         // ---------------------------------------------------------------------
         // HOT PATH EXECUTION
@@ -158,7 +168,7 @@ public:
         // This ensures that the compiler structures assembly pipeline to pass straight through 
         // without branch penalties for moving states, while providing ultra-fast exit for static states.
         if (__builtin_expect(is_static_, 0)) {
-            out_p_rel_q16_32 = 0;
+            out_p_rel_q32 = 0;
             out_v_rps = 0.0f;
             return;
         }
@@ -197,8 +207,10 @@ public:
         const int32_t p_raw = int32_t((int64_t(p_t2) * u_q31) >> 32);
 
         // --- Step 2: Output Reconstruction ---
-        // Shift integer positions back to standardized Q16 and multiply tracking velocity by scaling constant.
-        out_p_rel_q16_32 = p_raw << shift32_;
+        // Restore the 32 fractional bits of the Q32.32 basis in 64-bit arithmetic (see the
+        // parameter note: the raw value is under 2^30, so the shift cannot lose bits) and
+        // multiply the tracking velocity by its scaling constant.
+        out_p_rel_q32 = int64_t(p_raw) << shift32_;
         out_v_rps = float(v_raw) * v_fac_;
     }
 };

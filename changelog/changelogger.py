@@ -9,7 +9,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "tools"))  # Make tools/ importable by path
 import tg_log                                   # Console + Telegram logging setup
 
-MAX_FLASH = 131072
+MAX_FLASH = 114688   # board_upload.maximum_size: 128 KiB minus the 16 KiB NVM reservation, same base as PlatformIO
 MAX_RAM = 32768
 
 def get_previous_sizes(filepath):

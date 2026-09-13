@@ -6,9 +6,15 @@
  *
  * The identifier is the protocol's routing layer: every frame's meaning starts
  * with which channel base it falls into, and the node address is simply an
- * offset from that base. Eight channels are carved out of the 11-bit space,
- * ordered so that CAN's own bit-level arbitration resolves them by priority -
- * emergency lowest-numbered (wins every contest), bulk transfer highest.
+ * offset from that base. Four channels are carved out of the 11-bit space,
+ * ordered so that CAN's own bit-level arbitration resolves them by priority:
+ * a tripping drive (0x1xx) outranks every command (0x3xx), a command outranks
+ * every answer (0x4xx), and status telemetry (0x5xx) can never delay either.
+ *
+ * Node addresses: 0 is the broadcast address (0x300 reaches every node at
+ * once), 1..254 are assignable, 255 is the address of a node that has not been
+ * given one yet. An unassigned node listens on 0x3FF, answers on 0x4FF, and
+ * accepts nothing but the two discovery registers until it is addressed.
  *
  * Keeping the map and the "is this frame mine" predicates in one file means the
  * offsets and the tests that apply them can never drift apart.
@@ -27,14 +33,14 @@
 // Protocol identity
 // ============================================================================
 
-/** Protocol version reported by DEVICE_INFO / the PROTOCOL_VERSION register. */
-#define TP_PROTOCOL_VERSION 0x0100u  // Major 1, minor 0 (high byte . low byte)
+/** Protocol version reported by DEVICE_INFO (major in the high byte, minor in the low byte). */
+#define TP_PROTOCOL_VERSION 0x0100u
 
-/** Payload size of every core protocol frame, in bytes (one classic CAN frame). */
+/** Payload size of every protocol frame, in bytes (one classic CAN frame). */
 #define TP_FRAME_SIZE 8u
 
 /**
- * Board identity reported by DEVICE_INFO and the identity registers.
+ * Board identity reported by DEVICE_INFO.
  * Override any of them from the build configuration (-D TP_DEVICE_CODE=...)
  * when the same firmware is built for a different board revision.
  */
@@ -53,106 +59,92 @@
 // ============================================================================
 
 /** Base identifier of the emergency channel (node -> bus, highest priority). */
-#define TP_ID_EMCY_BASE 0x000u
+#define TP_ID_EMCY_BASE 0x100u
 
-/** Base identifier of the network-management block (master -> bus). */
-#define TP_ID_NMT_BASE 0x100u
+/** Base identifier of the command channel (master -> node: registers, setpoints, flashing). */
+#define TP_ID_COMMAND_BASE 0x300u
 
-/** Base identifier of the real-time setpoint stream (master -> node). */
-#define TP_ID_SETPOINT_BASE 0x200u
-
-/** Base identifier of the request / command channel (master -> node). */
-#define TP_ID_REQUEST_BASE 0x300u
-
-/** Base identifier of the response channel (node -> master). */
+/** Base identifier of the response channel (node -> master; discovery replies too). */
 #define TP_ID_RESPONSE_BASE 0x400u
 
-/** Base identifier of the discovery arbitration replies (node -> master). */
-#define TP_ID_DISCOVERY_BASE 0x500u
+/** Base identifier of the PulseBeat and cyclic telemetry channel (node -> bus). */
+#define TP_ID_TELEMETRY_BASE 0x500u
 
-/** Base identifier of heartbeat and cyclic telemetry (node -> bus). */
-#define TP_ID_TELEMETRY_BASE 0x600u
-
-/** First identifier of the block reserved for bulk transfer / firmware update. */
-#define TP_ID_BULK_BASE 0x700u
+/** Mask isolating the channel class of an identifier (0x100, 0x300, 0x400, 0x500). */
+#define TP_ID_CLASS_MASK 0x700u
 
 /** Node address that every drive answers in addition to its own address. */
-#define TP_NODE_BROADCAST 0xFFu
+#define TP_NODE_BROADCAST 0x00u
 
-/** Node address meaning "no address assigned yet" (discovery pending). */
-#define TP_NODE_UNASSIGNED 0x00u
+/** Node address of a drive that has not been assigned one yet (discovery pending). */
+#define TP_NODE_UNASSIGNED 0xFFu
 
-/** Highest individually addressable node number. */
+/** Lowest individually assignable node address. */
+#define TP_NODE_MIN 0x01u
+
+/** Highest individually assignable node address. */
 #define TP_NODE_MAX 0xFEu
 
-/** Number of bytes in a device UID (56-bit, one full frame minus the node byte). */
-#define TP_UID_BYTES 7u
+/** Bits in a device HashUID (the identity discovery searches on). */
+#define TP_UID_BITS 48u
 
-/**
- * @brief Network-management identifiers inside the 0x100 block.
- *
- * All of them are broadcast frames sent by the master; every drive listens to
- * the whole block regardless of whether it already owns a node address.
- */
-enum TpNmtId : uint16_t {
-    TP_NMT_DISCOVER_BEGIN  = TP_ID_NMT_BASE + 0x0u,  ///< Arm the UID search on every unaddressed node.
-    TP_NMT_DISCOVER_PREFIX = TP_ID_NMT_BASE + 0x1u,  ///< byte 0 = prefix length, bytes 1-7 = prefix.
-    TP_NMT_DISCOVER_ASSIGN = TP_ID_NMT_BASE + 0x2u,  ///< bytes 0-6 = full UID, byte 7 = address to assign.
-    TP_NMT_DISCOVER_END    = TP_ID_NMT_BASE + 0x3u,  ///< Leave discovery mode, resume normal filtering.
-    TP_NMT_GLOBAL_CONTROL  = TP_ID_NMT_BASE + 0x4u,  ///< byte 0 = TpGlobalCmd, bytes 4-7 = key when required.
-    TP_NMT_SYNC            = TP_ID_NMT_BASE + 0x5u,  ///< Latch setpoints and emit sync-triggered telemetry.
-    TP_NMT_TIME            = TP_ID_NMT_BASE + 0x6u   ///< bytes 0-3 = master wall clock [us], informational.
-};
+/** Bytes in a device HashUID (six bytes, little-endian on the wire). */
+#define TP_UID_BYTES 6u
 
-/**
- * The discovery prefix length travels in BYTE 0, not in the frame's DLC.
- *
- * The original draft encoded it as the DLC, which cannot survive a CAN-FD link
- * (payload sizes above 8 are quantized to 12/16/20/24/32/48/64, so a DLC is not
- * a byte count) and forces every receiver to plumb the DLC through to the
- * application. Carrying the length in the payload keeps the rule that EVERY
- * protocol frame is 8 bytes, on both classic CAN and CAN-FD.
- */
-#define TP_DISCOVER_PREFIX_MAX 6u  // A 7-byte UID is resolved in seven steps: prefixes 0..6
-
-/** Sub-commands carried in byte 0 of a TP_NMT_GLOBAL_CONTROL broadcast. */
-enum TpGlobalCmd : uint8_t {
-    TP_GLOBAL_STOP        = 0x00u,  ///< Emergency stop: every node enters its configured safe state.
-    TP_GLOBAL_DISABLE     = 0x01u,  ///< Disable the output stage on every node.
-    TP_GLOBAL_ENABLE      = 0x02u,  ///< Enable the output stage on every node.
-    TP_GLOBAL_FAULT_RESET = 0x03u,  ///< Clear latched faults on every node.
-    TP_GLOBAL_HEARTBEAT   = 0x04u,  ///< Ask every node to emit one heartbeat immediately.
-    TP_GLOBAL_REBOOT      = 0x05u   ///< Reboot every node (byte 1..4 must carry TP_REBOOT_KEY).
-};
+/** Mask of the 48 significant bits of a HashUID held in a 64-bit word. */
+#define TP_UID_MASK 0x0000FFFFFFFFFFFFull
 
 // ============================================================================
 // Identifier helpers
 // ============================================================================
 
 /**
- * @brief True when an 11-bit identifier addresses this node's request channel.
- * @param id      Received standard identifier.
- * @param node_id This node's assigned address.
- */
-static inline bool tp_is_request_for(uint16_t id, uint8_t node_id) {
-    return (id == (uint16_t)(TP_ID_REQUEST_BASE + node_id)) ||           // Directed request
-           (id == (uint16_t)(TP_ID_REQUEST_BASE + TP_NODE_BROADCAST));   // Broadcast request
-}
-
-/**
- * @brief True when an 11-bit identifier addresses this node's setpoint stream.
- * @param id      Received standard identifier.
- * @param node_id This node's assigned address.
- */
-static inline bool tp_is_setpoint_for(uint16_t id, uint8_t node_id) {
-    return (id == (uint16_t)(TP_ID_SETPOINT_BASE + node_id)) ||          // Directed setpoint
-           (id == (uint16_t)(TP_ID_SETPOINT_BASE + TP_NODE_BROADCAST));  // Broadcast setpoint
-}
-
-/**
- * @brief True when an 11-bit identifier belongs to the network-management block.
+ * @brief Channel class of an identifier (TP_ID_*_BASE), ignoring the node byte.
  * @param id Received standard identifier.
  */
-static inline bool tp_is_nmt(uint16_t id) {
-    return (id >= TP_ID_NMT_BASE) && (id < (TP_ID_NMT_BASE + 0x10u));    // 0x100..0x10F
+static inline uint16_t tp_id_class(uint16_t id) {
+    return (uint16_t)(id & TP_ID_CLASS_MASK);  // Top three bits of the 11-bit identifier
+}
+
+/**
+ * @brief Node byte of an identifier.
+ * @param id Received standard identifier.
+ */
+static inline uint8_t tp_id_node(uint16_t id) {
+    return (uint8_t)(id & 0xFFu);  // Low eight bits are the node address
+}
+
+/**
+ * @brief True when an 11-bit identifier addresses this node's command channel.
+ *
+ * A node listens on its own address and on the broadcast address. An
+ * unassigned node (255) therefore listens on 0x3FF and 0x300.
+ *
+ * @param id      Received standard identifier.
+ * @param node_id This node's assigned address.
+ */
+static inline bool tp_is_command_for(uint16_t id, uint8_t node_id) {
+    return (id == (uint16_t)(TP_ID_COMMAND_BASE + node_id)) ||           // Directed command
+           (id == (uint16_t)(TP_ID_COMMAND_BASE + TP_NODE_BROADCAST));   // Broadcast command
+}
+
+/**
+ * @brief True when an identifier is a broadcast command (0x300).
+ * @param id Received standard identifier.
+ */
+static inline bool tp_is_broadcast(uint16_t id) {
+    return id == (uint16_t)(TP_ID_COMMAND_BASE + TP_NODE_BROADCAST);
+}
+
+/**
+ * @brief True when an identifier belongs to a node -> master or node -> bus class.
+ *
+ * Used by the USB-to-CAN gateway to decide which bus frames are answers worth
+ * relaying to a host: emergencies, responses and telemetry.
+ *
+ * @param id Received standard identifier.
+ */
+static inline bool tp_is_node_to_master(uint16_t id) {
+    const uint16_t cls = tp_id_class(id);  // Channel class
+    return (cls == TP_ID_EMCY_BASE) || (cls == TP_ID_RESPONSE_BASE) || (cls == TP_ID_TELEMETRY_BASE);
 }

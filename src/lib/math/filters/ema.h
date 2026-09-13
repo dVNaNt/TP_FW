@@ -378,7 +378,9 @@ public:
             return;
         }
 
-        float alpha = TWO_PI *
+        // 2*pi as a float literal: Arduino's TWO_PI is a double macro and would
+        // promote this expression to soft-float double arithmetic.
+        float alpha = 6.283185307f *
                       (static_cast<float>(fcut_hz) /
                        static_cast<float>(fsampl_hz));
 

@@ -275,6 +275,25 @@ private:
 
 public:
     /**
+     * @brief Sensed channel currents in amperes, raw channel order, for diagnostics.
+     * @param out Receives [CH1, CH2, CH3]; a masked or missing channel reads NaN.
+     * @return true when all three channels are valid (their sum is meaningful).
+     */
+    inline bool channels_amps(float out[3]) const {
+        bool all = true;                                          // Every channel valid so far
+        for (uint8_t ch = 0u; ch < 3u; ++ch) {
+            const int16_t n = out_norm_.arr[ch];                  // Normalized Q15 sample
+            if (n == INT16_MIN) {
+                out[ch] = NAN;                                    // Masked (high duty) or absent sensor
+                all = false;
+            } else {
+                out[ch] = norm2amps(n);                           // Common full scale -> amperes
+            }
+        }
+        return all;
+    }
+
+    /**
      * @brief Set the number of samples used for zero-current calibration.
      * @param n Number of samples (clamped to 1..1000)
      * @note Higher values improve calibration accuracy at the cost of longer calibration time.
@@ -338,6 +357,18 @@ public:
         if (cal_start_cb_)
             cal_start_cb_();
     }
+
+    /**
+     * @brief Zero-current ADC offset a channel was calibrated to [counts].
+     *
+     * Diagnostic: the value every later sample is measured against. Two
+     * boards with the same hardware should land within a few counts of each
+     * other; one far off, or pinned at a rail, is a channel that calibrated
+     * against a non-zero current and will mis-read everything afterwards.
+     *
+     * @param ch Channel index (CH1, CH2, or CH3).
+     */
+    inline int32_t get_zero_offset(uint8_t ch) const { return cal_val_[ch]; }
 
     /// @brief Begin zero-current calibration for all three channels simultaneously.
     /// @see calibrate(Channel)
