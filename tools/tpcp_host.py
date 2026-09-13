@@ -407,6 +407,7 @@ REGISTERS = {
                                     _bits_field("undervoltage", 2, 4, 1), F("relinks", "u8", 3),
                                     F("frames_bad", "u16", 4), F("frames_ok", "u16", 6)],
                              sub=7, writable=False),
+    "trace": Reg(0x44, [F("part", "u8", 1), F("index", "u16", 2), F("a", "u16", 4), F("b", "u16", 6)], writable=False),
     "diag:ident_fail": Reg(0x43, [F("reason", "u8", 2), F("stage", "u8", 3), F("fault", "u8", 4),
                                   F("volts_x10", "u8", 5), F("ia_x20", "i8", 6), F("ib_x20", "i8", 7)],
                            sub=8, writable=False),
@@ -1546,6 +1547,59 @@ def cmd_raw(link, args):
 
 
 # ============================================================================
+# Black box (register 0x44, dev builds)
+# ============================================================================
+
+REG_TRACE = 0x44            # Control-rate recorder: one 24-byte record per pass, read in six parts
+TRACE_FIELDS = ("angle_el", "iq_ma", "id_ma", "uq_cv", "ud_cv", "icmd_ma", "ia_ma", "ib_ma",
+                "ua_cv", "ub_cv", "vbus_cv", "perr_mrev")
+
+
+def _trace_part(link, node, part, index):
+    """Read one part of one record (or the ring state for part 0); None on NACK."""
+    reply = link.request(node, bytes([REG_TRACE, part]) + struct.pack("<H", index) + b"\x00" * 4)
+    if not reply or reply[0] != REG_TRACE:
+        return None
+    return struct.unpack("<HHH", reply[2:8])      # index (depth for part 0), a, b
+
+
+def cmd_trace(link, args):
+    """Dump the drive's black box: the control passes around the last fault, as CSV."""
+    state = _trace_part(link, args.node, 0, 0)
+    if state is None:
+        print("  trace: not implemented in this firmware (build with TP_TRACE_DEPTH)")
+        return 1
+    depth, count, flags = state
+    frozen = flags & 1
+    fault = flags >> 8
+    print(f"  trace: depth={depth} records={count} frozen={frozen} fault_at_freeze=0x{fault:02x}"
+          + ("" if frozen else "  (ring still recording: only the last passes, no trip captured)"))
+    if not frozen and not args.force:
+        print("  nothing frozen; pass --force to dump the live ring anyway")
+        return 0
+    s16 = lambda v: v - 65536 if v >= 32768 else v            # Wire u16 -> signed
+    rows = []
+    for i in range(count):
+        parts = [_trace_part(link, args.node, k, i) for k in range(1, 7)]
+        if any(p is None for p in parts):
+            print(f"  read failed at record {i}")
+            break
+        vals = []
+        for k, (_, a, b) in enumerate(parts):
+            vals.append(a if k == 0 else s16(a))                # angle_el is unsigned, the rest signed
+            vals.append(s16(b))
+        rows.append(vals)
+    out = args.out or f"trace_node{args.node}.csv"
+    with open(out, "w") as f:
+        f.write("i," + ",".join(TRACE_FIELDS) + "\n")
+        for i, r in enumerate(rows):
+            f.write(str(i) + "," + ",".join(str(v) for v in r) + "\n")
+    print(f"  {len(rows)} records written to {out}"
+          + (f" (the fault edge is ~{depth // 8} records before the end)" if frozen else ""))
+    return 0
+
+
+# ============================================================================
 # Motor speaker (MIDI control, register 0xD0)
 # ============================================================================
 
@@ -1887,6 +1941,12 @@ def main():
     s = sub.add_parser("monitor", help="decode every protocol frame on the bus")
     s.add_argument("node", type=int, nargs="?", default=None)
     s.set_defaults(fn=cmd_monitor)
+
+    s = sub.add_parser("trace", help="dump the black box (0x44, dev builds) around the last fault to CSV")
+    s.add_argument("node", type=int)
+    s.add_argument("--out", help="CSV file (default trace_node<N>.csv)")
+    s.add_argument("--force", action="store_true", help="dump even when no fault froze the ring")
+    s.set_defaults(fn=cmd_trace)
 
     s = sub.add_parser("raw", help="send an arbitrary command frame")
     s.add_argument("node", type=int)

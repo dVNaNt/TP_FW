@@ -134,6 +134,7 @@ enum TpCmd : uint8_t {
     TP_REG_RANGE_READ         = 0x41u,  ///< One register, a range of sub identifiers / addresses.
     TP_REG_CURRENTS           = 0x42u,  ///< (sub) Supply current + d/q or alpha/beta currents.
     TP_REG_DIAG               = 0x43u,  ///< (sub) Link, calibration, queue, persistence, encoder.
+    TP_REG_TRACE              = 0x44u,  ///< Black box: control-rate records around a fault (dev builds).
     TP_REG_DEVICE_INFO        = 0x50u,  ///< Hardware version, firmware version, device code.
     TP_REG_SYSTEM_STATUS      = 0x51u,  ///< IO word, uptime, fault / warning / state word.
     TP_REG_MOTOR_STATUS       = 0x52u,  ///< State, identity bits, motor temperature, power, torque.

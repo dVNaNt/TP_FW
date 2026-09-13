@@ -304,6 +304,9 @@ private:
     /** @brief Pack a 0x2F calibration table sample or size. */
     TpError read_cal_table(const TpFrame& req, TpFrame& rsp);
 
+    /** @brief Pack a 0x44 black-box record part or the ring state. */
+    TpError read_trace(const TpFrame& req, TpFrame& rsp);
+
     /** @brief Fill the PulseBeat frame (also used verbatim as the emergency frame). */
     void pack_pulsebeat(TpFrame& f, bool advance);
 

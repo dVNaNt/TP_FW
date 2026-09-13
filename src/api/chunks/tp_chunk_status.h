@@ -180,6 +180,26 @@ struct TP_PACKED TpDiagEncoderLink {
 static_assert(sizeof(TpDiagEncoderLink) == 8, "TpDiagEncoderLink must fill one frame");
 
 /**
+ * @brief 0x44 Black box: one part of one control-rate record, or the ring's state.
+ *
+ * The drive keeps the last N closed-loop passes (lib/flight_recorder.h) and
+ * freezes them shortly after a fault. A record is 24 bytes and a frame
+ * carries four data bytes, so it is read in parts: part 0 answers with the
+ * ring's state (depth, valid count, frozen, fault byte), parts 1-6 with the
+ * fields of record `index` (0 = oldest). Dev builds only: an image without
+ * the recorder answers NOT_IMPLEMENTED.
+ */
+struct TP_PACKED TpTrace {
+    uint8_t  cmd;     ///< Byte 0: TP_REG_TRACE.
+    uint8_t  part;    ///< Byte 1: 0 state; 1 angle_el u16 + iq mA; 2 id mA + uq 10 mV; 3 ud 10 mV + icmd mA;
+                      ///<         4 ia mA + ib mA; 5 ua 10 mV + ub 10 mV; 6 vbus 10 mV + perr 1/1000 rev.
+    uint16_t index;   ///< Bytes 2-3: record index (0 = oldest); the depth in a part-0 reply.
+    uint16_t a;       ///< Bytes 4-5: first field of the part; valid count in a part-0 reply.
+    uint16_t b;       ///< Bytes 6-7: second field; part 0: low byte flags (bit0 frozen), high byte fault at the freeze.
+};
+static_assert(sizeof(TpTrace) == 8, "TpTrace must fill one frame");
+
+/**
  * @brief 0x43/0x08 Identification failure: why the last electrical
  *        identification aborted, with the electrical conditions at that moment.
  *

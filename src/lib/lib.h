@@ -44,6 +44,7 @@
 #include "motor_control/drive_control.h"  // Runtime control-mode machine + trajectory front end
 #include "motor_control/motor.h"
 #include "motor_control/types.h"
+#include "flight_recorder.h"  // Control-rate black box (compiled in with TP_TRACE_DEPTH)
 
 #include "drivers/tunepulse_interlayer.h"
 // Forward declaration of the board integration type (defined by target layer)
@@ -279,6 +280,18 @@ public:
 
     /// Bit of fault_byte() that stands for the latched encoder fault, above the driver's seven.
     static constexpr uint8_t kEncoderFaultBit = 0x80u;
+
+#ifdef TP_TRACE_DEPTH
+    /**
+     * @brief Black box: the last TP_TRACE_DEPTH closed-loop passes, frozen after a fault.
+     *
+     * Fed at the end of every closed-loop pass (angle, measured d/q current,
+     * commanded d/q voltage, commanded q current, position error) and read
+     * out through protocol register 0x44. A fault reset thaws it.
+     */
+    FlightRecorder<TP_TRACE_DEPTH> flight;
+    int32_t trace_perr_q16_ = 0;   ///< Position error of this pass, captured at the dispatch for the record.
+#endif
 
     /**
      * @brief The drive's fault byte: the driver's latched faults plus the encoder latch.
@@ -543,6 +556,9 @@ public:
                             // Cascaded position loop against the resolved target.
                             targt = foc_sign * position_controller.tick(real_pos, cmd.target_pos_q16, cmd.target_vel_rps,
                                                                         cmd.max_current_a, false);
+#ifdef TP_TRACE_DEPTH
+                            trace_perr_q16_ = cmd.target_pos_q16 - real_pos;  // For the black box
+#endif
                             break;
                         case DriveAction::RunTorque:
                             // Position loop bypassed: command the q-axis current directly.
@@ -644,6 +660,28 @@ public:
             last_current_a_ = foc_sign * targt;  // What the loop asked for: next pass feeds it to the triggers
             pwm_voltage_ab = current_driver.tick_control_foc((int16_t)angle_el_, targt);
             driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
+#ifdef TP_TRACE_DEPTH
+            {
+                // Black box: what this pass measured and commanded, in units an
+                // int16 covers (mA, 10 mV). Frozen a few passes after a fault.
+                FlightRecord rec;
+                rec.angle_el = (uint16_t)current_driver.get_angle();
+                rec.iq_ma = (int16_t)(current_driver.current_dq.torque * 1000.0f);
+                rec.id_ma = (int16_t)(current_driver.current_dq.flux * 1000.0f);
+                rec.uq_cv = (int16_t)(current_driver.voltage_dq_.torque * 100.0f);
+                rec.ud_cv = (int16_t)(current_driver.voltage_dq_.flux * 100.0f);
+                rec.icmd_ma = (int16_t)(targt * 1000.0f);
+                const Vec2D_f32 iab = driver_phy.motor_ctrl.get_current_ab_amps();  // Coil currents the loop used
+                rec.ia_ma = (int16_t)(iab.a * 1000.0f);
+                rec.ib_ma = (int16_t)(iab.b * 1000.0f);
+                rec.ua_cv = (int16_t)(pwm_voltage_ab.a * 100.0f);                     // Vector handed to the bridge
+                rec.ub_cv = (int16_t)(pwm_voltage_ab.b * 100.0f);
+                rec.vbus_cv = (int16_t)(driver_phy.supply.get_voltage() * 100.0f);
+                const int32_t perr_mrev = (trace_perr_q16_ * 1000) / 65536;          // 1/1000 rev
+                rec.perr_mrev = (int16_t)((perr_mrev > 32767) ? 32767 : ((perr_mrev < -32768) ? -32768 : perr_mrev));
+                flight.push(rec, fault_byte());
+            }
+#endif
 
             // Publish the NVM programming window: true only when THIS pass
             // commanded zero current (flash-I/O gates above), so the vector

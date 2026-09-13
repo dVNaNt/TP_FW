@@ -76,6 +76,7 @@ union TpFrame {
     TpDiagFoc           diag_foc;       ///< View: 0x43/0x06.
     TpDiagEncoderLink   diag_enc_link;  ///< View: 0x43/0x07.
     TpDiagIdentFail     diag_ident;     ///< View: 0x43/0x08.
+    TpTrace             trace;          ///< View: 0x44.
     TpDeviceInfo        device_info;    ///< View: 0x50.
     TpSystemStatus      system_status;  ///< View: 0x51.
     TpMotorStatus       motor_status;   ///< View: 0x52.

@@ -375,6 +375,9 @@ inline void TpProtocol::clear_faults() {
     tp_->driver_phy.set_fault().overheat(false);      // Release the OT latch
     tp_->driver_phy.set_fault().external(false);      // Release the external-fault latch
     tp_->clear_encoder_fault();                       // Release the encoder latch (re-latched while the feedback is still lost)
+#ifdef TP_TRACE_DEPTH
+    tp_->flight.thaw();                               // The black box records again once the operator has read it
+#endif
     // A failed runtime identification parks the drive in CalibError, which
     // refuses every enable until a reboot. The fault reset is the operator's
     // "try again": drop back to the last known parameters and let the drive

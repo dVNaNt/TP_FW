@@ -75,6 +75,7 @@ static const TpRegDesc TP_REGISTERS[] = {
     {TP_REG_CAL_TABLE,          TP_RF_READ,                                      1u},
     {TP_REG_CURRENTS,           TP_RF_READ | TP_RF_SUB,                          TP_SUB_CURRENTS_COUNT},
     {TP_REG_DIAG,               TP_RF_READ | TP_RF_SUB,                          TP_SUB_DIAG_COUNT},
+    {TP_REG_TRACE,              TP_RF_READ,                                      1u},
     {TP_REG_DEVICE_INFO,        TP_RF_READ,                                      1u},
     {TP_REG_SYSTEM_STATUS,      TP_RF_READ,                                      1u},
     {TP_REG_MOTOR_STATUS,       TP_RF_READ,                                      1u},

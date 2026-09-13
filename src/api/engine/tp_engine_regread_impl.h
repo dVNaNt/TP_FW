@@ -180,6 +180,9 @@ inline TpError TpProtocol::read_register(uint8_t cmd, uint8_t sub, const TpFrame
         case TP_REG_CAL_TABLE:
             return read_cal_table(req, rsp);
 
+        case TP_REG_TRACE:
+            return read_trace(req, rsp);
+
         case TP_REG_CURRENTS: {
             rsp.currents.sub = sub;
             rsp.currents.supply = tp_pack_bf16(tp_->driver_phy.power.get_supply_current_usage_a());
@@ -551,6 +554,56 @@ inline TpError TpProtocol::read_cal_table(const TpFrame& req, TpFrame& rsp) {
     rsp.cal_table.sample = req.cal_table.sample;
     rsp.cal_table.data = tp_->motor_params.cal_table.get_sample(req.cal_table.sample);
     return TP_ERR_NONE;
+}
+
+inline TpError TpProtocol::read_trace(const TpFrame& req, TpFrame& rsp) {
+#ifndef TP_TRACE_DEPTH
+    (void)req;
+    (void)rsp;
+    return TP_ERR_NOT_IMPLEMENTED;                              // No recorder in this image
+#else
+    const auto& fr = tp_->flight;                               // The black box
+    rsp.trace.part = req.trace.part;
+    if (req.trace.part == 0u) {
+        rsp.trace.index = fr.depth();                           // Ring depth
+        rsp.trace.a = fr.count();                               // Valid records
+        rsp.trace.b = (uint16_t)((fr.frozen() ? 0x01u : 0u) | ((uint16_t)fr.freeze_fault() << 8));
+        return TP_ERR_NONE;
+    }
+    FlightRecord r;                                             // The requested record
+    if (!fr.read(req.trace.index, r)) {
+        return TP_ERR_OUT_OF_RANGE;                             // Beyond the valid records
+    }
+    rsp.trace.index = req.trace.index;
+    switch (req.trace.part) {
+        case 1u:
+            rsp.trace.a = r.angle_el;
+            rsp.trace.b = (uint16_t)r.iq_ma;
+            return TP_ERR_NONE;
+        case 2u:
+            rsp.trace.a = (uint16_t)r.id_ma;
+            rsp.trace.b = (uint16_t)r.uq_cv;
+            return TP_ERR_NONE;
+        case 3u:
+            rsp.trace.a = (uint16_t)r.ud_cv;
+            rsp.trace.b = (uint16_t)r.icmd_ma;
+            return TP_ERR_NONE;
+        case 4u:
+            rsp.trace.a = (uint16_t)r.ia_ma;
+            rsp.trace.b = (uint16_t)r.ib_ma;
+            return TP_ERR_NONE;
+        case 5u:
+            rsp.trace.a = (uint16_t)r.ua_cv;
+            rsp.trace.b = (uint16_t)r.ub_cv;
+            return TP_ERR_NONE;
+        case 6u:
+            rsp.trace.a = (uint16_t)r.vbus_cv;
+            rsp.trace.b = (uint16_t)r.perr_mrev;
+            return TP_ERR_NONE;
+        default:
+            return TP_ERR_BAD_PARAM;                            // No such part
+    }
+#endif
 }
 
 inline void TpProtocol::pack_pulsebeat(TpFrame& f, bool advance) {
