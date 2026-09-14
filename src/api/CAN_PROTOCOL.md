@@ -769,7 +769,7 @@ own while unaddressed, and the host sees one answer either way.
 | `src/api/transport/tp_hid.h`              | Report transport over the vendor HID endpoints   |
 | `test/test_tpcp/test_wire.cpp`            | Host-side wire-format conformance tests          |
 | `tools/tpcp_host.py`                      | Reference master (CLI)                           |
-| `tools/tpcp_mcp.py`                       | The same master as MCP tools                     |
+| `mcp/tpcp_mcp.py`                         | The same master as MCP tools (see `mcp/README.md`) |
 
 ### Threading model
 

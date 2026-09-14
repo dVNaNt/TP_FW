@@ -35,11 +35,14 @@ The only imports are the standard library plus tpcp_host itself.
 
 Registering it
 --------------
-    claude mcp add tunepulse -- /path/to/python3 /path/to/tools/tpcp_mcp.py
+    claude mcp add --transport stdio tunepulse -- /path/to/python3 /path/to/mcp/tpcp_mcp.py
 
     # Read-only: every tool that could move the shaft or write flash is
     # withheld, not merely refused.
-    claude mcp add tunepulse -- /path/to/python3 /path/to/tools/tpcp_mcp.py --read-only
+    claude mcp add --transport stdio tunepulse -- /path/to/python3 /path/to/mcp/tpcp_mcp.py --read-only
+
+mcp/README.md covers the same registration for the other MCP clients (Claude
+Desktop, Cursor, VS Code, Codex, Gemini CLI, Windsurf) and the bench setup.
 
 Safety
 ------
@@ -66,10 +69,12 @@ import threading
 import time
 import types
 
-# tpcp_host.py sits next to this file and is imported, not executed: it holds
-# the wire format, the codecs, the register map and both USB transports, and
-# duplicating any of that here would guarantee the two drift apart.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# tools/tpcp_host.py is imported, not executed: it holds the wire format, the
+# codecs, the register map and both USB transports, and duplicating any of that
+# here would guarantee the two drift apart. This file lives in mcp/, a sibling
+# of tools/, so the import path is resolved relative to the repository root.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "tools"))
 
 try:
     import can  # noqa: F401                       # Present on a bench with a CAN adapter
@@ -1198,7 +1203,7 @@ def r_registers():
           "The full wire specification: identifier map, CMD groups, every register, worked examples.",
           "text/markdown")
 def r_protocol():
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "api", "CAN_PROTOCOL.md")
+    path = os.path.join(_REPO_ROOT, "src", "api", "CAN_PROTOCOL.md")
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read()
@@ -1244,7 +1249,7 @@ def main():
     import argparse
     p = argparse.ArgumentParser(
         description="MCP server exposing a TunePulse drive over stdio.",
-        epilog="Register it with:  claude mcp add tunepulse -- "
+        epilog="Register it with:  claude mcp add --transport stdio tunepulse -- "
                f"{sys.executable} {os.path.abspath(__file__)}")
     p.add_argument("--read-only", action="store_true",
                    help="withhold every tool that could move the shaft or write flash")

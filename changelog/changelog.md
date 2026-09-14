@@ -1239,3 +1239,26 @@ FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
 RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
 
 
+## 2026-09-14 - MCP server moved to mcp/ with a multi-client setup guide
+**Changes:**
+- tools/tpcp_mcp.py moved to mcp/tpcp_mcp.py
+- it now imports tools/tpcp_host.py through a repository-root anchor instead of its own directory
+- Added mcp/README.md: prerequisites (interpreter with hidapi/pyserial, Linux udev rule), a standalone smoke test, the flag table, and registration for Claude Code (local/user/project scope, shared .mcp.json with env expansion), Claude Desktop, Cursor, VS Code, Codex CLI, Gemini CLI, Windsurf and generic stdio clients
+- Root README gained an AI ASSISTANTS (MCP) pointer
+- CAN_PROTOCOL.md file table updated to the new path
+- In-file registration examples updated to the current 'claude mcp add --transport stdio' syntax
+
+**Reasoning:**
+- The server is a front end for several assistants, not a bench tool, and its setup was only described in a Python docstring
+- A top-level mcp/ directory is where clients and readers look for it
+
+**Notes:**
+- Host-side only: no firmware change
+- Verified from the new path: initialize handshake, 30 tools listed (9 under --read-only), both resources including the CAN_PROTOCOL.md read
+- Verified that Claude Code spawns project stdio servers from the repository directory and does not expand CLAUDE_PROJECT_DIR inside .mcp.json, hence the relative script path in the shared example
+- Local registration on this machine re-pointed with claude mcp remove/add
+
+FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
+RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
+
+
