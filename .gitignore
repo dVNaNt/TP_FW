@@ -28,3 +28,5 @@ compile_commands.json
 *.log
 logs/
 __pycache__/
+
+binaries/

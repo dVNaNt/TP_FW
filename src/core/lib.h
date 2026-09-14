@@ -42,6 +42,7 @@
 #include "motor_control/current_control/current_control.h"
 #include "math/helpers/buzzer.h"       // MotorSpeaker: coils-as-speaker tone generator
 #include "motor_control/drive_control.h"  // Runtime control-mode machine + trajectory front end
+#include "pt_control.h"  // P*t overdrive limiter + motor thermal derating
 #include "motor_control/motor.h"
 #include "motor_control/types.h"
 #include "flight_recorder.h"  // Control-rate black box (compiled in with TP_TRACE_DEPTH)

@@ -645,9 +645,9 @@ Motor protection config
 | :------------------: | :--------------: | :----: | :-----------------------------------------: |
 |         CMD          |      uint8       | 8 bit  |                    0x24                     |
 | Current temperature  |      uint8       | 8 bit  |              Real temperature               |
+|   Available power    | bfloat16 (1.8.7) | 16 bit |        Maximum available  power [W]         |
 | Temperature baseline |      uint8       | 8 bit  | Full power threshold temperature in Celsius |
 |  Temperature  limit  |      uint8       | 8 bit  |         Max temperature in Celsius          |
-|    Power derating    | bfloat16 (1.8.7) | 16 bit |    Max motor power derating in [%/degC]     |
 |         Rth          | bfloat16 (1.8.7) | 16 bit |      Motor thermal resistance [degC/W]      |
 
 #### 0x25: Driver thermal protection (R/W)
