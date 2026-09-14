@@ -19,6 +19,9 @@
  * 4. Cascade anti-windup: when the downstream voltage loop reports saturation,
  *    the output current may only decrease relative to the last applied value,
  *    preventing integral/torque windup against a saturated plant.
+ * 5. A thermal ring limit: the squared envelope i_lim_sq = P_nom / R
+ *    (published by PtControl) caps the command magnitude, preserving its
+ *    direction, so a hot or overdrive-spent motor is squeezed smoothly.
  *
  * Position units are revolutions encoded as int32 Q16.16
  * (65536 counts = 1 revolution); currents are in milliamperes.
@@ -49,6 +52,19 @@ struct MotorVectorSynthesis {
     // ── Damping parameters ────────────────────────────────────────
     float damping_gain = 0.25f;
     float v_soft_rev_s = 0.25f;
+
+
+    /**
+     * Squared circular current (thermal) limit [A^2], published by PtControl
+     * as P_nom / R. The ring check itself compares squared magnitudes, so
+     * the caller supplies the limit ready-squared and this side stays free
+     * of divisions on the hot path; the square root appears only when the
+     * command actually sits outside the circle. A value <= 0 (unconfigured
+     * limiter or unknown resistance) disables the ring limit entirely. The
+     * command the loop works with is in amperes (DriveOutput::max_current_a
+     * crosses into max_c), so no unit conversion is involved.
+     */
+    float i_lim_sq = INFINITY;
 
 
 
@@ -228,6 +244,25 @@ public:
 
 
         Iq = clampf(Iq, -max_c, max_c);
+
+        // ====================================================================
+        // 4. Thermal ring limit: runs at the regulation rate
+        // ====================================================================
+        // The thermal envelope crosses SQUARED (i_lim_sq = P_nom / R,
+        // published by PtControl) because the ring comparison itself needs
+        // only squared magnitudes; the square root is taken only when the
+        // command actually lies outside the circle. The loop output is the
+        // torque current alone (the downstream FOC keeps id at zero), so its
+        // square IS the squared magnitude of the current vector: the signed
+        // pull-back below is exactly the radial projection onto the ring,
+        // which clamps the envelope tighter than max_c when the motor runs
+        // hot or overdrive is spent. i_lim_sq <= 0 keeps the clamp disabled.
+        if (i_lim_sq > 0.0f) {
+            const float i_sq = Iq * Iq;                       // Squared command magnitude [A^2]
+            if (i_sq > i_lim_sq) {
+                Iq = sqrtf(i_lim_sq) * signf(Iq);             // Pull back onto the ring, sign preserved
+            }
+        }
 
         last_applied_iq_ma = Iq;
 

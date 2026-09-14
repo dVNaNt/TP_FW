@@ -11,6 +11,10 @@
  * - @c clock_             : system/PWM timing reference.
  * - @c motor_params       : motor description (type, pole pairs, ...).
  * - @c current_driver             : FOC current/voltage control current_driver (CurrentControl).
+ * - @c pt_control         : P*t loss-power limiter (registers 0x23/0x24): every pass
+ *                           it is fed the copper-loss power (Ia^2 + Ib^2) * R and
+ *                           publishes the thermal envelope back as a squared current
+ *                           limit (P_nom / R) for the position controller ring limiter.
  * - @c calibration_dump   : flash-backed storage for calibration tables.
  * - @c system_dump        : flash-backed storage for generic user data (2 KB).
  * - @c angle_calibrator   : electrical-angle calibration state machine.
@@ -139,6 +143,8 @@ public:
     uint16_t angle_el_ = 0;                 ///< Last computed electrical rotor angle [0..65535] mapped to 0..360 deg.
     Vec2D_f32 pwm_voltage_ab = {0.0, 0.0};  ///< Last commanded alpha-beta voltage vector [V].
     float current_target_a = 0.5;           ///< Target q-axis current for the FOC loop [A].
+    PtControl pt_control;                   ///< P*t loss-power limiter: budget + thermal derating (0x23/0x24 model).
+    bool pt_dt_seeded_ = false;             ///< One-shot flag: pt_control.set_dt() applied on the first control pass.
     // FIX (P1.4): re-entrancy guard. Atomic exchange makes the test-and-set
     // indivisible, so an ISR racing with a running tick() can no longer skip
     // or duplicate a control pass; the late sample is intentionally dropped
@@ -352,6 +358,34 @@ public:
         if (driver_phy.current.is_changed() & driver_phy.supply.is_changed()) {
             driver_phy.tick();
             counter++;
+
+            // ========================================================================
+            // P*t thermal protection: runs on EVERY pass, in every control state.
+            //
+            // The limiter consumes the LOSS power - the watts actually burnt in the
+            // windings - not the electrical (mechanical + loss) power. Copper loss
+            // is (Ia^2 + Ib^2) * R: two sampled phases carry the whole motor
+            // current, so their squared sum already spans the full vector.
+            // ========================================================================
+            if (!pt_dt_seeded_) {
+                pt_dt_seeded_ = true;                                        // One-shot schedule configuration
+                pt_control.set_dt(1.0f / CurrentControl::CTRL_SAMPLE_FREQ);  // Strict FOC tick period (20 kHz)
+            }
+            const Vec2D_f32 iab_meas = driver_phy.motor_ctrl.get_current_ab_amps();  // Sampled phase currents [A]
+            const float r_ohm = current_driver.motor.get_resistance() * 0.001f;      // Total winding resistance [Ohm] (stored in mOhm)
+            const float p_loss_w = (iab_meas.a * iab_meas.a + iab_meas.b * iab_meas.b) * r_ohm;  // Copper-loss power [W]
+            pt_control.tick(p_loss_w, driver_phy.temperature.get_temperature_c());   // Advance budget + thermal model
+
+            // Thermal current envelope for the position controller ring limiter:
+            // P_nom / R = i_lim^2. The limit crosses already squared, because
+            // the circular check inside MotorVectorSynthesis compares squared
+            // magnitudes. An unconfigured PtControl publishes nominal 0 W (and
+            // R may be unknown), which yields i_lim_sq <= 0 - the position
+            // controller's "ring limit disabled" sentinel, so the protection
+            // path stays inert until 0x23/0x24 are configured.
+            position_controller.i_lim_sq =
+                (r_ohm > 1e-9f) ? (pt_control.get_nominal_w() / r_ohm) : 0.0f;
+
             // Position feedback lost: latch it (see encoder_fault_latched_).
             // The encoder keeps its flag raised for as long as the condition
             // lasts, so a fault reset that comes too early is re-latched here

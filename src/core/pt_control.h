@@ -76,7 +76,7 @@
 
 #include <cmath>
 #include <cstdint>
-#include "../common.h"
+#include "common.h"
 
 /**
  * @struct PtControl
@@ -92,10 +92,10 @@ private:
     // =======================================================================
     // CONFIGURATION (register shadow)
     // =======================================================================
-    uint8_t overdrive_s_ = 0u;     ///< 0x23: burst duration [s]; 0 disables overdrive.
-    float baseline_w_ = 0.0f;      ///< 0x23: power free of charge [W].
-    float peak_w_ = 0.0f;          ///< 0x23: maximum allowable power [W].
-    float capacity_j_ = 0.0f;      ///< 0x23: overdrive energy budget [J].
+    uint8_t overdrive_s_ = 10u;     ///< 0x23: burst duration [s]; 0 disables overdrive.
+    float baseline_w_ = 5.0f;      ///< 0x23: power free of charge [W].
+    float peak_w_ = 10.0f;          ///< 0x23: maximum allowable power [W].
+    float capacity_j_ = 100.0f;      ///< 0x23: overdrive energy budget [J].
     float temp_base_c_ = 60.0f;    ///< 0x24: full-power threshold [degC] (100 % power).
     float temp_limit_c_ = 100.0f;  ///< 0x24: maximum winding temperature [degC] (0 % power).
     float rth_ = 0.0f;             ///< 0x24: thermal resistance [degC/W].
@@ -105,7 +105,7 @@ private:
     // =======================================================================
     // DERIVED CONSTANTS (refreshed on every configuration write)
     // =======================================================================
-    float cool_gain_ = 0.0f;    ///< 1 / Rth: dissipated watts per degC above ambient.
+    float cool_gain_ = 0.10f;    ///< 1 / Rth: dissipated watts per degC above ambient.
     float t_amb_c_ = 0.0f;      ///< Estimated ambient: temp_base - baseline * Rth.
     float inv_span_c_ = 0.0f;   ///< 1 / (temp_limit - temp_base): budget clamp gain.
     float e_max_j_ = 0.0f;      ///< Budget ceiling: min(capacity, (peak-baseline)*duration).
