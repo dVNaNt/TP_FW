@@ -7,6 +7,20 @@ then queues jerk-limited S-curve point-to-point moves between two positions,
 waiting for each leg to settle before reversing. It runs until interrupted
 (Ctrl+C), then holds position and disarms the stage.
 
+Autostart
+---------
+Before swinging, the script unlocks the drive on its own:
+1. waits out (or clears) a calibration already in flight,
+2. resets a latched fault,
+3. checks what the drive has validated and runs what is missing: the
+   electrical identification (phase connection, resistance, inductance) when
+   'identified' is clear, the encoder angle sweep when 'calibrated' is clear
+   (--recalibrate forces the full offset + electrical + angle routine),
+4. verifies the outcome via diag:calibration / diag:ident_fail and, with
+   --persist, saves the results to flash.
+Only then it applies the motion limits, selects MOTION mode and arms the
+output stage.
+
 Defaults restore the exact manual sequence used to validate the drive:
 10 revolutions at 5 rev/s with a 0.5 s pause on every reversal.
 
@@ -65,6 +79,14 @@ def parse_args():
                    help="dwell on each reversal in seconds (default 0.5)")
     p.add_argument("--cycles", type=int, default=0,
                    help="number of back-and-forth cycles, 0 = forever (default 0)")
+    p.add_argument("--no-calibrate", action="store_true",
+                   help="skip the autostart checks (identification / angle sweep)")
+    p.add_argument("--recalibrate", action="store_true",
+                   help="force a full calibration (offset + electrical + angle sweep)")
+    p.add_argument("--persist", action="store_true",
+                   help="save the configuration to flash after a successful calibration")
+    p.add_argument("--cal-timeout", type=float, default=180.0,
+                   help="calibration wait timeout in seconds (default 180)")
     p.add_argument("--tolerance", type=float, default=0.01,
                    help="settle window in revolutions (default 0.01)")
     p.add_argument("--timeout", type=float, default=60.0,
@@ -100,19 +122,126 @@ def wait_state(link, node, want=("idle", "ready", "running"), timeout=10.0):
     return False
 
 
+# Flag bits of diag:calibration (0x43/0x01, byte 5).
+CAL_FLAG_FAILED = 0x08
+
+# Reason byte of diag:ident_fail (0x43/0x08).
+IDENT_REASONS = {0: "none", 1: "pattern not recognised", 2: "underpower",
+                 3: "overpower in rotation", 4: "driver fault",
+                 5: "HFI inductance missing/inconsistent", 255: "unclassified"}
+
+
+def read_calibration(link, node, timeout=0.3):
+    """Return the diag:calibration values, or None when the node is silent."""
+    _, vals = tp.read_register(link, node, "diag:calibration", timeout=timeout)
+    return vals
+
+
+def wait_calibration(link, node, timeout):
+    """Block until no calibration routine owns the bridge; return the last flags.
+
+    Done means both the state machine left 'calibrating' and the running-bits
+    byte of diag:calibration dropped to zero (the state can lag the routine).
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        vals = read_calibration(link, node)
+        state = read_state(link, node)
+        if vals is not None and vals["running"] == 0 and state not in (None, "calibrating"):
+            return vals
+        time.sleep(0.25)
+    return None
+
+
+def autostart_calibration(link, node, args):
+    """Run whatever calibration the drive is missing, verify it, optionally persist.
+
+    The drive handles the bridge itself: every calibration request drops the
+    queued trajectory, selects DISABLED and releases the output stage, so this
+    is called before the mode/enable sequence in setup().
+    """
+    if args.no_calibrate:
+        return
+    _, ms = tp.read_register(link, node, "motor_status")
+    if ms is None:
+        sys.exit(f"node {node} is not answering")
+
+    # Decide the mask from the drive's own flags: one routine serves phase
+    # connection + resistance + inductance ('identified'), the encoder sweep
+    # owns the 'calibrated' flag. electrical + encoder together run the
+    # identification first and start the sweep when it succeeds (CAN_PROTOCOL
+    # 5.7.1), so one mask covers the full chain.
+    if args.recalibrate:
+        need = tp.CAL_BITS["offset"] | tp.CAL_BITS["full"]
+    else:
+        need = 0
+        if not ms["identified"]:
+            need |= tp.CAL_BITS["electrical"]
+        if not ms["calibrated"]:
+            need |= tp.CAL_BITS["encoder"]
+    if not need:
+        print("  calibration: up to date, skipping")
+        return
+
+    names = [n for n in ("offset", "electrical", "encoder") if need & tp.CAL_BITS[n]]
+    print(f"  calibration: starting {', '.join(names)}...")
+    reply = tp.system_control(link, node, calibration=need)
+    if reply is None or reply[0] == tp.CMD["nack"]:
+        # A latched failed routine rejects new requests until it is cleared.
+        tp.system_control(link, node, action=tp.SYS_FAULT_RESET)
+        wait_state(link, node)
+        reply = tp.system_control(link, node, calibration=need)
+        if reply is None or reply[0] == tp.CMD["nack"]:
+            sys.exit("calibration: rejected")
+    vals = wait_calibration(link, node, args.cal_timeout)
+    if vals is None:
+        sys.exit(f"calibration: timed out after {args.cal_timeout:g} s")
+    if vals["flags"] & CAL_FLAG_FAILED:
+        _, fail = tp.read_register(link, node, "diag:ident_fail")
+        reason = IDENT_REASONS.get(fail["reason"], f"reason {fail['reason']}") if fail else "?"
+        sys.exit(f"calibration: failed at stage {vals['stage']} ({reason})")
+
+    _, res = tp.read_register(link, node, "diag:calib_result")
+    if res is not None:
+        print(f"  calibration: ok (R={res['resistance']:.4g} Ohm, "
+              f"Ld={res['ld']:.4g} H, Lq={res['lq']:.4g} H)")
+    else:
+        print("  calibration: ok")
+    if args.persist:
+        # save_config frame: catalog 0xFFFFFF (everything) + the save keyword.
+        # Requires a disabled drive; calibration just released the stage.
+        payload = bytes([tp.CMD["save_config"]]) + (0xFFFFFF).to_bytes(3, "little") \
+            + tp.SAVE_KEY.to_bytes(4, "little")
+        reply = link.request(node, payload)
+        if reply is None or reply[0] == tp.CMD["nack"]:
+            print("  persist: rejected, results stay in RAM only")
+        else:
+            print("  persist: configuration saved to flash")
+
+
 def setup(link, node, args):
-    """Fault reset if needed, apply motion limits, select MOTION mode, arm."""
+    """Fault reset, autostart calibration, motion limits, MOTION mode, arm."""
     state = read_state(link, node)
     if state is None:
         sys.exit(f"node {node} is not answering")
     if state == "calibrating":
         # A calibration in flight must finish (or be cleared) before any move.
+        # A failed routine can latch the state machine, so the wait is bounded:
+        # if it does not clear, the autostart below restarts the missing parts.
         print("  drive is calibrating, waiting...")
-        wait_state(link, node)
+        if wait_calibration(link, node, min(args.cal_timeout, 10.0)) is None:
+            # A failed routine latches the state machine and rejects new
+            # requests; a fault reset returns it to idle.
+            print("  previous calibration is stuck, resetting it")
+            tp.system_control(link, node, action=tp.SYS_FAULT_RESET)
+            wait_state(link, node)
         state = read_state(link, node)
     if state == "fault":
         tp.system_control(link, node, action=tp.SYS_FAULT_RESET)
         wait_state(link, node)
+
+    # Autostart: unlock the drive, calibrate whatever is not validated yet.
+    autostart_calibration(link, node, args)
 
     # Motion limits: read-modify-write, so unspecified fields keep their value.
     limits = {"velocity": args.velocity}

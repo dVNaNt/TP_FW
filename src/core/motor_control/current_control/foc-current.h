@@ -21,6 +21,10 @@
  * - Power tracking: active electrical power, copper losses, and mechanical power estimations
  * - Regenerative braking resistor mode: motor winding used as braking resistor during recuperation
  * - Active Supply Power Limiting: Prevents exceeding maximum supply power budget
+ * - Active damping: the raw BEMF estimate is split by LPF/HPF branches; the
+ *   low-pass part is used as the uq voltage feedforward, while the high-pass
+ *   part (speed ripple) is injected back into the iq setpoint as viscous
+ *   damping scaled by k_dempf
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
@@ -171,7 +175,6 @@ public:
         power_scale_factor = (motor_type == MotorType_STEP) ? 1.0f : 1.5f;
         flux_linkage_wb = k_e;
 
-
         bw_min_hz = bw_min;
         bw_max_hz = bw_max;
         bw_slope_hz_per_rads = bw_slope;
@@ -191,6 +194,7 @@ public:
         pwr_el = 0.0f;
         pwr_loss = 0.0f;
         pwr_mech = 0.0f;
+        hpf_dempf_.reset(0.0f);  // Clear HPF damping extractor state
     }
 
     // ============================================================
@@ -235,7 +239,7 @@ public:
      * estimates); values above 1.0 over-compensate.
      * Default: 1.0 (full compensation).
      */
-    float k_bemf = 0.0f;
+    float k_bemf = 1.0f;
 
     /**
      * @brief Soft deadband (forbidden zone) on electrical speed for BEMF
@@ -264,7 +268,7 @@ public:
      * Set to 0 for a hard deadband (not recommended).
      * Default: 10.0 rad/s.
      */
-    float bemf_omega_soft_range = 10.0f;
+    float bemf_omega_soft_range = 30.0f;
 
     /**
      * @brief C2-continuous analog activation window (smootherstep).
@@ -288,10 +292,37 @@ public:
      * @return Activation gain in [0, 1].
      */
     static inline float bemf_activation_gain(float abs_omega, float deadband, float soft_range) {
-        const float range = (soft_range > 1e-6f) ? soft_range : 1e-6f;              // Guard: hard deadband fallback
-        const float t = clampf((abs_omega - deadband) / range, 0.0f, 1.0f);         // Normalized ramp position
-        return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);                        // Smootherstep 6t^5-15t^4+10t^3
+        const float range = (soft_range > 1e-6f) ? soft_range : 1e-6f;       // Guard: hard deadband fallback
+        const float t = clampf((abs_omega - deadband) / range, 0.0f, 1.0f);  // Normalized ramp position
+        return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);                 // Smootherstep 6t^5-15t^4+10t^3
     }
+
+    // ============================================================
+    //                 BEMF Filtering and Active Damping
+    // ============================================================
+
+
+    /**
+     * @brief HPF coefficient for the damping extractor (FilterEMA_f32 units, 0..255).
+     *
+     * The same raw BEMF estimate is high-pass filtered; the result carries
+     * the fast (AC) speed-ripple content and serves as the damping signal.
+     * Higher coefficient -> higher cutoff -> faster but noisier damping.
+     */
+    uint8_t dempf_alpha = 1;
+
+    /**
+     * @brief Active damping gain [A of iq per V of BEMF ripple].
+     *
+     * The high-passed BEMF (proportional to speed ripple, since bemf ~ omega)
+     * is subtracted from the iq setpoint:
+     *   iq_target -= k_dempf * HPF(bemf),
+     * which acts as viscous friction opposing speed oscillations. Zero
+     * disables the damping injection entirely.
+     */
+    float k_dempf = 1.0f;
+
+    FilterEMA_f32 hpf_dempf_;  // HPF branch: speed-ripple (damping) extractor
 
     float ubemf = 0;
     // ============================================================
@@ -307,58 +338,76 @@ public:
         float id_target_a = 0.0f;
         cmd_q_a = iq_target_a;
 
-        // // --------------------------------------------------------
-        // // 0) Regenerative braking (generation limiting)
-        // // --------------------------------------------------------
-        // // Above-threshold generated power (positive when generating)
-        // // Note: pwr_mech has already been filtered on the previous step
-        // const float gen_pwr = -pwr_mech;
-        // const float demand = (gen_pwr > brake_pwr_threshold) ? (gen_pwr - brake_pwr_threshold) : 0.0f;
+        // --------------------------------------------------------
+        // 0) BEMF filtering and active damping
+        // --------------------------------------------------------
+        // Raw BEMF estimate: the speed-proportional EMF voltage gated by the
+        // anti-limit-cycle deadband (rationale documented at step 5 below).
+        // Since the EMF is directly proportional to the electrical speed, this
+        // signal doubles as a speed observer for the damping loop.
+        const float abs_omega_el = fabsf(omega_el_rad_s);  // Magnitude for the gating decision
+        const float bemf_gain =
+            bemf_activation_gain(abs_omega_el, bemf_omega_deadband, bemf_omega_soft_range);  // 0..1 analog activation
+        const float bemf_raw = omega_el_rad_s * bemf_gain * flux_linkage_wb;        // Raw EMF estimate [V]
 
-        // if (demand > 0.0f) {
-        //     // Priority 1: dump power through the D-axis within the safe budget
-        //     // We dissipate as much as possible up to the peak_loss_pwr limit
-        //     const float pwr_to_dissipate = clampf(demand, 0.0f, peak_loss_pwr);
-        //     const float id_brake = sqrtf(pwr_to_dissipate / (power_scale_factor * R));
+        // Publish the runtime alphas from the public config fields so the
+        // filters always follow the live configuration.
+        hpf_dempf_.set_alpha(dempf_alpha);  // HPF branch coefficient
 
-        //     // Inject current into the positive D-axis; hard-limited by the thermal budget
-        //     id_target_a += clampf(id_brake, 0.0f, brake_id_max_a);
+        ubemf = bemf_raw * k_bemf - (2 * hpf_dempf_.tick_hpf(bemf_raw) * k_dempf);  // Expose for telemetry/debug
 
-        //     // Priority 2: circular power limiting for the Q-axis (braking torque)
-        //     // Compute the ratio (k) between actual generation and our dissipation capability
-        //     const float k = peak_loss_pwr / gen_pwr;
+        // --------------------------------------------------------
+        // 0) Regenerative braking (generation limiting)
+        // --------------------------------------------------------
+        // Above-threshold generated power (positive when generating)
+        // Note: pwr_mech has already been filtered on the previous step
+        const float gen_pwr = -pwr_mech;
+        const float demand = (gen_pwr > brake_pwr_threshold) ? (gen_pwr - brake_pwr_threshold) : 0.0f;
 
-        //     // Compute the permissible Iq amplitude based on the previous command
-        //     // (+0.01f guarantees the algorithm can start when prev_iq was 0)
-        //     const float max_allowed_iq_mag = (fabsf(prev_iq_target) + 0.01f) * k;
+        if (demand > 0.0f) {
+            // Priority 1: dump power through the D-axis within the safe budget
+            // We dissipate as much as possible up to the peak_loss_pwr limit
+            const float pwr_to_dissipate = clampf(demand, 0.0f, peak_loss_pwr);
+            const float id_brake = sqrtf(pwr_to_dissipate / (power_scale_factor * R));
 
-        //     // Clamp the requested Iq so regeneration power fits into the budget
-        //     if (iq_target_a > 0.0f) {
-        //         iq_target_a = clampf(iq_target_a, 0.0f, max_allowed_iq_mag);
-        //     } else {
-        //         iq_target_a = clampf(iq_target_a, -max_allowed_iq_mag, 0.0f);
-        //     }
-        // }
+            // Inject current into the positive D-axis; hard-limited by the thermal budget
+            id_target_a += clampf(id_brake, 0.0f, brake_id_max_a);
 
-        // // --------------------------------------------------------
-        // // 0.5) Positive power limiting (consumption clamp)
-        // // --------------------------------------------------------
-        // // Maximum power available from the power supply
-        // const float max_supply_pwr = supply_current_a * bus_voltage_v;
+            // Priority 2: circular power limiting for the Q-axis (braking torque)
+            // Compute the ratio (k) between actual generation and our dissipation capability
+            const float k = peak_loss_pwr / gen_pwr;
 
-        // // Predictive estimate of electrical power (using previous-tick voltages)
-        // // While accelerating the power is positive
-        // const float predicted_pwr = power_scale_factor * (prev_ud_out * id_target_a + prev_uq_out * iq_target_a);
+            // Compute the permissible Iq amplitude based on the previous command
+            // (+0.01f guarantees the algorithm can start when prev_iq was 0)
+            const float max_allowed_iq_mag = (fabsf(prev_iq_target) + 0.01f) * k;
 
-        // // If the projected power exceeds the supply limit
-        // if (predicted_pwr > max_supply_pwr && predicted_pwr > 0.001f) {
-        //     // Compute the current scaling factor
-        //     const float pwr_scale = max_supply_pwr / predicted_pwr;
+            // Clamp the requested Iq so regeneration power fits into the budget
+            if (iq_target_a > 0.0f) {
+                iq_target_a = clampf(iq_target_a, 0.0f, max_allowed_iq_mag);
+            } else {
+                iq_target_a = clampf(iq_target_a, -max_allowed_iq_mag, 0.0f);
+            }
+        }
 
-        //     // Only the torque current Iq is clamped.
-        //     // Id is left unchanged since it may be used for field weakening
-        //     iq_target_a *= pwr_scale;
-        // }
+        // --------------------------------------------------------
+        // 0.5) Positive power limiting (consumption clamp)
+        // --------------------------------------------------------
+        // Maximum power available from the power supply
+        const float max_supply_pwr = supply_current_a * bus_voltage_v;
+
+        // Predictive estimate of electrical power (using previous-tick voltages)
+        // While accelerating the power is positive
+        const float predicted_pwr = power_scale_factor * (prev_ud_out * id_target_a + prev_uq_out * iq_target_a);
+
+        // If the projected power exceeds the supply limit
+        if (predicted_pwr > max_supply_pwr && predicted_pwr > 0.001f) {
+            // Compute the current scaling factor
+            const float pwr_scale = max_supply_pwr / predicted_pwr;
+
+            // Only the torque current Iq is clamped.
+            // Id is left unchanged since it may be used for field weakening
+            iq_target_a *= pwr_scale;
+        }
 
         target_id_ = id_target_a;
         target_iq_ = iq_target_a;
@@ -386,7 +435,6 @@ public:
         const float did_target_dt = (id_target_a - prev_id_target) * kInvDt;
         const float diq_target_dt = (iq_target_a - prev_iq_target) * kInvDt;
 
-
         prev_id_target = id_target_a;
         prev_iq_target = iq_target_a;
 
@@ -403,34 +451,8 @@ public:
         const float uq_ff_resistive = R * iq_target_a;
         const float uq_ff_dynamic = L * (diq_target_dt * l_ff);
         const float uq_ff_cross = omega_el_rad_s * L * id_target_a;
-        // Back-EMF feedforward: the permanent-magnet flux cutting the stator
-        // windings induces a q-axis EMF of omega_e * psi_f [V]. Since this term
-        // is a pure disturbance on the q axis (it does not depend on the
-        // currents), canceling it in feedforward removes the speed-proportional
-        // lag the PI integrator would otherwise have to wind up against.
-        // Sign: the EMF opposes the applied voltage, so the compensation term
-        // carries the same sign as omega (it "adds" voltage into rotation).
-        //
-        // Soft deadband (anti-limit-cycle): the raw PLL omega is noisy at low
-        // speed, and feeding that noise straight into the q-axis voltage closes
-        // the positive feedback loop
-        //   omega noise -> uq_ff_bemf -> torque -> shaft motion -> encoder -> PLL,
-        // which manifests as self-oscillation (limit cycle) around standstill.
-        // The compensation is therefore gated by a forbidden zone of width
-        // bemf_omega_deadband on |omega_e| and smoothly activated above it via
-        // the C2-continuous smootherstep ramp. Multiplying omega by the gain
-        // (instead of gating the final voltage) preserves the odd symmetry of
-        // the term: gain(|omega|) is even, omega is odd, so the product is odd
-        // and passes through zero exactly at omega = 0 with no sign flip.
-        // Inside the zone the residual EMF (omega_e * psi_f, tiny at low speed)
-        // is absorbed by the PI integrator, which has no such feedback path.
-        const float abs_omega_el = fabsf(omega_el_rad_s);                                            // Magnitude for the gating decision
-        const float bemf_gain = bemf_activation_gain(abs_omega_el, bemf_omega_deadband, bemf_omega_soft_range);  // 0..1 analog activation
-        const float uq_ff_bemf = omega_el_rad_s * bemf_gain * flux_linkage_wb * k_bemf;              // Noise-gated EMF cancellation
-        ubemf = uq_ff_bemf;
-        // --------------------------------------------------------
-        // 6) Current errors for the PI controllers
-        // --------------------------------------------------------
+
+
         const float err_d = id_target_a - id_measured_a;
         const float err_q = iq_target_a - iq_measured_a;
 
@@ -441,7 +463,7 @@ public:
         const float uq_pi = kp * err_q + integrator_q;
 
         const float ud_unlimited = ud_ff_resistive + ud_ff_dynamic + ud_ff_cross * k_cc + ud_pi;
-        const float uq_unlimited = uq_ff_resistive + uq_ff_dynamic + uq_ff_cross * k_cc + uq_ff_bemf + uq_pi;
+        const float uq_unlimited = uq_ff_resistive + uq_ff_dynamic + uq_ff_cross * k_cc + ubemf + uq_pi;
 
         float ud_out = ud_unlimited;
         float uq_out = uq_unlimited;
@@ -475,27 +497,27 @@ public:
         prev_ud_out = ud_out;
         prev_uq_out = uq_out;
 
-        // // --------------------------------------------------------
-        // // 10) Power estimation and dynamic filtering
-        // // --------------------------------------------------------
-        // // Compute instantaneous power values
-        // const float inst_pwr_el = power_scale_factor * (ud_out * id_measured_a + uq_out * iq_measured_a);
-        // const float inst_pwr_loss = power_scale_factor * R * (id_measured_a * id_measured_a + iq_measured_a * iq_measured_a);
+        // --------------------------------------------------------
+        // 10) Power estimation and dynamic filtering
+        // --------------------------------------------------------
+        // Compute instantaneous power values
+        const float inst_pwr_el = power_scale_factor * (ud_out * id_measured_a + uq_out * iq_measured_a);
+        const float inst_pwr_loss = power_scale_factor * R * (id_measured_a * id_measured_a + iq_measured_a * iq_measured_a);
 
-        // // Dynamic filter alpha: depends on BOTH speed AND voltage
-        // const float voltage_excess = clampf(bus_voltage_v - brake_voltage_threshold, 0.0f, brake_voltage_range);
-        // const float voltage_factor = voltage_excess / brake_voltage_range;  // 0.0 to 1.0
+        // Dynamic filter alpha: depends on BOTH speed AND voltage
+        const float voltage_excess = clampf(bus_voltage_v - brake_voltage_threshold, 0.0f, brake_voltage_range);
+        const float voltage_factor = voltage_excess / brake_voltage_range;  // 0.0 to 1.0
 
-        // // Raise the filter cutoff above the voltage threshold, speed-dependent
-        // const float dynamic_alpha =
-        //     clampf(brake_filter_alpha + voltage_factor * fabsf(omega_el_rad_s) * brake_speed_scale, brake_filter_alpha, 1.0f);
+        // Raise the filter cutoff above the voltage threshold, speed-dependent
+        const float dynamic_alpha =
+            clampf(brake_filter_alpha + voltage_factor * fabsf(omega_el_rad_s) * brake_speed_scale, brake_filter_alpha, 1.0f);
 
-        // // Filter both components with the same alpha
-        // pwr_el += dynamic_alpha * (inst_pwr_el - pwr_el);
-        // pwr_loss += dynamic_alpha * (inst_pwr_loss - pwr_loss);
+        // Filter both components with the same alpha
+        pwr_el += dynamic_alpha * (inst_pwr_el - pwr_el);
+        pwr_loss += dynamic_alpha * (inst_pwr_loss - pwr_loss);
 
-        // // Mechanical power is the difference of the filtered components
-        // pwr_mech = pwr_el - pwr_loss;
+        // Mechanical power is the difference of the filtered components
+        pwr_mech = pwr_el - pwr_loss;
 
         return out;
     }
