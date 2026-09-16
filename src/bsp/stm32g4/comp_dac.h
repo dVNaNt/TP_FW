@@ -50,7 +50,7 @@
 #define BSP_STM32G4_COMP_DAC_H
 
 #include <Arduino.h>
-#include "lib/dev_log.h"   // TP_LOG_VAL: threshold echo exists only in DEV_LOG_ENABLE builds
+#include "core/dev_log.h"   // TP_LOG_VAL: threshold echo exists only in DEV_LOG_ENABLE builds
 #include "bsp/stm32g4/chip.h"
 #include "stm32g4xx_hal.h"
 #include "stm32g4xx_ll_bus.h"

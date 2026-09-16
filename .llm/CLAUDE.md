@@ -59,7 +59,7 @@ Flash 71652 B; `cln17_v3_dev` Flash 84104 B (RAM 24100 B with the black box). (B
   HardwareSerial + HAL UART (5.5 KiB).
 - `-flto=auto`: anything referenced only from inline asm needs `__attribute__((used))`
   (`nvm_flash.h`: `flashg4_ll_nmi_dispatch`) or LTO drops it and the link fails.
-- `-D TP_CRC_HW=1`: `Crc::Stream` (`src/lib/math/crc.h`) runs on the STM32G4 CRC unit
+- `-D TP_CRC_HW=1`: `Crc::Stream` (`src/core/math/crc.h`) runs on the STM32G4 CRC unit
   through `src/bsp/stm32g4/crc.h`; without the flag it shifts in software and the stored records
   are bit-identical. The one-shot `Crc::crc8/16/32` are always software (constexpr, ISR-safe); the
   unit is one shared peripheral with no locking, so only one stream may be open at a time.
@@ -99,7 +99,7 @@ environment away from `test/test_native/`.
 `test/test_native/` holds GoogleTest suites, but **they are currently orphaned**: no environment
 builds them, and the sources still `#include` the pre-refactor tree (`lib/feedback/`,
 `lib/math_integer/`, `lib/motor_driver/`) which no longer exists. Before relying on one, expect to
-add an environment and repoint its includes at `src/lib/…`. `test/support/arduino_mock.h` stubs the
+add an environment and repoint its includes at `src/core/…`. `test/support/arduino_mock.h` stubs the
 Arduino layer for host builds.
 
 ## Architecture
@@ -137,11 +137,11 @@ in `run.h`; the core installs it at 1), FDCAN 7. `interrupt_setup.h` keeps `PASS
 boot-time value) — read them through direct register access by symbol address when a build changes
 the pass.
 
-**Black box.** `cln17_v3_dev` compiles a `FlightRecorder` (`src/lib/flight_recorder.h`,
+**Black box.** `cln17_v3_dev` compiles a `FlightRecorder` (`src/core/flight_recorder.h`,
 `-D TP_TRACE_DEPTH=512`, 12 KiB RAM) that keeps the last 512 passes and freezes after a fault;
 `tools/tpcp_host.py trace <node>` dumps it (register `0x44`). Use it before theorising about a trip.
 
-### `TunePulseHeart` (`src/lib/lib.h`)
+### `TunePulseHeart` (`src/core/lib.h`)
 
 The single global is `TP`, defined in `src/bsp/boards/<board>/board.cpp` from board constants and
 declared `extern` in that board's `tunepulse.h`.
@@ -175,7 +175,7 @@ period, so `pwm_phase_ccr()` disables BOTH FETs of every phase: that is a true H
 not "all low-side on". Low-side braking exists only as `PWM_Set_All_Low()` (the OV fault callback),
 which is not reachable through a sentinel.
 
-### `DriveControl` (`src/lib/motor_control/drive_control.h`)
+### `DriveControl` (`src/core/motor_control/drive_control.h`)
 
 Everything a remote master can change about how the motor behaves lives here: the control mode
 (disabled / torque / velocity / position / motion), the position, velocity and current targets, the
@@ -201,9 +201,9 @@ flash must run inside this window, or the rotor gets yanked against a frozen vec
 
 ### Layout
 
-- `src/lib/` — algorithms, header-only, hardware-agnostic
-  - `drivers/pwm_driver/` — `DriverPWM`, current sense, supply voltage, temperature, power/OP limits
-  - `drivers/encoder_phy/`, `drivers/flash_eeprom.h` — encoder interface, EEPROM emulation
+- `src/core/` — algorithms, header-only, hardware-agnostic
+  - `phy/pwm_driver/` — `DriverPWM`, current sense, supply voltage, temperature, power/OP limits
+  - `phy/encoder_phy/`, `phy/flash_eeprom.h` — encoder interface, EEPROM emulation
   - `motor_control/` — motor params, angle calibration + table, current control (`foc-current.h`, HFI),
     `drive_control.h` (control-mode machine + command mailbox + trajectory front end)
   - `math/` — `filters/` (EMA, median3, PLL), `motion/` (S-curve, Hermite, executor, governor,
@@ -291,7 +291,7 @@ change. Maps live at `.pio/build/<env>/firmware.map`.
 
 ## Logging
 
-Use the macros from `src/lib/dev_log.h` — `TP_LOG`, `TP_LOG_VAL`, `TP_LOG_ARRAY`, `TP_LOG_VALS` —
+Use the macros from `src/core/dev_log.h` — `TP_LOG`, `TP_LOG_VAL`, `TP_LOG_ARRAY`, `TP_LOG_VALS` —
 never bare `SerialUSB.print` in ISR-reachable code. `USBSerial::write()` spins on host back-pressure;
 called from the 20 kHz control ISR with the motor energized it latches the last voltage vector on the
 bridge. The macros check free TX room first and drop output instead of blocking. They compile to

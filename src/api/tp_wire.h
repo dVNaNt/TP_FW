@@ -18,7 +18,7 @@
  * should not have to know that ordering. The whole set is deliberately free of
  * any hardware or firmware dependency, so a host-side tool can include this one
  * file and be bit-compatible with the drive without pulling in the
- * motor-control stack. Nothing reachable from here may ever include ../lib/ -
+ * motor-control stack. Nothing reachable from here may ever include ../core/ -
  * that is what keeps `pio test -e native_tpcp` compiling.
  *
  * ## Framing

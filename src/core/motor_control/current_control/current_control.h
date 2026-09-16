@@ -22,6 +22,24 @@
  * zero voltage vector is emitted. This prevents the integrators from winding
  * up against the Hi-Z outputs during the fault and eliminates the recovery
  * transient when the drive returns to active operation.
+ *
+ * ## Electrical angle prediction (transport-delay compensation)
+ *
+ * The phase currents are sampled by the ADC at the start of a PWM period,
+ * while the voltage vector computed from them is loaded into the PWM
+ * registers and only reaches the bridge at the center of the NEXT period.
+ * The whole control path therefore lags the rotor by 1.5 PWM periods, which
+ * at speed produces a growing d/q cross-coupling error (the applied vector
+ * falls behind the rotor and drifts toward the d axis).
+ *
+ * tick_control_foc() compensates this by advancing the inverse-Park
+ * (output) angle by omega_e * 1.5 * T_pwm, taken from the PLL velocity
+ * estimate. The forward Park transform for the measured currents keeps the
+ * raw sampled angle: it must stay matched to the actual sampling instant.
+ * The prediction is applied only in the closed-loop FOC branch (never
+ * during the electrical identification, which steers the angle itself) and
+ * is suppressed while the PLL is coasting through a glitch run, when its
+ * velocity estimate is stale.
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
@@ -31,7 +49,7 @@
 
 #include <cmath>  // For sqrtf and fabsf
 #include "../../common.h"
-#include "../../drivers/pwm_driver/driver_pwm.h"
+#include "../../phy/pwm_driver/driver_pwm.h"
 #include "../../math/filters/pll.h"                  // Second-order PLL for smooth angular velocity
 #include "../../math/helpers/frequency_generator.h"  // Frequency generator for HFI
 #include "../../math/helpers/stability_check.h"      // Stability check for current monitoring
@@ -57,6 +75,14 @@ public:
     static constexpr float CTRL_SAMPLE_FREQ = 20000.0f;    // FOC tick rate [Hz] (must match FocCurrentController::kInvDt)
     static constexpr float PLL_FC_DEFAULT = 250.0f;        // Default PLL bandwidth [Hz]
     static constexpr float TWO_PI_F = 6.283185307179586f;  // [rad] full turn
+    /**
+     * Transport delay between current sampling and voltage application,
+     * expressed in PWM periods. The ADC samples at the start of a period and
+     * the computed vector is applied at the center of the next one, so the
+     * loop sees 1.5 periods of lag; the output angle is advanced by exactly
+     * that much to land the voltage on the rotor position it was computed for.
+     */
+    static constexpr float PWM_ADVANCE_PERIODS = 1.5f;
     static constexpr uint32_t CALIBRATION_ZERO_CYCLES = 50;
     MotorCalibration motor_calib;
     int16_t angle_ = 0;
@@ -215,10 +241,14 @@ public:
             return Vec2D_f32(0.0f, 0.0f);         // Zero alpha-beta voltage command
         }
 
-        // Prepearing angles for future rotations
+        // Preparing the angles for the Park / inverse-Park transforms. The
+        // measured-current Park transform always uses the raw sampled angle;
+        // the output (inverse-Park) rotation defaults to it too, but the
+        // closed-loop FOC branch below advances it by the transport delay.
         Pol2D angle_polar = Pol2D(angle_, INT16_MAX);
         Vec2D angle_sincos = angle_polar.convert();
         Vec2D angle_sincos_inv(angle_sincos.cos, -angle_sincos.sin);
+        Vec2D out_sincos = angle_sincos;  // Rotation applied to the voltage vector
 
         current_ab = drv.motor_ctrl.get_current_ab_amps();
 
@@ -237,6 +267,23 @@ public:
                     float omega_e_rad_s = pll_.get_omega() * TWO_PI_F;
                     float voltage_limit_fraction = 0.50f;
                     float theta_el_rad = (float)angle_ * ANGLE_COEF;
+
+                    // Predict the electrical angle for the instant the voltage
+                    // actually reaches the bridge: currents were sampled at the
+                    // start of this PWM period, the vector computed here is
+                    // applied at the center of the next one, so the output
+                    // angle is advanced by omega_e * 1.5 * T_pwm. In 65536-LSB
+                    // per electrical turn units the advance is
+                    // omega[turn/s] * 65536 * 1.5 / 20000; the int16 addition
+                    // wraps across the turn boundary automatically. Suppressed
+                    // while the PLL is coasting through a glitch run: its
+                    // omega is stale then, so the raw angle is safer.
+                    float advance_lsb = 0.0f;                          // Angle advance [LSB]
+                    if (pll_.is_locked()) {
+                        advance_lsb = pll_.get_omega() * 65536.0f * PWM_ADVANCE_PERIODS / CTRL_SAMPLE_FREQ;
+                    }
+                    Pol2D pred_polar = Pol2D((int16_t)(angle_ + (int32_t)lrintf(advance_lsb)), INT16_MAX);
+                    out_sincos = pred_polar.convert();                 // Predicted output rotation
 
                     voltage_dq = foc_current_.tick(target_current, current_dq_raw.flux, current_dq_raw.torque,
                                                    drv.supply.get_voltage(), voltage_limit_fraction, omega_e_rad_s);
@@ -289,6 +336,6 @@ public:
         }
 
         voltage_dq_ = voltage_dq;
-        return voltage_dq.rotate(angle_sincos);
+        return voltage_dq.rotate(out_sincos);  // Rotate to the (predicted) output angle
     }
 };

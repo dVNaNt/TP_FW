@@ -23,7 +23,7 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#include "../../lib/drivers/flash_eeprom.h"  // FlashEEPROM + tp_flash_programming_window
+#include "../../core/phy/flash_eeprom.h"  // FlashEEPROM + tp_flash_programming_window
 #include "tp_node_config.h"                   // TpNodeConfig and the record layout constants
 
 // ============================================================================

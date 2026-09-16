@@ -45,7 +45,7 @@
  */
 
 #include "../common.h"
-#include "../drivers/flash_eeprom.h"
+#include "../phy/flash_eeprom.h"
 #include "types.h"
 #include "calibration/calibration_table.h"
 

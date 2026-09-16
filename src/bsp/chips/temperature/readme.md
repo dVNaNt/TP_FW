@@ -13,7 +13,7 @@ No MCU dependencies; everything is resolved at compile time.
 > **OUTPUT is always `float` — temperature in degrees Celsius, unchanged**:
 > a pure physics conversion with no filtering, averaging, hysteresis or
 > protection logic applied. Those concerns belong to the upper layers
-> (e.g. `lib/drivers/pwm_driver/temperature.h`).
+> (e.g. `core/phy/pwm_driver/temperature.h`).
 
 ## Divider topologies & internal code inversion
 
@@ -48,7 +48,7 @@ divider — **shorted** sensor (above the window) or **not connected** sensor
 (below the window) — and the getters return **NaN** instead of a fake value.
 
 Compatibility with the generic Temperature driver
-(`lib/drivers/pwm_driver/temperature.h`):
+(`core/phy/pwm_driver/temperature.h`):
 
 - `celsius2raw()` binary search uses the predicate `T(mid) < target`; NaN
   compares as "not less", so probes in the NaN regions simply terminate the

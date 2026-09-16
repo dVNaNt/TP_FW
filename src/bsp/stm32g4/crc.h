@@ -1,6 +1,6 @@
 /**
  * @file crc.h
- * @brief Hardware backend of lib/math/crc.h on the STM32G4 CRC unit.
+ * @brief Hardware backend of core/math/crc.h on the STM32G4 CRC unit.
  *
  * Identical on every part in the family: the block has no board-dependent
  * wiring, so nothing here is parameterized. Compiled in only when TP_CRC_HW
@@ -32,7 +32,7 @@
 #pragma once
 
 #include "stm32g4xx.h"              // CMSIS: CRC, RCC register maps
-#include "lib/math/crc.h"   // The declarations this header defines (TP_CRC_HW set)
+#include "core/math/crc.h"   // The declarations this header defines (TP_CRC_HW set)
 
 #ifdef TP_CRC_HW
 

@@ -47,7 +47,7 @@
  * a fake value.
  *
  * Binary-search compatibility: the generic Temperature driver
- * (lib/drivers/pwm_driver/temperature.h) inverts degC limits with
+ * (core/phy/pwm_driver/temperature.h) inverts degC limits with
  * celsius2raw(), a binary search using the predicate `T(mid) < target`.
  * NaN compares as "not less", so probes inside the NaN regions terminate
  * the search at the nearest boundary of the valid band - no infinite loop,

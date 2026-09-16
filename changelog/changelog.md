@@ -1257,6 +1257,18 @@ RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
 - Verified from the new path: initialize handshake, 30 tools listed (9 under --read-only), both resources including the CAN_PROTOCOL.md read
 - Verified that Claude Code spawns project stdio servers from the repository directory and does not expand CLAUDE_PROJECT_DIR inside .mcp.json, hence the relative script path in the shared example
 - Local registration on this machine re-pointed with claude mcp remove/add
+## 2026-09-13 - Repository restructuring
+**Changes:**
+- Renamed src/lib to src/core
+- Renamed src/core/drivers to src/core/phy
+- Renamed foc_vector_synthesis.h to motion_controller.h
+
+**Reasoning:**
+- Clearer naming: core for the hardware-agnostic control stack, phy for the physical-layer drivers
+
+**Notes:**
+- All include paths and documentation references updated
+- git history preserved via git mv
 
 FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
 RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes

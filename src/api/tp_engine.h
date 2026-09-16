@@ -43,8 +43,8 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-#include "../lib/dev_log.h"      // Non-blocking diagnostic logging
-#include "../lib/lib.h"          // TunePulseHeart
+#include "../core/dev_log.h"      // Non-blocking diagnostic logging
+#include "../core/lib.h"          // TunePulseHeart
 #include "tp_chunks.h"           // Frame layouts
 #include "tp_node.h"             // Identity, configuration, store, discovery
 #include "tp_registers.h"        // Register map and configuration application
