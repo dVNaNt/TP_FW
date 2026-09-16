@@ -72,6 +72,10 @@ Once this is completed, simply running `PlatformIO: Upload` will upload the buil
 
 
 
+## AI ASSISTANTS (MCP)
+
+`mcp/tpcp_mcp.py` exposes a connected drive to Claude Code, Claude Desktop, Cursor, VS Code, Codex, Gemini CLI and any other MCP client as a set of tools - read status, write registers, move, calibrate, persist. Setup for each client, the safety model and a read-only mode are described in [`mcp/README.md`](./mcp/README.md).
+
 ## Contribution
 
 See `CONTRIBUTION.md`
