@@ -160,6 +160,24 @@ struct TP_PACKED TpDiagFoc {
 static_assert(sizeof(TpDiagFoc) == 8, "TpDiagFoc must fill one frame");
 
 /**
+ * @brief 0x43/0x09 Torque-ripple feed-forward map: state and two adjacent bins.
+ *
+ * Keyed read: byte 2 of the request selects the first bin. The map has 64
+ * bins per electrical period (bin i covers angle i x 1024 of 65536), each the
+ * q-axis current [mA] added to the loop's command at that angle. Two bins per
+ * frame, so the whole map is 32 reads.
+ */
+struct TP_PACKED TpDiagRipple {
+    uint8_t  cmd;         ///< Byte 0: TP_REG_DIAG.
+    uint8_t  sub;         ///< Byte 1: TP_SUB_DIAG_RIPPLE.
+    uint8_t  index;       ///< Byte 2: first bin returned (request key, masked to the map).
+    uint8_t  flags;       ///< Byte 3: bit0 feed-forward enabled, bit1 learning in progress.
+    int16_t  bin0;        ///< Bytes 4-5: feed-forward at bin index [mA].
+    int16_t  bin1;        ///< Bytes 6-7: feed-forward at bin index + 1 [mA].
+};
+static_assert(sizeof(TpDiagRipple) == 8, "TpDiagRipple must fill one frame");
+
+/**
  * @brief 0x43/0x07 Encoder link diagnostics: how many sensor frames failed
  *        their integrity check and whether failing frames are being dropped.
  *

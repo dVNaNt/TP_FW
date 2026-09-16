@@ -211,7 +211,8 @@ enum TpSubDiag : uint8_t {
     TP_SUB_DIAG_FOC          = 0x06u,  ///< Electrical angle in use and the d/q voltage command.
     TP_SUB_DIAG_ENCODER_LINK = 0x07u,  ///< Encoder frame integrity: check state, failure counters.
     TP_SUB_DIAG_IDENT_FAIL   = 0x08u,  ///< Why the last electrical identification aborted.
-    TP_SUB_DIAG_COUNT        = 0x09u   ///< Number of records in the group.
+    TP_SUB_DIAG_RIPPLE       = 0x09u,  ///< Torque-ripple feed-forward map: state and two bins per read (keyed).
+    TP_SUB_DIAG_COUNT        = 0x0Au   ///< Number of records in the group.
 };
 
 /** Number of independently configurable cyclic telemetry slots (0x02 sub = slot). */
@@ -256,6 +257,16 @@ enum TpSubDiag : uint8_t {
 
 /** System Control action byte: reboot into the USB DFU bootloader. */
 #define TP_SYS_REBOOT_DFU 0xDFu
+
+/**
+ * System Control action bytes: torque-ripple feed-forward map (experimental).
+ * LEARN starts averaging the position loop's command per electrical-angle bin;
+ * COMMIT stops, folds the residual into the map and enables it; CLEAR zeroes
+ * the map and disables it. The map lives in RAM until a reset.
+ */
+#define TP_SYS_RIPPLE_LEARN 0xA1u
+#define TP_SYS_RIPPLE_COMMIT 0xA2u
+#define TP_SYS_RIPPLE_CLEAR 0xA3u
 
 /** System Control calibration bits (request on write, validity on read). */
 #define TP_CAL_P 0x01u  ///< Encoder (angle table) calibration.

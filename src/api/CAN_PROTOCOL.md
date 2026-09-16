@@ -263,7 +263,7 @@ few hundred milliseconds on a 1 Mbit/s bus.
 | 1    | Enable      | `0xE1` enable, `0x0F` disable, 0 no change                  | `0xE1` / `0x0F`               |
 | 2    | Burst step  | Burst period [250 µs]; 0 = time-tagged PVT stream (always applied) | current value          |
 | 3    | Calibration | `TP_CAL_*` bits to start (§5.7.1)                           | bits whose result is valid    |
-| 4    | Action      | `0xC1` fault reset, `0xB0` reboot, `0xDF` reboot to DFU, 0 none | bits of routines running  |
+| 4    | Action      | `0xC1` fault reset, `0xB0` reboot, `0xDF` reboot to DFU, `0xA1` / `0xA2` / `0xA3` ripple map learn / commit / clear (§5.7.2), 0 none | bits of routines running  |
 | 5–7  | —           | reserved                                                    | 0                             |
 
 **[decision]** The design's bytes 4–7 were "TBD"; fault reset and reboot had
@@ -287,6 +287,28 @@ Requesting an electrical bit together with P_CAL runs the identification
 first and starts the sweep when it succeeds. Every request first drops the
 queued trajectory, selects DISABLED and releases the stage: calibration owns
 the bridge. Progress is read from `0x43/0x01`.
+
+#### 5.7.2 Torque-ripple feed-forward map **[decision, experimental]**
+
+A hybrid stepper's own torque ripple (detent at four cycles per electrical
+period, the A/B stator asymmetry at two) is not removed by FOC, and at low
+speed the position loop cannot reject a 50-200 Hz disturbance: the rotor rides
+the ripple and growls. The node keeps a 64-bin map per ELECTRICAL period of
+the q-axis current [mA] to add to the loop's command at that angle.
+
+`0xA1` LEARN starts averaging the position loop's own command per bin;
+`0xA2` COMMIT stops, subtracts the mean over the bins (friction, load) and
+adds the residual to the map, then enables it; `0xA3` CLEAR zeroes and
+disables it. A commit that did not cover every bin leaves the map untouched.
+Learning must happen while the stage is enabled and the shaft turns SLOWLY
+under position control: the loop's reaction is only a faithful copy of the
+ripple torque well below the spring/rotor resonance, so learn at about
+0.05 RPS over one revolution (at 0.5 RPS the map comes out phase-rotated and
+makes the ripple worse). A second pass refines the residual. Bench, node 1
+at 0.5 RPS: rotor speed ripple 115 -> 29 mRPS rms, the detent line 75 -> 3;
+at 1 RPS 88 -> 7.5. The map is RAM only (lost at reset) and learned in one
+direction; a direction-dependent remainder (hysteresis) stays in reverse.
+`0x43/0x09` reads it back.
 
 ### 5.8 `0x21` Motor properties 1
 
@@ -404,6 +426,7 @@ needs and the design did not list.
 | `0x05` | Calibration result | `[2..3]` R bf16, `[4..5]` Ld bf16, `[6..7]` Lq bf16                                 |
 | `0x06` | FOC frame          | `[2..3]` electrical angle the current loop uses (65536 per period), `[4..5]` u_d bf16 [V], `[6..7]` u_q bf16 [V] |
 | `0x08` | Identification failure | `[2]` reason (0 none, 1 pattern not recognised, 2 underpower, 3 overpower in rotation, 4 driver fault, 5 HFI inductance missing or inconsistent between the probe frequencies, 255 unclassified), `[3]` stage at abort (MotorStatus), `[4]` driver fault byte at abort, `[5]` test voltage 0.1 V, `[6]` Ia 0.05 A i8, `[7]` Ib 0.05 A i8 |
+| `0x09` | Ripple map         | Keyed by byte 2 of the request (first bin): `[2]` first bin, `[3]` flags (bit0 enabled, bit1 learning), `[4..5]` bin i16 [mA], `[6..7]` next bin i16 [mA]. 64 bins per electrical period (§5.7.2) |
 | `0x07` | Encoder link       | `[2]` flags (bit0 integrity check proven and failing frames dropped, bit1 link down = encoder fault, bit2 sensor overspeed, bit3 weak magnetic field, bit4 sensor undervoltage), `[3]` bus resets since boot, `[4..5]` frames failed u16, `[6..7]` frames passed u16 (wraps). Filled by the board's link supervisor (frame validation is board code); a board without one answers NOT_IMPLEMENTED |
 
 Stage and progress follow whichever routine owns the bridge. While the

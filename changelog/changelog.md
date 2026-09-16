@@ -1285,3 +1285,29 @@ FLASH: 75208 bytes (65.58% of 114688 bytes): +3556 bytes
 RAM: 11908 bytes (36.34% of 32768 bytes): +120 bytes
 
 
+## 2026-09-15 - Torque-ripple feed-forward map (anti-cogging), learned on the node, removes the low-speed growl
+**Changes:**
+- RippleMap<6> (core/motor_control/ripple_map.h): 64 bins per electrical period of q-axis current [mA] added to the position loop's command in RunPosition, linearly interpolated, sum clamped to the loop's envelope
+- learning averages the loop's OWN command (before the feed-forward) per bin in the ISR, commit subtracts the mean over the bins and adds the residual to the map (iterative), refuses an incomplete period, clamps bins to +-600 mA
+- System Control actions 0xA1 LEARN / 0xA2 COMMIT / 0xA3 CLEAR posted through one atomic byte, all mutation in the ISR
+- 0x43/0x09 keyed read of two bins plus flags
+- tpcp_host.py 'ripple <node> learn|clear|show' and the MCP 'ripple' tool run the procedure (0.05 RPS, one revolution)
+- CAN_PROTOCOL.md 5.7.2 and 6.3
+
+**Reasoning:**
+- 1 kHz telemetry at 0.5 RPS showed the rotor speed wobbling +-26 % at 2x and 4x the electrical period (stator A/B asymmetry and detent, 100 and 200 cycles per revolution) with the loop chasing it with 50 mA: a hybrid stepper's own torque ripple, which FOC does not remove and a position loop cannot reject at 50-200 Hz
+- the ripple is periodic in electrical angle, so one small map covers the revolution
+- the loop's reaction is only a faithful copy of the ripple torque well below the spring/rotor resonance, so the map must be learned slowly
+
+**Notes:**
+- Bench, node 1 (cln17_v3_release): rotor speed ripple rms at 0.5 RPS 115 -> 29 mRPS, at 1 RPS 88 -> 7.5, at 0.1 RPS 55 -> 9.5
+- the detent line 75 -> 3 mRPS at 0.5 RPS
+- reverse improves only 108 -> 71 (direction-dependent remainder, hysteresis)
+- learning at 0.5 RPS instead produced a phase-rotated map that doubled the ripple
+- RAM only, lost at reset, one direction: persistence in the motor-profile partition and a per-direction map are the follow-ups
+- cln17_v3_dev 88188 B flash, 24868 B RAM
+
+FLASH: 75488 bytes (65.82% of 114688 bytes): +280 bytes
+RAM: 12556 bytes (38.32% of 32768 bytes): +648 bytes
+
+

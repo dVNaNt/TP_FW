@@ -118,6 +118,8 @@ CAL_TABLE_SIZE_KEY = 0xCA1B513E
 
 SYS_ENABLE, SYS_DISABLE = 0xE1, 0x0F
 SYS_FAULT_RESET, SYS_REBOOT, SYS_REBOOT_DFU = 0xC1, 0xB0, 0xDF
+# Torque-ripple feed-forward map: start averaging / fold in and enable / zero and disable (RAM only)
+SYS_RIPPLE_LEARN, SYS_RIPPLE_COMMIT, SYS_RIPPLE_CLEAR = 0xA1, 0xA2, 0xA3
 CAL_BITS = {"encoder": 0x01, "offset": 0x02, "phase": 0x04, "resistance": 0x08,
             "inductance": 0x10, "flux": 0x20, "mechanical": 0x40}
 CAL_BITS["electrical"] = CAL_BITS["phase"] | CAL_BITS["resistance"] | CAL_BITS["inductance"]
@@ -411,6 +413,8 @@ REGISTERS = {
     "diag:ident_fail": Reg(0x43, [F("reason", "u8", 2), F("stage", "u8", 3), F("fault", "u8", 4),
                                   F("volts_x10", "u8", 5), F("ia_x20", "i8", 6), F("ib_x20", "i8", 7)],
                            sub=8, writable=False),
+    "diag:ripple": Reg(0x43, [F("index", "u8", 2), F("flags", "u8", 3), F("bin0", "i16", 4), F("bin1", "i16", 6)],
+                       sub=9, keyed="index", writable=False),
     "device_info": Reg(0x50, [F("hw", "u8", 1), F("fw", "u16", 2), F("device", "u32", 4)], writable=False),
     "system_status": Reg(0x51, [F("io", "u8", 1), F("uptime", "bf16", 2), F("fault_word", "u32", 4)], writable=False),
     "motor_status": Reg(0x52, [_bits_field("state", 1, 0, 4), _bits_field("mode", 1, 4, 4),
@@ -1495,6 +1499,61 @@ def cmd_reset(link, args):
     return 0 if expect_ok(system_control(link, args.node, action=SYS_FAULT_RESET), "fault reset") else 1
 
 
+def ripple_table(link, node):
+    """Read the 64-bin torque-ripple map [mA] and its flags (bit0 enabled, bit1 learning)."""
+    bins, flags = [], 0
+    for i in range(0, 64, 2):
+        _, v = read_register(link, node, "diag:ripple", key=i)
+        if v is None:
+            return None, 0
+        bins += [v["bin0"], v["bin1"]]
+        flags = v["flags"]
+    return bins, flags
+
+
+def ripple_harmonic(bins, k):
+    """Amplitude [mA] and phase [deg] of the k-th harmonic of the map over one electrical period."""
+    n = len(bins)
+    re = sum(b * math.cos(2.0 * math.pi * k * i / n) for i, b in enumerate(bins))
+    im = sum(b * math.sin(2.0 * math.pi * k * i / n) for i, b in enumerate(bins))
+    return 2.0 * math.hypot(re, im) / n, math.degrees(math.atan2(im, re))
+
+
+def cmd_ripple(link, args):
+    """Learn, clear or show the torque-ripple feed-forward map (RAM only until a reset)."""
+    if args.what == "clear":
+        return 0 if expect_ok(system_control(link, args.node, action=SYS_RIPPLE_CLEAR), "ripple clear") else 1
+    if args.what == "learn":
+        # The loop's reaction is only a faithful copy of the ripple torque well
+        # below the spring/rotor resonance, so the learning move is SLOW: at
+        # 0.05 RPS the 2x and 4x electrical lines sit at 5 and 10 Hz. One full
+        # revolution averages over every pole pair.
+        if not require_motion_ready(link, args):
+            return 1
+        seconds = args.rev / args.rps
+        seg = 1 + int(time.time() * 10) % 250
+        link.send_many(ID_COMMAND + args.node, [mt1(seg, MT_MODES["scurve"], is_abs=False, pos_mode=1, is_vel=True),
+                                                mt2(seg, args.rev), mt3(seg, velocity=args.rps)])
+        print(f"  learning over {args.rev:g} rev at {args.rps:g} RPS ({seconds:.0f} s)")
+        time.sleep(1.0)                                    # Past the ramp
+        if not expect_ok(system_control(link, args.node, action=SYS_RIPPLE_LEARN), "ripple learn"):
+            return 1
+        time.sleep(max(seconds - 2.0, 0.5))                # Stop before the final ramp
+        if not expect_ok(system_control(link, args.node, action=SYS_RIPPLE_COMMIT), "ripple commit"):
+            return 1
+        time.sleep(1.5)
+    bins, flags = ripple_table(link, args.node)
+    if bins is None:
+        print("  the node has no ripple map register (old firmware?)")
+        return 1
+    print(f"  map {'enabled' if flags & 1 else 'disabled'}{', learning' if flags & 2 else ''}: "
+          f"{min(bins):+d}..{max(bins):+d} mA, harmonics " +
+          ", ".join(f"{k}x {ripple_harmonic(bins, k)[0]:.0f} mA" for k in (1, 2, 4, 8)))
+    for row in range(0, 64, 16):
+        print("  " + " ".join(f"{b:+4d}" for b in bins[row:row + 16]))
+    return 0
+
+
 def cmd_reboot(link, args):
     """Reboot, optionally into the USB DFU bootloader."""
     action = SYS_REBOOT_DFU if args.dfu else SYS_REBOOT
@@ -1926,6 +1985,14 @@ def main():
     s = sub.add_parser("reset", help="clear latched faults")
     s.add_argument("node", type=int)
     s.set_defaults(fn=cmd_reset)
+
+    s = sub.add_parser("ripple", help="torque-ripple feed-forward map: learn (slow move), clear, or show (RAM only)")
+    s.add_argument("node", type=int)
+    s.add_argument("what", choices=["learn", "clear", "show"])
+    s.add_argument("--rps", type=float, default=0.05, help="learning speed [RPS]; keep it far below the loop resonance")
+    s.add_argument("--rev", type=float, default=1.0, help="learning distance [rev]; one revolution covers every pole pair")
+    s.add_argument("--set-mode", action="store_true", help="enable the stage first")
+    s.set_defaults(fn=cmd_ripple)
 
     s = sub.add_parser("reboot", help="reboot a node")
     s.add_argument("node", type=int)

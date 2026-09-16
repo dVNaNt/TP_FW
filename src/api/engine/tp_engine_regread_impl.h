@@ -203,7 +203,7 @@ inline TpError TpProtocol::read_register(uint8_t cmd, uint8_t sub, const TpFrame
         }
 
         case TP_REG_DIAG:
-            return read_diag(sub, rsp);
+            return read_diag(sub, req, rsp);
 
         case TP_REG_DEVICE_INFO:
         case TP_REG_SYSTEM_STATUS:
@@ -400,7 +400,7 @@ inline TpError TpProtocol::read_status(uint8_t cmd, TpFrame& rsp) {
     }
 }
 
-inline TpError TpProtocol::read_diag(uint8_t sub, TpFrame& rsp) {
+inline TpError TpProtocol::read_diag(uint8_t sub, const TpFrame& req, TpFrame& rsp) {
     rsp.b8[1] = sub;                                     // Every record echoes its sub identifier
     switch (sub) {
         case TP_SUB_DIAG_COMM:
@@ -517,6 +517,17 @@ inline TpError TpProtocol::read_diag(uint8_t sub, TpFrame& rsp) {
             rsp.diag_ident.volts_x10 = (uint8_t)((v < 0.0f) ? 0.0f : ((v > 255.0f) ? 255.0f : v));
             rsp.diag_ident.ia_x20 = (int8_t)((ia < -127.0f) ? -127.0f : ((ia > 127.0f) ? 127.0f : ia));
             rsp.diag_ident.ib_x20 = (int8_t)((ib < -127.0f) ? -127.0f : ((ib > 127.0f) ? 127.0f : ib));
+            return TP_ERR_NONE;
+        }
+
+        case TP_SUB_DIAG_RIPPLE: {
+            // Keyed: byte 2 of the request names the first of the two bins.
+            const auto& map = tp_->ripple_map;                                   // The feed-forward table
+            const uint8_t first = (uint8_t)(req.b8[2] & (map.kBins - 1u));       // Wrap into the map
+            rsp.diag_ripple.index = first;
+            rsp.diag_ripple.flags = (uint8_t)((map.is_enabled() ? 0x01u : 0u) | (map.is_learning() ? 0x02u : 0u));
+            rsp.diag_ripple.bin0 = map.bin_ma(first);
+            rsp.diag_ripple.bin1 = map.bin_ma((uint16_t)(first + 1u));
             return TP_ERR_NONE;
         }
 

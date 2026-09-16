@@ -988,6 +988,43 @@ def t_fault_reset(node=None):
     return out
 
 
+@tool("ripple",
+      "Torque-ripple feed-forward map (anti-cogging). 'learn' MOVES THE SHAFT: one slow revolution "
+      "(0.05 RPS, 20 s) under position control while the node averages the loop's command per "
+      "electrical-angle bin, then enables the map; it removes the low-speed growl (2x/4x electrical "
+      "torque ripple). 'clear' disables it, 'show' reads the 64 bins [mA]. RAM only: lost at reset.",
+      {"node": NODE_ARG, "what": {"type": "string", "enum": ["learn", "clear", "show"]},
+       "rps": {"type": "number"}, "rev": {"type": "number"}}, required=["what"])
+def t_ripple(what, node=None, rps=0.05, rev=1.0):
+    n = DRIVE.target(node)
+    with DRIVE.lock:
+        link = DRIVE.ensure()
+        if what == "clear":
+            reply = tp.system_control(link, n, action=tp.SYS_RIPPLE_CLEAR)
+            if reply is None or reply[0] == tp.CMD["nack"]:
+                return {"ok": False, "node": n, "error": "clear refused"}
+        elif what == "learn":
+            seconds = rev / rps
+            seg = 1 + int(time.time() * 10) % 250
+            link.send_many(tp.ID_COMMAND + n, [tp.mt1(seg, tp.MT_MODES["scurve"], is_abs=False, pos_mode=1, is_vel=True),
+                                               tp.mt2(seg, rev), tp.mt3(seg, velocity=rps)])
+            time.sleep(1.0)                                    # Past the ramp
+            reply = tp.system_control(link, n, action=tp.SYS_RIPPLE_LEARN)
+            if reply is None or reply[0] == tp.CMD["nack"]:
+                return {"ok": False, "node": n, "error": "learn refused (old firmware?)"}
+            time.sleep(max(seconds - 2.0, 0.5))                # Stop before the final ramp
+            reply = tp.system_control(link, n, action=tp.SYS_RIPPLE_COMMIT)
+            if reply is None or reply[0] == tp.CMD["nack"]:
+                return {"ok": False, "node": n, "error": "commit refused"}
+            time.sleep(1.5)
+        bins, flags = tp.ripple_table(link, n)
+    if bins is None:
+        return {"ok": False, "node": n, "error": "no ripple map register (old firmware?)"}
+    return {"ok": True, "node": n, "enabled": bool(flags & 1), "learning": bool(flags & 2),
+            "harmonics_ma": {f"{k}x": round(tp.ripple_harmonic(bins, k)[0], 1) for k in (1, 2, 4, 8)},
+            "bins_ma": bins}
+
+
 @tool("reboot",
       "Reboot the drive, optionally into the USB DFU bootloader (needs confirm=true: it drops the link "
       "until the board is reflashed or power-cycled).",

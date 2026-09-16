@@ -46,6 +46,7 @@
 #include "motor_control/current_control/current_control.h"
 #include "math/helpers/buzzer.h"       // MotorSpeaker: coils-as-speaker tone generator
 #include "motor_control/drive_control.h"  // Runtime control-mode machine + trajectory front end
+#include "motor_control/ripple_map.h"     // Torque-ripple feed-forward map indexed by electrical angle
 #include "pt_control.h"  // P*t overdrive limiter + motor thermal derating
 #include "motor_control/motor.h"
 #include "motor_control/types.h"
@@ -144,6 +145,12 @@ public:
     Vec2D_f32 pwm_voltage_ab = {0.0, 0.0};  ///< Last commanded alpha-beta voltage vector [V].
     float current_target_a = 0.5;           ///< Target q-axis current for the FOC loop [A].
     PtControl pt_control;                   ///< P*t loss-power limiter: budget + thermal derating (0x23/0x24 model).
+    /**
+     * @brief Torque-ripple feed-forward (anti-cogging), 64 bins per electrical
+     *        period. Learned on request while cruising under position control
+     *        and added to the loop's current command; RAM only, cleared by reset.
+     */
+    RippleMap<6> ripple_map;
     bool pt_dt_seeded_ = false;             ///< One-shot flag: pt_control.set_dt() applied on the first control pass.
     // FIX (P1.4): re-entrancy guard. Atomic exchange makes the test-and-set
     // indivisible, so an ISR racing with a running tick() can no longer skip
@@ -579,6 +586,7 @@ public:
                     // before the front end existed.
                     // ================================================================
                     const bool nvm_window = motor_params.is_flash_busy();
+                    ripple_map.service();  // Learn / commit / clear requests from thread mode
                     const DriveOutput cmd = drive.tick(real_pos, last_current_a_, io_inputs_, nvm_window);
 
                     // The front end and the loops work in encoder units; the
@@ -587,14 +595,28 @@ public:
                     // never reach this switch, so their frame is untouched.
                     foc_sign = torque_sign();
                     switch (cmd.action) {
-                        case DriveAction::RunPosition:
+                        case DriveAction::RunPosition: {
                             // Cascaded position loop against the resolved target.
-                            targt = foc_sign * position_controller.tick(real_pos, cmd.target_pos_q16, cmd.target_vel_rps,
-                                                                        cmd.max_current_a, false);
+                            const float loop_a = foc_sign * position_controller.tick(real_pos, cmd.target_pos_q16,
+                                                                                     cmd.target_vel_rps,
+                                                                                     cmd.max_current_a, false);
+                            // Torque-ripple feed-forward: the map learns from the
+                            // loop's OWN command (before the feed-forward, or the
+                            // table would count itself) and adds the current the
+                            // ripple needs at this electrical angle. The sum is
+                            // held inside the envelope the loop was given.
+                            ripple_map.learn(angle_el_, loop_a);
+                            targt = loop_a + ripple_map.feed_forward_a(angle_el_);
+                            if (targt > cmd.max_current_a) {
+                                targt = cmd.max_current_a;
+                            } else if (targt < -cmd.max_current_a) {
+                                targt = -cmd.max_current_a;
+                            }
 #ifdef TP_TRACE_DEPTH
                             trace_perr_q16_ = cmd.target_pos_q16 - real_pos;  // For the black box
 #endif
                             break;
+                        }
                         case DriveAction::RunTorque:
                             // Position loop bypassed: command the q-axis current directly.
                             targt = foc_sign * cmd.torque_target_a;

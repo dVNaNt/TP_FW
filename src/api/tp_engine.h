@@ -296,7 +296,7 @@ private:
     TpError read_status(uint8_t cmd, TpFrame& rsp);
 
     /** @brief Pack a 0x43 diagnostics record. */
-    TpError read_diag(uint8_t sub, TpFrame& rsp);
+    TpError read_diag(uint8_t sub, const TpFrame& req, TpFrame& rsp);
 
     /** @brief Pack the 0x00 direct memory access reply. */
     TpError read_direct(const TpFrame& req, TpFrame& rsp);

@@ -276,6 +276,18 @@ bench as 2x the torque roughness of the chain. The profiler is written in 32-bit
 integer on purpose: a float<->int64 conversion on this target pulls libgcc's soft-double helpers
 (~2.5 KiB) into an image that otherwise links none.
 
+**Low-speed growl is the motor's own torque ripple, and `ripple_map` is the answer.** At 0.5 RPS
+the rotor speed wobbles ±26 % at 2x and 4x the electrical period (stator A/B asymmetry and
+detent, 100 and 200 cycles per rev); the position loop cannot reject a 50-200 Hz disturbance. The
+`RippleMap<6>` in `TunePulseHeart` (`core/motor_control/ripple_map.h`) is a 64-bin feed-forward
+per electrical period added to the loop's command in `RunPosition`, learned from the loop's OWN
+command (before the feed-forward) via System Control actions 0xA1/0xA2/0xA3 and read back through
+`0x43/0x09`; `tpcp_host.py ripple <node> learn` runs the procedure. **Learn slowly (0.05 RPS):**
+the loop's reaction only copies the ripple torque well below the spring/rotor resonance; learned
+at 0.5 RPS the map comes out phase-rotated and doubles the ripple instead (measured). RAM only
+and one direction so far: persistence in the motor-profile partition and a per-direction map
+are the open follow-ups.
+
 ### Adding or changing board code
 
 Two rules keep the split working, and both fail at LINK time rather than compile time, so they are

@@ -387,6 +387,15 @@ inline TpError TpProtocol::write_system_control(const TpFrame& f) {
         case TP_SYS_REBOOT_DFU:
             arm_reboot(1u);
             break;
+        case TP_SYS_RIPPLE_LEARN:
+            tp_->ripple_map.post(RippleMap<6>::Learn);   // The control ISR starts averaging
+            break;
+        case TP_SYS_RIPPLE_COMMIT:
+            tp_->ripple_map.post(RippleMap<6>::Commit);  // ... folds the residual in and enables the map
+            break;
+        case TP_SYS_RIPPLE_CLEAR:
+            tp_->ripple_map.post(RippleMap<6>::Clear);   // ... forgets the map
+            break;
         default:
             return TP_ERR_BAD_PARAM;                     // Not a defined action
     }
