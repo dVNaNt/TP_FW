@@ -1256,3 +1256,32 @@ FLASH: 71652 bytes (62.48% of 114688 bytes): +0 bytes
 RAM: 11788 bytes (35.97% of 32768 bytes): +0 bytes
 
 
+## 2026-09-15 - S-CURVE motion task queues a seven-phase jerk-limited profile instead of one cubic Hermite
+**Changes:**
+- commit_segment() plans the profile with SCurveProfiler::generate() and posts up to seven chained Hermite segments with matching boundary velocities (TpProtocol::queue_scurve), all or nothing: QUEUE_FULL with nothing posted when the mailbox or executor queue cannot take the chain
+- the last segment of an absolute move carries the absolute target so the ISR lands it exactly
+- a longer TimeMode duration stretches the profile, a shorter one is ignored
+- DriveControl::request_room() exposes the free mailbox slots
+- triggered probes (torque or IO) and zero-length moves keep the single-segment fallback
+- scurve_profiler.h rewritten to 32-bit arithmetic (uint32 time steps, float slice instead of int64 division, plain compares instead of fmaxf/fminf) and its requested-time fit applies only when the profile was stretched
+- CAN_PROTOCOL.md 7.2 documents the chain semantics
+
+**Reasoning:**
+- The old path collapsed velocity and acceleration into one duration and discarded jerk
+- a single cubic Hermite peaks at 1.5x the average velocity (a 5 RPS request ran at 7.5 RPS) and steps its acceleration at both ends, so every move started and ended with a torque step
+- the requested velocity is now a real cruise cap and the torque demand ramps
+- float<->int64 and libm min/max pulled soft-double helpers (2.5 KiB) into an image that links none
+
+**Notes:**
+- Bench on node 1 (cln17_v3_release), +20 rev at 5 RPS: peak velocity 7.49 -> 5.09 RPS, Iq roughness (rms about a 100 ms mean) 0.018 -> 0.008 A with the stored limits (a=200 j=2000), 0.010 A with MT4 a=10 j=50
+- absolute move of -40 rev landed at 0.0016 rev
+- 0.2 rev moves take the three-segment no-cruise path
+- no drops, no faults
+- the residual torque wobble during cruise is rotation-synchronous at 8x and 16x per mechanical revolution (10 mA) and is not loop noise
+- the previous entries did not record the PlossT growth, the true delta of this change is +2048 B flash over the 73160 B build it started from, RAM unchanged
+- cln17_v3_dev 87572 B flash, 24220 B RAM
+
+FLASH: 75208 bytes (65.58% of 114688 bytes): +3556 bytes
+RAM: 11908 bytes (36.34% of 32768 bytes): +120 bytes
+
+

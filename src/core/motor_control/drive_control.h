@@ -312,6 +312,17 @@ public:
     uint32_t requests_dropped() const { return req_dropped_; }
 
     /**
+     * @brief Mailbox slots still free: how many post() calls succeed before the ISR drains.
+     *
+     * Lets a caller that must queue a GROUP of requests (a profiled move is up
+     * to seven segments) refuse the whole group instead of leaving a partial
+     * one in the mailbox. One slot of the ring is always kept empty to tell a
+     * full ring from an empty one. Read from thread mode while the ISR
+     * advances the consumer index; a stale value only under-reports the room.
+     */
+    uint32_t request_room() const { return (req_r_ - req_w_ - 1u) & REQ_MASK; }
+
+    /**
      * @brief Read a consistent snapshot of the control state.
      *
      * Sequence lock with the ISR as the writer: the reader retries while a

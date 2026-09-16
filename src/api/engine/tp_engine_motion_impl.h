@@ -23,12 +23,22 @@
  * DriveControl mailbox, which the 20 kHz ISR drains between passes - that is
  * what makes it safe for these handlers to be preempted at any instruction.
  *
+ * A point-to-point S-CURVE task is not one segment but a chain: the seven-phase
+ * jerk-limited profile is planned here (SCurveProfiler) and queued as up to
+ * seven Hermite segments with matching boundary velocities. Every constant-jerk
+ * phase is a cubic in time, so the executor's cubic Hermite reproduces the
+ * profile exactly; the velocity carried is a real cruise cap and the torque
+ * demand ramps instead of stepping at the ends of the move.
+ *
  * Part of TpProtocol, declared in tp_engine.h.
  *
  * Copyright 2026, creapunk
  * Licensed under the Apache License, Version 2.0
  */
 
+#include <cmath>                                       // std::isfinite: limit sanity before planning
+
+#include "../../core/math/motion/scurve_profiler.h"    // SCurveProfiler: seven-phase profile planner
 #include "../tp_engine.h"  // class TpProtocol - the declarations these bodies define
 
 inline float TpProtocol::torque_to_amps(float torque) const {
@@ -66,6 +76,49 @@ inline uint32_t TpProtocol::scurve_duration_us(float distance_rev, float vel, fl
         return 4000000000u;                                                  // Cap at ~66 minutes
     }
     return (uint32_t)(t * 1000000.0f);
+}
+
+inline TpError TpProtocol::queue_scurve(int32_t dist_q16, uint32_t time_us, float vel, float acc, float jerk,
+                                        uint16_t torque, int32_t abs_target, bool is_abs) {
+    // The planner hands its segments out one at a time. They are collected
+    // here instead of being posted straight away so the mailbox and the
+    // executor queue can be checked for the WHOLE chain first: a chain cut
+    // short would strand the rotor part-way along the profile, at speed.
+    MotionCommandTM parts[SCurveProfiler::kMaxSegments];                    // The planned chain
+    int n = 0;                                                               // Segments collected
+    const int planned = SCurveProfiler::generate(
+        [&](const MotionCommandTM& s) { parts[n++] = s; },                   // Collect, never post here
+        dist_q16, time_us, vel, acc, jerk, torque);
+    if ((planned <= 0) || (n != planned)) {
+        return TP_ERR_BAD_PARAM;                                             // Nothing to shape: caller falls back
+    }
+
+    // ---- All or nothing -----------------------------------------------------
+    // One extra mailbox slot for the SetMode request that may precede the
+    // chain; the executor queue must take every segment as well.
+    DriveTelemetry t;                                                        // Live control snapshot
+    tp_->drive.read_telemetry(t);
+    if ((tp_->drive.request_room() < ((uint32_t)n + 1u)) || ((int)t.queue_free < n)) {
+        return TP_ERR_QUEUE_FULL;                                            // Refuse the move whole
+    }
+    if (control_mode() != TP_MODE_MOTION) {
+        tp_->drive.post_u32(DriveReq::SetMode, TP_MODE_MOTION);              // The queue only advances in MOTION
+    }
+
+    // ---- Post the chain -----------------------------------------------------
+    // Every segment is a displacement from the queue tail, except the last one
+    // of an absolute move: it carries the absolute target and the ISR converts
+    // it against the tail it actually has, so the endpoint is exact even when
+    // the distance the profile was planned from was a stale estimate (the
+    // final phase then absorbs the difference).
+    for (int i = 0; i < n; ++i) {
+        const bool last_abs = is_abs && (i == (n - 1));                      // Absolute landing segment
+        if (last_abs) {
+            parts[i].motion.displacement = abs_target;                       // Rewritten by the ISR
+        }
+        (void)tp_->drive.post_segment(parts[i], last_abs);                  // Room was checked above
+    }
+    return TP_ERR_NONE;
 }
 
 inline uint32_t TpProtocol::node_time_us() const {
@@ -255,15 +308,30 @@ inline TpError TpProtocol::commit_segment() {
                 cruise = config_.vel_limit_rps;          // Clamp into the envelope
             }
             // An absolute destination's distance is only known to the ISR, so
-            // the duration is sized from the distance to the CURRENT queue
+            // the profile is planned from the distance to the CURRENT queue
             // tail as the telemetry last reported it - exact for a queue that
             // has drained, and a fair estimate otherwise.
             DriveTelemetry t;                            // Live control snapshot
             tp_->drive.read_telemetry(t);
             const int32_t dist_q16 = is_abs ? (pos - t.queue_tail_q16) : pos;  // Distance to travel
+            // A probe (torque or IO trigger) must stay ONE segment: a trigger
+            // ends only the active segment, so a chain would carry on with
+            // the rest of the profile after the probe fired. Everything else
+            // gets the jerk-limited chain, provided the limits are usable.
+            const bool triggered = (trig != TorqueTrigger::DISABLED) || (has_lim && TP_MT1_IO_TRIG(seg_flags_));
+            if (!triggered && std::isfinite(cruise) && std::isfinite(acc) && std::isfinite(jerk)) {
+                const TpError e = queue_scurve(dist_q16, seg.motion.duration, cruise, acc, jerk, seg.torque,
+                                               pos, is_abs);
+                if (e != TP_ERR_BAD_PARAM) {
+                    return e;                            // Chain posted, or refused whole
+                }
+            }
+            // Fallback: one cubic Hermite sized for the distance. Its ends
+            // are C1 (velocity continuous) but its acceleration steps at
+            // both ends and its peak speed is 1.5x the average, which is why
+            // the chain above is taken whenever it applies.
             seg.motion.duration = scurve_duration_us((float)dist_q16 * (1.0f / 65536.0f), cruise, acc);
             seg.motion.end_velocity = 0.0f;              // Point-to-point ends at rest
-            (void)jerk;                                  // Shape comes from the Hermite ends
             break;
         }
         case TP_MT_PVT:

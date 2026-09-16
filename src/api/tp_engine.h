@@ -374,6 +374,33 @@ private:
     /** @brief Duration of a point-to-point move under the velocity and acceleration given. */
     static uint32_t scurve_duration_us(float distance_rev, float vel, float acc);
 
+    /**
+     * @brief Queue a point-to-point move as a jerk-limited S-curve chain.
+     *
+     * Plans the seven-phase profile (SCurveProfiler) for the distance and
+     * posts it as chained Hermite segments with matching boundary velocities,
+     * all or nothing. The last segment of an absolute move carries the
+     * absolute target itself, so the ISR lands it exactly even when the
+     * distance the profile was planned from was only an estimate.
+     *
+     * @param dist_q16   Distance to travel, Q16.16 (an estimate for an absolute target).
+     * @param time_us    Requested duration, 0 for the time-optimal profile; a longer
+     *                   time stretches the profile, a shorter one is ignored.
+     * @param vel        Cruise velocity [RPS], positive.
+     * @param acc        Acceleration limit [RPS^2], positive.
+     * @param jerk       Jerk limit [RPS^3], positive.
+     * @param torque     Torque limit applied to every segment, executor scale.
+     * @param abs_target Native absolute target, used when @p is_abs.
+     * @param is_abs     true when the destination is absolute.
+     * @return TP_ERR_NONE when the chain was posted; TP_ERR_QUEUE_FULL when the
+     *         mailbox or the executor queue cannot take it whole (nothing is
+     *         posted then); TP_ERR_BAD_PARAM when the planner produced nothing
+     *         (zero distance or unusable limits) and the caller should fall back
+     *         to a single Hermite segment.
+     */
+    TpError queue_scurve(int32_t dist_q16, uint32_t time_us, float vel, float acc, float jerk,
+                         uint16_t torque, int32_t abs_target, bool is_abs);
+
     /** @brief Node time [us]: micros() re-based by the last bus sync. */
     uint32_t node_time_us() const;
 

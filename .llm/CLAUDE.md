@@ -42,8 +42,9 @@ The node-config partition is deliberately separate: the motor-profile engine era
 partition when it runs out of slots (~60 saves), which would otherwise destroy the stored node
 address.
 
-Reference build (this branch, 2026-09-13, control timing): `cln17_v3_release` RAM 11788 B,
-Flash 71652 B; `cln17_v3_dev` Flash 84104 B (RAM 24100 B with the black box). (Before the protocol rewrite: 61140 B / 72112 B.)
+Reference build (main, 2026-09-15, S-curve chain): `cln17_v3_release` RAM 11908 B,
+Flash 75208 B; `cln17_v3_dev` Flash 87572 B (RAM 24220 B with the black box). (Before the
+protocol rewrite: 61140 B / 72112 B.)
 
 **Build flags that decide the size** (all in `platformio.ini`, mirrored in `cln234_release`):
 
@@ -262,6 +263,18 @@ The `math/motion/` stack and the runtime control-mode switch are
 now wired in through `DriveControl`; `src/api/CAN_PROTOCOL.md` §10 lists what the protocol
 deliberately does not implement yet (homing, step/direction, flux and mechanical calibration,
 writing the calibration table, the stored-but-unenforced protection fields).
+
+**An S-CURVE task is a chain of segments, not one.** `commit_segment()` plans the seven-phase
+jerk-limited profile with `SCurveProfiler::generate()` (`core/math/motion/scurve_profiler.h`) and
+posts up to seven Hermite segments with matching boundary velocities, all or nothing
+(`TpProtocol::queue_scurve()`; `DriveControl::request_room()` sizes the mailbox check). Every
+constant-jerk phase is a cubic, so the executor's cubic Hermite plays the profile exactly: the
+velocity carried is a real cruise cap and the torque demand ramps instead of stepping. A single
+cubic Hermite (the old path, kept as the fallback for triggered probes and zero-length moves)
+peaks at 1.5x the average velocity and steps its acceleration at both ends — measured on the
+bench as 2x the torque roughness of the chain. The profiler is written in 32-bit float and
+integer on purpose: a float<->int64 conversion on this target pulls libgcc's soft-double helpers
+(~2.5 KiB) into an image that otherwise links none.
 
 ### Adding or changing board code
 

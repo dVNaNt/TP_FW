@@ -96,10 +96,11 @@ public:
             if (D >= d_lim) {
                 const float disc = t_j_sq + 4.0f * D * inv_A;
                 const float tc = 0.5f * (-3.0f * t_j + sqrtf(disc)); 
-                v_peak = dv_ramp + max_acc * fmaxf(0.0f, tc);
+                v_peak = dv_ramp + max_acc * ((tc > 0.0f) ? tc : 0.0f);   // Plain compare: no libm fmaxf
             } else {
                 const float cbrt_val = fast_cbrtf(D * sqrtf(max_jrk) * 0.5f);
-                v_peak = fminf(cbrt_val * cbrt_val, max_vel);
+                const float v_cbrt = cbrt_val * cbrt_val;
+                v_peak = (v_cbrt < max_vel) ? v_cbrt : max_vel;               // Plain compare: no libm fminf
             }
 
             const HalfProfile ah = accel_half(v_peak);
@@ -107,7 +108,8 @@ public:
             d_acc_half = ah.d;
         }
 
-        const float d_cruise = fmaxf(0.0f, D - 2.0f * d_acc_half);
+        const float d_rest = D - 2.0f * d_acc_half;                          // What the ramps leave for the cruise
+        const float d_cruise = (d_rest > 0.0f) ? d_rest : 0.0f;              // Plain compare: no libm fmaxf
         const float t_cruise = (v_peak > 0.0f) ? (d_cruise / v_peak) : 0.0f;
 
         // --- Time scaling (float only) ---
@@ -131,27 +133,35 @@ public:
         int n = 0;
 
         // --- Delta-DDA accumulators (no double, no absolute coordinates) ---
+        // Everything here stays 32-bit on purpose: a float <-> int64 conversion
+        // on this target goes through libgcc's double-precision helpers and
+        // drags ~2.5 KiB of soft-double into an image that otherwise links none.
         float rem_disp_q16 = 0.0f;
         float rem_time_us = 0.0f;
-        
+
         int32_t total_emitted_disp = 0;
-        int64_t total_emitted_time = 0;
+        uint32_t total_emitted_time = 0;   // Sum of the durations pushed [us]; bounded by kMaxTimeUs below
 
         // Lambda generating and splitting segments
         auto emit = [&](float delta_d, float delta_t, float v_end) noexcept {
             // Compute the exact step in float, adding the previous step remainder
             const float step_disp_f = delta_d * sg * kQ16Scale + rem_disp_q16;
-            const float step_time_f = delta_t * scale_t * 1000000.0f + rem_time_us;
+            float step_time_f = delta_t * scale_t * 1000000.0f + rem_time_us;
 
-            // Quantize to integers
+            // A single phase longer than this is capped (~66 minutes): keeps the
+            // conversion below inside uint32 without an int64 in the path.
+            constexpr float kMaxTimeUs = 4.0e9f;
+            if (step_time_f > kMaxTimeUs) [[unlikely]] step_time_f = kMaxTimeUs;
+
+            // Quantize to integers (float -> uint32 is one FPU instruction)
             int32_t disp_step = static_cast<int32_t>(step_disp_f);
-            int64_t time_step = static_cast<int64_t>(step_time_f);
+            uint32_t time_step = static_cast<uint32_t>(step_time_f);
 
             // Keep fractional remainders for the next call
             rem_disp_q16 = step_disp_f - static_cast<float>(disp_step);
             rem_time_us = step_time_f - static_cast<float>(time_step);
 
-            if (time_step <= 0) [[unlikely]] return;
+            if (time_step == 0U) [[unlikely]] return;
             if (n >= kMaxSegments) [[unlikely]] return;
 
             // Account for what is actually pushed into the buffer
@@ -159,25 +169,32 @@ public:
             total_emitted_time += time_step;
 
             const float vel = sg * v_end * scale_v;
-            constexpr int64_t kMaxDurUs = 0x7FFFFFFFL; 
+            // The executor measures segment time as an unsigned 32-bit
+            // difference and reads bit 31 as "negative", so one segment may
+            // not exceed 2^31 - 1 us; a longer phase is split in two.
+            constexpr uint32_t kMaxDurUs = 0x7FFFFFFFU;
 
-            // Safe splitting of long segments with purely integer math
-            while (time_step > kMaxDurUs) [[unlikely]] {
-                if (n >= kMaxSegments - 1) break; 
+            // Split a phase longer than the executor's limit. With the cap above
+            // a phase is at most 4e9 us, so a single split always suffices.
+            if (time_step > kMaxDurUs) [[unlikely]] {
+                if (n < kMaxSegments - 1) {
+                    // Proportional slice of the displacement, in float: a 24-bit
+                    // mantissa is exact to 1/128 of a count at 2^31, and the
+                    // second half takes the exact remainder anyway.
+                    const int32_t disp_slice = static_cast<int32_t>(
+                        static_cast<float>(disp_step) * (static_cast<float>(kMaxDurUs) / static_cast<float>(time_step)));
 
-                // Compute the proportion via int64_t without float division
-                const int32_t disp_slice = static_cast<int32_t>(
-                    (static_cast<int64_t>(disp_step) * kMaxDurUs) / time_step
-                );
+                    out[n++] = {kMaxDurUs, disp_slice, vel};
 
-                out[n++] = {static_cast<uint32_t>(kMaxDurUs), disp_slice, vel};
-
-                time_step -= kMaxDurUs;
-                disp_step -= disp_slice;
+                    time_step -= kMaxDurUs;
+                    disp_step -= disp_slice;
+                } else {
+                    time_step = kMaxDurUs;   // No slot left to split into: run the phase at the limit
+                }
             }
 
             if (n < kMaxSegments) {
-                out[n++] = {static_cast<uint32_t>(time_step), disp_step, vel};
+                out[n++] = {time_step, disp_step, vel};
             }
         };
 
@@ -229,13 +246,23 @@ public:
             // Compensate lost fractional float micro-steps directly in the last segment
             out[n - 1].displacement += (displacement - total_emitted_disp);
 
-            // Fit exactly into the requested time
-            if (time_us > 0U) {
-                const int64_t dur_fix = static_cast<int64_t>(time_us) - total_emitted_time;
-                const int64_t new_dur = static_cast<int64_t>(out[n - 1].duration) + dur_fix;
+            // Fit exactly into the requested time - only when the profile was
+            // actually stretched to it. A request shorter than the time-optimal
+            // profile is ignored above, and trimming the last segment to it
+            // would end the move with a velocity kick instead of at rest.
+            if ((time_us > 0U) && (scale_t > 1.0f)) {
+                // The emitted total only differs from the request by the
+                // quantization remainders, so the signed difference fits an
+                // int32 and the wrapping subtraction recovers it exactly.
+                const int32_t dur_fix = static_cast<int32_t>(time_us - total_emitted_time);
+                const uint32_t last = out[n - 1].duration;
+                const uint32_t new_dur = last + static_cast<uint32_t>(dur_fix);   // Wrapping add
 
-                if (new_dur > 0 && new_dur <= static_cast<int64_t>(UINT32_MAX >> 1)) {
-                    out[n - 1].duration = static_cast<uint32_t>(new_dur);
+                // Apply only when the result is a valid, positive segment length
+                // (a negative fix larger than the segment would wrap past zero).
+                const bool shrinks_past_zero = (dur_fix < 0) && (static_cast<uint32_t>(-dur_fix) >= last);
+                if (!shrinks_past_zero && (new_dur <= (UINT32_MAX >> 1))) {
+                    out[n - 1].duration = new_dur;
                 }
             }
         }

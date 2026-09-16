@@ -557,7 +557,7 @@ isVel:1, isAcc:1, isJrk:1; `[5..7]` time u24 [100 µs].
 | `2`  | FREERUN_LERP | velocity             | Velocity interpolated to the end value until a trigger        |
 | `3`  | FREEWHEEL    | —                    | Immediate: release the bridge                                 |
 | `4`  | BRAKE        | —                    | Immediate: short the phases                                   |
-| `5`  | S-CURVE      | position             | Point-to-point move shaped by the velocity / acceleration carried or the limits |
+| `5`  | S-CURVE      | position             | Point-to-point move: a jerk-limited profile capped by the velocity / acceleration / jerk carried or the limits (see below) |
 | `6`  | PVT          | position, time       | Hermite segment ending at the position with the velocity carried |
 | `7`  | ANCHOR       | position             | Immediate: redefine "here" (absolute) or shift it (relative) by changing the axis offset of `0x01/0x00` - the rotor does not move; save the node configuration to keep it |
 | `8`  | LIMIT        | —                    | Immediate: adopt the velocity / acceleration / jerk carried   |
@@ -584,9 +584,26 @@ the current envelope - otherwise a torque setpoint (CST).
 `[7]` IO mask (probes that end it when inactive). Single frame: adopts the
 acceleration and jerk as the live limits.
 
+**S-CURVE is a chain, not one segment.** The node plans the seven-phase
+jerk-limited profile for the distance (jerk up, constant acceleration, jerk
+down, cruise, and the mirror image) and queues it as up to **seven** Hermite
+segments with matching boundary velocities - phases the distance does not
+need are left out, so a short move takes three. The velocity carried is a
+real cruise cap (clamped to `0x2A`), the acceleration and jerk carried
+(task 4) or else the `0x2A` limits shape the ramps, and a time (TimeMode 1)
+longer than the time-optimal profile stretches it to that duration; a
+shorter time is ignored. The chain is queued whole or not at all: when the
+queue cannot take every segment the task is refused with `QUEUE_FULL` and
+nothing moves, so a master streaming profiled moves should keep seven slots
+of `0x43/0x02` free per move **[decision]**. A move that carries a torque or
+IO trigger (a probe) stays a single Hermite segment, since a trigger ends only
+the segment it fires in.
+
 Absolute queued targets are converted to displacements by the control ISR
 against the end of the queue, so a mixed absolute / relative stream stays
-consistent. The queue end follows the live target whenever nothing is
+consistent. A profiled absolute move is planned from the queue end as last
+reported and its final segment carries the absolute target itself, so it lands
+exactly even when the plan was made from a stale estimate. The queue end follows the live target whenever nothing is
 queued (after a velocity run, a setpoint, a stop, or while parked), so the
 first profiled move after any of those is sized from where the rotor is.
 
