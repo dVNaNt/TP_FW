@@ -66,11 +66,16 @@ static inline void tp_apply_config(TunePulseHeart& tp, const TpNodeConfig& cfg) 
     // Control envelopes and policy: routed through the mailbox so the ISR
     // adopts them between passes instead of mid-computation. The envelope
     // can never exceed the configured peak current.
+    //
+    // The gearbox ratio is installed first: the configuration record is
+    // written in OUTPUT-SHAFT units (what the master sees), the control loop
+    // runs in MOTOR-SHAFT units, so the envelope crosses the ratio once here.
+    tp.gearbox.set_ratio(cfg.gear_ratio_mul, static_cast<int16_t>(cfg.gear_ratio_div));
     const float envelope = (cfg.current_limit_a > cfg.peak_current_a) ? cfg.peak_current_a : cfg.current_limit_a;
-    tp.drive.post_f32(DriveReq::CurrentLimit, envelope);
-    tp.drive.post_f32(DriveReq::VelocityLimit, cfg.vel_limit_rps);
-    tp.drive.post_f32(DriveReq::AccelLimit, cfg.accel_limit);
-    tp.drive.post_f32(DriveReq::JerkLimit, cfg.jerk_limit);
+    tp.drive.post_f32(DriveReq::CurrentLimit, envelope);                 // Currents never cross the gearbox
+    tp.drive.post_f32(DriveReq::VelocityLimit, tp.gearbox.vel_ext2int(cfg.vel_limit_rps));
+    tp.drive.post_f32(DriveReq::AccelLimit, tp.gearbox.acc_ext2int(cfg.accel_limit));
+    tp.drive.post_f32(DriveReq::JerkLimit, tp.gearbox.jerk_ext2int(cfg.jerk_limit));
     tp.drive.post_u32(DriveReq::SetSafeState, cfg.safe_state);
 
     // Watchdog reload is expressed in control ticks so the ISR never divides.

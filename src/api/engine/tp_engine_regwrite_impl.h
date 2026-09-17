@@ -286,13 +286,16 @@ inline TpError TpProtocol::write_axis(const TpFrame& f) {
         case TP_SUB_GEARBOX: {
             float v;                                     // Decoded backlash
             if (tp_take_bf16(f.gearbox.backlash, v) && (v >= 0.0f)) {
-                config_.gear_backlash = v;
+                config_.gear_backlash = v;               // Stored; compensation is not implemented yet
             }
-            if (f.gearbox.ratio_div == 0u) {
-                return TP_ERR_BAD_PARAM;                 // Division by zero
+            if ((f.gearbox.ratio_div == 0u) || (f.gearbox.ratio_div > 32767u)) {
+                return TP_ERR_BAD_PARAM;                 // Division by zero, or beyond the int16 API
             }
             config_.gear_ratio_mul = f.gearbox.ratio_mul;
             config_.gear_ratio_div = f.gearbox.ratio_div;
+            // Live at once, like the LED above: the very next read of any
+            // position or velocity is reported in the new output-shaft units.
+            tp_->gearbox.set_ratio(config_.gear_ratio_mul, static_cast<int16_t>(config_.gear_ratio_div));
             return TP_ERR_NONE;
         }
         case TP_SUB_IO_MAP: {

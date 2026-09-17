@@ -36,7 +36,7 @@
 
 struct MotorVectorSynthesis {
     // ── Epsilon-spring parameters ─────────────────────────────────
-    float epsilon_rev = 0.002f;   // Spring saturation width [rev]; was 0.0075. Bench 2026-09-15: 0.001 vibrates under load, 0.002 is the limit with the stock damper
+    float epsilon_rev = 0.0075f;   // Spring saturation width [rev]; was 0.0075. Bench 2026-09-15: 0.001 vibrates under load, 0.002 is the limit with the stock damper
 
 
     // ── Variable-bandwidth ABY observer parameters ────────────────

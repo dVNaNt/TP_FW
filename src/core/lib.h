@@ -19,6 +19,11 @@
  * - @c system_dump        : flash-backed storage for generic user data (2 KB).
  * - @c angle_calibrator   : electrical-angle calibration state machine.
  * - @c position_controller: cascaded position/velocity/current synthesizer.
+ * - @c gearbox            : motor->output gear ratio (mul/div). Every position,
+ *                           velocity, acceleration and jerk that leaves or
+ *                           enters through the communication API is expressed
+ *                           in OUTPUT-SHAFT units and converted at the boundary
+ *                           (writes: inverse, reads: direct).
  * - @c drive              : control-mode machine, command mailbox and the
  *                           trajectory queue driven by the communication stack.
  * - @c driver_phy         : physical layer (PWM, ADC current sense, supply).
@@ -42,6 +47,7 @@
 #include "math/helpers/frequency_generator.h"
 #include "math/motion/motion_executor.h"  // Real-time motion trajectory execution
 #include "math/motion/motion_governor.h"
+#include "math/gearbox.h"  // Motor->output gear ratio: every API position/velocity crosses it
 #include "motor_control/calibration/angle_calibrator.h"
 #include "motor_control/current_control/current_control.h"
 #include "math/helpers/buzzer.h"       // MotorSpeaker: coils-as-speaker tone generator
@@ -140,6 +146,7 @@ public:
     AngleCalibrator angle_calibrator;                                   ///< Electrical-angle calibration state machine.
     MotorVectorSynthesis position_controller = MotorVectorSynthesis();  ///< Cascaded position/velocity/current controller.
     DriveControl drive;                     ///< Control-mode machine, command mailbox and trajectory queue.
+    Gearbox gearbox;                        ///< Motor->output gear ratio (mul/div); every wire position and velocity crosses it.
     MotorStatus motor_status;               ///< Current high-level motor status (calibration lifecycle).
     uint16_t angle_el_ = 0;                 ///< Last computed electrical rotor angle [0..65535] mapped to 0..360 deg.
     Vec2D_f32 pwm_voltage_ab = {0.0, 0.0};  ///< Last commanded alpha-beta voltage vector [V].

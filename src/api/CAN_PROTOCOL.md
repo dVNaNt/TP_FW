@@ -129,9 +129,13 @@ rule for the whole protocol, so a bench without a Kt drives the current
 directly and nothing silently changes scale when Kt is entered.
 
 **Axis frame.** Every position, velocity and displacement leaves and enters
-through the axis offset and direction of register `0x01/0x00`: reported
-position = (native + offset) × direction; a commanded absolute target is
-converted back. Displacements and velocities take the sign only.
+through the gearbox and the axis offset and direction of register `0x01/0x00`:
+the wire carries OUTPUT-SHAFT units (what the master sees), the drive runs in
+MOTOR-shaft units, so a reported position is (motor position × mul/div
+converted, then + offset) × direction; a commanded absolute target, a
+displacement, a velocity, an acceleration and a jerk limit are converted the
+other way (× div/mul) before they reach the control loop. Displacements and
+velocities take the sign only.
 
 ---
 
@@ -186,9 +190,11 @@ GearboxIDX, `0x08` Brake **[decision: the design left Brake unnumbered]**,
 frame; its trigger bit moved into bit 6 of the quick-homing flags word.
 
 All of these records are stored and reported. The firmware applies Axis
-Control (to every position and velocity on the wire) and LED Control; the
-gearbox, IO map, encoder declarations, homing settings and reference limits
-are held for the features that will consume them.
+Control (to every position and velocity on the wire), LED Control and the
+Gearbox ratio (installed live on write, re-installed from the stored record at
+boot; every position, velocity, acceleration and jerk on the wire is then in
+output-shaft units); the IO map, encoder declarations, homing settings and
+reference limits are held for the features that will consume them.
 
 ### 5.3 `0x02` Telemetry slots (sub = slot 0–3)
 
@@ -705,8 +711,9 @@ unless rejected.
 - `0x56` Homing travel, `0xC0` modes HOMING / STEP-DIR, F_CAL / M_CAL,
   writing `0x2F`, tables other than the encoder table → `TP_ERR_NOT_IMPLEMENTED`.
 - The disbalance, recovery-time, I²t budget, error-limit and motor-derating
-  fields are **stored and reported** but not yet enforced.
-- Gearbox, IO map, encoder declarations, homing settings and reference limits
+  fields are **stored and reported** but not yet enforced. The gearbox
+  backlash is stored; its compensation is not implemented.
+- IO map, encoder declarations, homing settings and reference limits
   are stored for the features that will consume them; the IO word of `0x51`
   and the PulseBeat reads 0 on CLN17 v3, which wires no inputs.
 - Bit-rate and bus-type changes take effect after a save and a reboot.

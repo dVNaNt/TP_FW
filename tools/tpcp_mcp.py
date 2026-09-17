@@ -751,6 +751,61 @@ def t_write_register(name, fields, node=None, selector=None):
 
 
 # ============================================================================
+# Tools: mechanics (gearbox)
+# ============================================================================
+
+
+@tool("set_gearbox",
+      "Configure the gear ratio between the motor shaft and the output shaft: "
+      "the motor turns 'mul' turns for every 'div' turns of the output (mul "
+      "may be negative to invert the direction). Every position, velocity, "
+      "acceleration and jerk on the wire is then expressed in OUTPUT-shaft "
+      "turns and converted internally, so 'move' targets are output-shaft "
+      "revolutions. Backlash is stored but not yet compensated. Takes effect "
+      "immediately; call persist to keep it across a reboot.",
+      {"node": NODE_ARG,
+       "mul": {"type": "integer", "minimum": -32768, "maximum": 32767,
+               "description": "Motor turns per output turn (ratio numerator)."},
+       "div": {"type": "integer", "minimum": 1, "maximum": 32767,
+               "description": "Output turns per motor turn (ratio denominator)."},
+       "backlash": {"type": "number", "minimum": 0,
+                    "description": "Backlash [rev]; omit or 'nan' to keep the stored value."}},
+      required=["mul", "div"])
+def t_set_gearbox(mul, div, backlash=None, node=None):
+    n = DRIVE.target(node)
+    fields = {"ratio_mul": int(mul), "ratio_div": int(div)}
+    if backlash is not None:
+        fields["backlash"] = float(backlash)
+    with DRIVE.lock:
+        reply = tp.write_register(DRIVE.ensure(), n, "axis:gearbox", {k: str(v) for k, v in fields.items()})
+    if reply is None:
+        return {"ok": False, "node": n, "error": "no response"}
+    if reply[0] == tp.CMD["nack"]:
+        return {"ok": False, "node": n, "rejected": tp.CMD_NAME.get(reply[1], f"0x{reply[1]:02X}"),
+                "error": tp.ERRORS.get(reply[2], f"0x{reply[2]:02X}"), "detail": reply[3]}
+    return {"ok": True, "node": n, "gearbox": decode_frame(reply),
+            "ratio_out_per_mot": int(mul) / int(div), "note": "not persisted until you call persist"}
+
+
+@tool("get_gearbox",
+      "Report the configured gear ratio (ratio_mul, ratio_div) and backlash, "
+      "plus the resulting float ratio. Read-only.",
+      {"node": NODE_ARG},
+      mutating=False)
+def t_get_gearbox(node=None):
+    n = DRIVE.target(node)
+    with DRIVE.lock:
+        reply = tp.read_register(DRIVE.ensure(), n, "axis:gearbox")
+    if reply is None:
+        return {"ok": False, "node": n, "error": "no response"}
+    if reply[0] == tp.CMD["nack"]:
+        return {"ok": False, "node": n, "error": tp.ERRORS.get(reply[2], f"0x{reply[2]:02X}")}
+    g = decode_frame(reply)
+    g["ratio_out_per_mot"] = g.get("ratio_mul", 0) / max(g.get("ratio_div", 1), 1)
+    return {"ok": True, "node": n, "gearbox": g}
+
+
+# ============================================================================
 # Tools: control
 # ============================================================================
 

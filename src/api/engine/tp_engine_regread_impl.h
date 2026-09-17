@@ -15,8 +15,10 @@
  * can detect a dropped beat.
  *
  * Positions and velocities leave through to_wire_pos() / to_wire_vel(), which
- * apply the axis offset and direction inversion of register 0x01/0x00, so the
- * master sees the axis it configured rather than the raw encoder.
+ * first cross the gearbox (the wire carries OUTPUT-shaft units, the drive runs
+ * in MOTOR-shaft units: reads go through Gearbox::direct) and then apply the
+ * axis offset and direction inversion of register 0x01/0x00, so the master
+ * sees the axis it configured rather than the raw encoder.
  *
  * Part of TpProtocol, declared in tp_engine.h.
  *
@@ -41,6 +43,44 @@ static inline int32_t tp_axis_from_wire(const TpNodeConfig& c, int32_t pos_q16) 
 /** @brief Apply the axis direction to a displacement or velocity (no offset). */
 static inline float tp_axis_sign(const TpNodeConfig& c, float v) {
     return (c.axis_inverted != 0u) ? -v : v;
+}
+
+// ----------------------------------------------------------------------------
+// Gearbox boundary: the wire speaks OUTPUT-shaft units, the drive MOTOR units.
+// Positions ride the exact int64 pipeline (q1.15.16 -> Q32.32 -> q1.15.16,
+// the gearbox's internal 8-bit pre-shift still keeps 24 fractional bits, far
+// above the 16 the wire needs); the derivatives use the precomputed float
+// multipliers.
+// ----------------------------------------------------------------------------
+
+/** @brief Native motor position (q1.15.16) -> output-shaft position (int->ext). */
+static inline int32_t tp_gear_pos_to_wire(const TunePulseHeart& tp, int32_t pos_q16) {
+    return static_cast<int32_t>(tp.gearbox.pos_int2ext(static_cast<int64_t>(pos_q16) << 16) >> 16);
+}
+
+/** @brief Output-shaft position -> native motor position (ext->int, q1.15.16). */
+static inline int32_t tp_gear_pos_from_wire(const TunePulseHeart& tp, int32_t pos_q16) {
+    return static_cast<int32_t>(tp.gearbox.pos_ext2int(static_cast<int64_t>(pos_q16) << 16) >> 16);
+}
+
+/** @brief Motor-shaft velocity [RPS] -> output-shaft velocity (int->ext). */
+static inline float tp_gear_vel_to_wire(const TunePulseHeart& tp, float vel_rps) {
+    return tp.gearbox.vel_int2ext(vel_rps);
+}
+
+/** @brief Output-shaft velocity [RPS] -> motor shaft (ext->int). */
+static inline float tp_gear_vel_from_wire(const TunePulseHeart& tp, float vel_rps) {
+    return tp.gearbox.vel_ext2int(vel_rps);
+}
+
+/** @brief Output-shaft acceleration [RPS^2] -> motor shaft (ext->int). */
+static inline float tp_gear_acc_from_wire(const TunePulseHeart& tp, float acc_rps2) {
+    return tp.gearbox.acc_ext2int(acc_rps2);
+}
+
+/** @brief Output-shaft jerk [RPS^3] -> motor shaft (ext->int). */
+static inline float tp_gear_jerk_from_wire(const TunePulseHeart& tp, float jerk_rps3) {
+    return tp.gearbox.jerk_ext2int(jerk_rps3);
 }
 
 inline TpError TpProtocol::read_register(uint8_t cmd, uint8_t sub, const TpFrame& req, TpFrame& rsp) {
@@ -356,22 +396,27 @@ inline TpError TpProtocol::read_status(uint8_t cmd, TpFrame& rsp) {
             // the bridge released the last value the loop computed says
             // nothing about the coasting rotor.
             const float verr = live ? (tp_->position_controller.getEstimatedVelocityRevS() - t.target_vel_rps) : 0.0f;
-            tp_pack_i24(rsp.motion1.pos_err, (int32_t)tp_axis_sign(config_, (float)perr));
-            rsp.motion1.vel_err = tp_pack_bf16(tp_axis_sign(config_, verr));
+            // Following error and its derivative are measured in motor units:
+            // they cross the gearbox once before the axis direction.
+            const int64_t perr_out = tp_->gearbox.pos_int2ext(static_cast<int64_t>(perr) << 16) >> 16;  // int->ext
+            tp_pack_i24(rsp.motion1.pos_err, static_cast<int32_t>(tp_axis_sign(config_, static_cast<float>(perr_out))));
+            rsp.motion1.vel_err = tp_pack_bf16(tp_axis_sign(config_, tp_->gearbox.vel_int2ext(verr)));
             rsp.motion1.queue_ts = tp_beat_queue_ts(t.queue_depth, t.time_scale_q10);
             return TP_ERR_NONE;
         }
 
         case TP_REG_MOTION_STATUS_2:
             rsp.motion2.motion_mode = t.motion_mode;
-            tp_pack_i48(rsp.motion2.position, tp_q16_to_q24(tp_axis_to_wire(config_, t.position_q16)));
+            // Reported position: motor shaft -> gearbox -> axis offset/direction.
+            tp_pack_i48(rsp.motion2.position,
+                        tp_q16_to_q24(tp_axis_to_wire(config_, tp_gear_pos_to_wire(*tp_, t.position_q16))));
             return TP_ERR_NONE;
 
         case TP_REG_MOTION_STATUS_3: {
             const float vel = live ? tp_->position_controller.getEstimatedVelocityRevS() : 0.0f;
             const float acc = live ? tp_->position_controller.getEstimatedAccelerationRevS2() : 0.0f;
-            tp_pack_u24(rsp.motion3.velocity, tp_pack_f24(tp_axis_sign(config_, vel)));
-            rsp.motion3.accel = tp_pack_bf16(tp_axis_sign(config_, acc));
+            tp_pack_u24(rsp.motion3.velocity, tp_pack_f24(tp_axis_sign(config_, tp_->gearbox.vel_int2ext(vel))));
+            rsp.motion3.accel = tp_pack_bf16(tp_axis_sign(config_, tp_->gearbox.acc_int2ext(acc)));
             rsp.motion3.torque = tp_pack_bf16(amps_to_torque(tp_->last_current_a_));
             return TP_ERR_NONE;
         }

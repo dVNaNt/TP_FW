@@ -26,6 +26,7 @@
 #include "../../src/api/node/tp_node_identity.h"
 #include "../../src/api/node/tp_discovery.h"
 #include "../../src/core/math/crc.h"
+#include "../../src/core/math/gearbox.h"
 
 /** Unity per-test setup hook (nothing to prepare). */
 void setUp(void) {}
@@ -357,6 +358,36 @@ void test_discovery_assign(void) {
     TEST_ASSERT_TRUE(TpDiscovery::on_assign(id, 0ull, TP_NODE_UNASSIGNED, true, assign));  // Reset all
     TEST_ASSERT_EQUAL_UINT8(TP_NODE_UNASSIGNED, assign);
     TEST_ASSERT_FALSE(TpDiscovery::on_assign(id, 0ull, 7, true, assign));               // Wildcard assign refused
+}
+
+// ============================================================================
+// Gearbox
+// ============================================================================
+
+/**
+ * The gearbox sits on the API boundary: the wire speaks output-shaft units,
+ * the drive motor-shaft units. Q32.32 positions must cross the integer ratio
+ * exactly (modulo the low fractional bits of the internal pre-shift), the
+ * derivatives ride the precomputed float multipliers, and a degenerate
+ * divisor must remap to the identity instead of dividing by zero.
+ */
+void test_gearbox_conversion(void) {
+    Gearbox gb;                                                      // 3:1 reducer under test
+    gb.set_ratio(3, 1);
+    TEST_ASSERT_EQUAL_INT64(6LL << 32, gb.pos_int2ext(2LL << 32));        // 2 motor rev -> 6 output rev
+    TEST_ASSERT_EQUAL_INT64(2LL << 32, gb.pos_ext2int(6LL << 32));       // And back
+    TEST_ASSERT_EQUAL_INT64(-(6LL << 32), gb.pos_int2ext(-(2LL << 32)));  // The sign survives
+
+    Gearbox half;                                                    // 1:2 overdrive
+    half.set_ratio(1, 2);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, half.vel_int2ext(1.0f));           // Wire-side velocity
+    TEST_ASSERT_EQUAL_FLOAT(4.0f, half.vel_ext2int(2.0f));           // Commanded velocity
+    TEST_ASSERT_EQUAL_FLOAT(4.0f, half.acc_ext2int(2.0f));           // Acceleration shares the linear gain
+    TEST_ASSERT_EQUAL_FLOAT(8.0f, half.jerk_ext2int(2.0f));          // Jerk too
+
+    Gearbox degen;                                                   // Degenerate denominator
+    degen.set_ratio(5, 0);
+    TEST_ASSERT_EQUAL_INT64(10LL << 32, degen.pos_int2ext(2LL << 32));    // Remapped to 1, never a trap
 }
 
 /**

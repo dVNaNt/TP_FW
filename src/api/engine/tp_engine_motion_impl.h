@@ -224,7 +224,7 @@ inline TpError TpProtocol::commit_segment() {
     const bool has_lim = (seg_parts_ & SEG_PART_4) != 0u;
 
     // ---- Decode the optional quantities ---------------------------------
-    float vel = 0.0f;                                    // Segment velocity [RPS], axis sign applied
+    float vel = 0.0f;                                    // Segment velocity [RPS], wire (output-shaft) units
     bool have_vel = false;                               // A finite velocity was carried
     if (has_dyn && TP_MT1_IS_VEL(seg_flags_) && tp_f24_is_finite(seg_vel_raw_)) {
         vel = tp_axis_sign(config_, tp_unpack_f24(seg_vel_raw_));
@@ -245,9 +245,11 @@ inline TpError TpProtocol::commit_segment() {
         jerk = tp_unpack_bf16(seg_jerk_raw_);
     }
     // Absolute targets are converted by the ISR against the queue tail; a
-    // displacement only needs the axis direction applied.
-    const int32_t pos = has_pos ? (is_abs ? tp_axis_from_wire(config_, seg_pos_q16_)
-                                          : ((config_.axis_inverted != 0u) ? -seg_pos_q16_ : seg_pos_q16_))
+    // displacement only needs the axis direction applied. Both leave the
+    // gearbox afterwards: the wire carries output-shaft units, the queue
+    // speaks motor units.
+    const int32_t pos = has_pos ? (is_abs ? tp_gear_pos_from_wire(*tp_, tp_axis_from_wire(config_, seg_pos_q16_))
+                                          : tp_gear_pos_from_wire(*tp_, (config_.axis_inverted != 0u) ? -seg_pos_q16_ : seg_pos_q16_))
                                 : 0;
     const uint32_t duration_us = seg_time_ * 100u;       // Wire time [100 us] -> microseconds
 
@@ -255,7 +257,7 @@ inline TpError TpProtocol::commit_segment() {
     MotionCommandTM seg;                                 // Segment under construction
     seg.motion.displacement = pos;
     seg.motion.duration = (time_mode != TP_MT_TIME_UNUSED) ? duration_us : 0u;
-    seg.motion.end_velocity = have_vel ? vel : 0.0f;
+    seg.motion.end_velocity = have_vel ? tp_gear_vel_from_wire(*tp_, vel) : 0.0f;  // Wire -> motor shaft
     seg.torque = UINT16_MAX;                             // No torque cap unless asked
     TorqueTrigger trig = TorqueTrigger::DISABLED;        // Torque trigger kind
     if (have_torque) {
@@ -318,10 +320,15 @@ inline TpError TpProtocol::commit_segment() {
             // ends only the active segment, so a chain would carry on with
             // the rest of the profile after the probe fired. Everything else
             // gets the jerk-limited chain, provided the limits are usable.
+            // The planner runs in motor units: the carried envelope crosses
+            // the gearbox once here.
+            const float cruise_mot = tp_gear_vel_from_wire(*tp_, cruise);
+            const float acc_mot = tp_gear_acc_from_wire(*tp_, acc);
+            const float jerk_mot = tp_gear_jerk_from_wire(*tp_, jerk);
             const bool triggered = (trig != TorqueTrigger::DISABLED) || (has_lim && TP_MT1_IO_TRIG(seg_flags_));
             if (!triggered && std::isfinite(cruise) && std::isfinite(acc) && std::isfinite(jerk)) {
-                const TpError e = queue_scurve(dist_q16, seg.motion.duration, cruise, acc, jerk, seg.torque,
-                                               pos, is_abs);
+                const TpError e = queue_scurve(dist_q16, seg.motion.duration, cruise_mot, acc_mot, jerk_mot,
+                                               seg.torque, pos, is_abs);
                 if (e != TP_ERR_BAD_PARAM) {
                     return e;                            // Chain posted, or refused whole
                 }
@@ -330,7 +337,7 @@ inline TpError TpProtocol::commit_segment() {
             // are C1 (velocity continuous) but its acceleration steps at
             // both ends and its peak speed is 1.5x the average, which is why
             // the chain above is taken whenever it applies.
-            seg.motion.duration = scurve_duration_us((float)dist_q16 * (1.0f / 65536.0f), cruise, acc);
+            seg.motion.duration = scurve_duration_us((float)dist_q16 * (1.0f / 65536.0f), cruise_mot, acc_mot);
             seg.motion.end_velocity = 0.0f;              // Point-to-point ends at rest
             break;
         }
@@ -354,27 +361,29 @@ inline TpError TpProtocol::commit_segment() {
             // configuration: save it to keep the anchor across a reboot.
             DriveTelemetry t;                            // Live control snapshot
             tp_->drive.read_telemetry(t);
-            const int32_t wire_now = tp_axis_to_wire(config_, t.position_q16);       // Where the master sees us
+            const int32_t out_now = tp_gear_pos_to_wire(*tp_, t.position_q16);      // Motor shaft -> output
+            const int32_t wire_now = tp_axis_to_wire(config_, out_now);             // Where the master sees us
             const int32_t wire_new = is_abs ? seg_pos_q16_ : (wire_now + seg_pos_q16_);  // Where it wants us
             const int32_t signed_new = (config_.axis_inverted != 0u) ? -wire_new : wire_new;  // Undo the direction
-            config_.axis_offset_q16 = signed_new - t.position_q16;                    // reported == wire_new
+            config_.axis_offset_q16 = signed_new - out_now;                         // reported == wire_new
             queued = false;
             break;
         }
         case TP_MT_LIMIT:
             // Adopt the carried limits as the live envelope, like a Motion
-            // Limits write without the persistence.
+            // Limits write without the persistence. The configuration keeps
+            // the wire (output-shaft) values; the live envelope is motor.
             if (have_vel && (vel != 0.0f)) {
                 config_.vel_limit_rps = (vel < 0.0f) ? -vel : vel;
-                tp_->drive.post_f32(DriveReq::VelocityLimit, config_.vel_limit_rps);
+                tp_->drive.post_f32(DriveReq::VelocityLimit, tp_gear_vel_from_wire(*tp_, config_.vel_limit_rps));
             }
             if (has_lim && TP_MT1_IS_ACC(seg_flags_)) {
                 config_.accel_limit = acc;
-                tp_->drive.post_f32(DriveReq::AccelLimit, acc);
+                tp_->drive.post_f32(DriveReq::AccelLimit, tp_gear_acc_from_wire(*tp_, acc));
             }
             if (has_lim && TP_MT1_IS_JRK(seg_flags_)) {
                 config_.jerk_limit = jerk;
-                tp_->drive.post_f32(DriveReq::JerkLimit, jerk);
+                tp_->drive.post_f32(DriveReq::JerkLimit, tp_gear_jerk_from_wire(*tp_, jerk));
             }
             queued = false;
             break;
@@ -423,7 +432,9 @@ inline TpError TpProtocol::apply_setpoint(const TpFrame& f) {
         }
         case TP_CMD_MOTION_TASK_2: {
             // Cyclic synchronous position: the frame IS the position mode.
-            const int32_t pos = tp_axis_from_wire(config_, tp_q24_to_q16(tp_unpack_i48(f.mt2.pos)));
+            // Axis frame first (wire units), then the gearbox down to motor.
+            const int32_t pos = tp_gear_pos_from_wire(*tp_,
+                tp_axis_from_wire(config_, tp_q24_to_q16(tp_unpack_i48(f.mt2.pos))));
             if (control_mode() != TP_MODE_POSITION) {
                 tp_->drive.post_u32(DriveReq::SetMode, TP_MODE_POSITION);
             }
@@ -452,7 +463,7 @@ inline TpError TpProtocol::apply_setpoint(const TpFrame& f) {
                         tp_->drive.post_f32(DriveReq::CurrentLimit, lim);
                     }
                 }
-                const float vel = tp_axis_sign(config_, tp_unpack_f24(vraw));  // Velocity [RPS]
+                const float vel = tp_gear_vel_from_wire(*tp_, tp_axis_sign(config_, tp_unpack_f24(vraw)));  // Motor [RPS]
                 return tp_->drive.post_f32(DriveReq::TargetVel, vel) ? TP_ERR_NONE : TP_ERR_BUSY;
             }
             if (control_mode() != TP_MODE_TORQUE) {
@@ -465,12 +476,12 @@ inline TpError TpProtocol::apply_setpoint(const TpFrame& f) {
             // A lone limits frame adjusts the live acceleration / jerk envelope.
             float v;                                     // Decoded value
             if (tp_take_bf16_pos(f.mt4.accel, v)) {
-                config_.accel_limit = v;
-                tp_->drive.post_f32(DriveReq::AccelLimit, v);
+                config_.accel_limit = v;                 // Stored in wire units
+                tp_->drive.post_f32(DriveReq::AccelLimit, tp_gear_acc_from_wire(*tp_, v));
             }
             if (tp_take_bf16_pos(f.mt4.jerk, v)) {
                 config_.jerk_limit = v;
-                tp_->drive.post_f32(DriveReq::JerkLimit, v);
+                tp_->drive.post_f32(DriveReq::JerkLimit, tp_gear_jerk_from_wire(*tp_, v));
             }
             return TP_ERR_NONE;
         }
@@ -495,7 +506,7 @@ inline TpError TpProtocol::handle_burst(const TpFrame& f) {
     // previous point is stale, so the reference and the clock are taken from
     // the drive again: the queue tail is where the next segment starts.
     if (!burst_primed_ || ((now - burst_last_ms_) > 1000u)) {
-        burst_ref_q16_ = tp_axis_to_wire(config_, t.queue_tail_q16);
+        burst_ref_q16_ = tp_axis_to_wire(config_, tp_gear_pos_to_wire(*tp_, t.queue_tail_q16));
         burst_primed_ = false;
     }
     burst_last_ms_ = now;
@@ -503,11 +514,11 @@ inline TpError TpProtocol::handle_burst(const TpFrame& f) {
     // ---- Position: masked absolute, nearest to the reference ----------------
     const int32_t wire_pos = tp_burst_unmask(tp_burst_pos24(f.b8), burst_ref_q16_);  // Absolute, wire units
     burst_ref_q16_ = wire_pos;                           // Next frame resolves against this one
-    const int32_t pos = tp_axis_from_wire(config_, wire_pos);  // Native absolute target
+    const int32_t pos = tp_gear_pos_from_wire(*tp_, tp_axis_from_wire(config_, wire_pos));  // Motor target
 
     // ---- Velocity ----------------------------------------------------------
     const uint16_t vraw = tp_burst_vel_raw(f.b8);        // bfloat16 velocity
-    const float vel = tp_bf16_is_finite(vraw) ? tp_axis_sign(config_, tp_unpack_bf16(vraw)) : 0.0f;
+    const float vel = tp_bf16_is_finite(vraw) ? tp_gear_vel_from_wire(*tp_, tp_axis_sign(config_, tp_unpack_bf16(vraw))) : 0.0f;
 
     // ---- Duration and torque: the two stream formats ------------------------
     MotionCommandTM seg;                                 // Segment under construction

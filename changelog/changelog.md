@@ -1352,3 +1352,42 @@ FLASH: 74876 bytes (65.29% of 114688 bytes): -612 bytes
 RAM: 12556 bytes (38.32% of 32768 bytes): +0 bytes
 
 
+## 2026-09-17 - Gearbox ratio converter implemented
+**Changes:**
+- New header-only Gearbox class in src/core/math/gearbox.h
+- int16 mul/div ratio with precomputed float ratio and inv_ratio
+- direct/inverse Q32.32 position conversion via precomputed DivMagic16 reciprocals
+- float32 velocity/acceleration/jerk converters
+
+**Reasoning:**
+- Exact integer gear-ratio crossing without float drift or libgcc 64-bit divider
+
+**Notes:**
+- No firmware size impact: header not yet wired into any translation unit
+- overflow wraps by design (uint64 arithmetic)
+
+FLASH: 74876 bytes (65.29% of 114688 bytes): +0 bytes
+RAM: 12556 bytes (38.32% of 32768 bytes): +0 bytes
+
+
+## 2026-09-17 - Gearbox wired into the control path and the API
+**Changes:**
+- Gearbox member in TunePulseHeart
+- ratio applied live on the 0x01/0x02 write and at boot in tp_apply_config
+- every wire position/velocity/accel/jerk crosses the ratio (ext2int on writes, int2ext on reads) in motion tasks, setpoints, bursts, anchor, motion limits and motion status reads
+- set_gearbox/get_gearbox MCP tools
+- wire-format test for the gearbox
+- CAN_PROTOCOL.md updated
+
+**Reasoning:**
+- One consistent output-shaft frame for the master without touching the control loop internals
+
+**Notes:**
+- Flash +1516 B, RAM +48 B
+- backlash stored but not compensated
+- div limited to 1..32767 by the int16 API
+
+FLASH: 76392 bytes (66.61% of 114688 bytes): +1516 bytes
+RAM: 12604 bytes (38.46% of 32768 bytes): +48 bytes
+
+
