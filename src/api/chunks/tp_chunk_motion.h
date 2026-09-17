@@ -106,7 +106,7 @@ static_assert(sizeof(TpSaveConfig) == 8, "TpSaveConfig must fill one frame");
 /** @brief 0xD0 MIDI Control: play one note through the motor coils. */
 struct TP_PACKED TpMidi {
     uint8_t  cmd;        ///< Byte 0: TP_CMD_MIDI.
-    uint8_t  wave_mode;  ///< Byte 1: bits 0-3 TpMidiWaveform, bits 4-7 mode (reserved).
+    uint8_t  wave_mode;  ///< Byte 1: bits 0-3 TpMidiWaveform, bits 4-5 TpMidiEnvelope, bits 6-7 TpMidiEffect.
     uint8_t  tone;       ///< Byte 2: MIDI note number (69 = A4 = 440 Hz); 0 = silence.
     uint8_t  volume;     ///< Byte 3: 0..255 = 0..100 % of the maximum safe amplitude.
     uint16_t duration;   ///< Bytes 4-5: note duration [ms], bfloat16; 0 = until the next command.

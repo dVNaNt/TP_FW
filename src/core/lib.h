@@ -50,7 +50,7 @@
 #include "math/gearbox.h"  // Motor->output gear ratio: every API position/velocity crosses it
 #include "motor_control/calibration/angle_calibrator.h"
 #include "motor_control/current_control/current_control.h"
-#include "math/helpers/buzzer.h"       // MotorSpeaker: coils-as-speaker tone generator
+#include "math/helpers/midi.h"         // MotorSpeaker: coils-as-speaker MIDI synth + envelopes
 #include "motor_control/drive_control.h"  // Runtime control-mode machine + trajectory front end
 #include "motor_control/ripple_map.h"     // Torque-ripple feed-forward map indexed by electrical angle
 #include "pt_control.h"  // P*t overdrive limiter + motor thermal derating
@@ -366,6 +366,10 @@ public:
      * meaningful relative to that rate.
      */
     MotorSpeaker speaker{PWM_TIMER_FREQ_HZ};
+    /// DC bias on the rotor d-axis while the coils sing (Tone mode), as a Q15
+    /// fraction of the bus voltage. 1024 = 3.125 %: roughly 1 V on a 31 V bus,
+    /// ~0.5 A of standing current - enough to pin the field, cheap on copper.
+    static constexpr uint16_t TONE_DC_BIAS_Q15 = 1024u;
     void tick() {
         if (is_running.exchange(true, std::memory_order_acq_rel))  // Single-owner entry: drop the sample if a pass is in progress
             return;
@@ -637,15 +641,33 @@ public:
                             // rail rather than a fixed voltage, so a note keeps
                             // the same loudness as the bus sags, and the same
                             // command is safe on a 12 V and a 48 V bus.
-                            // Full-scale carrier: MotorSpeaker's second argument
-                            // IS the generator amplitude, so passing 0 here
-                            // silences it outright. Loudness is applied below in
-                            // volts instead, which keeps it explicit and
-                            // independent of the class's internal base level.
-                            const Vec2D wave = speaker.tick(cmd.tone_freq_hz, 32767);
-                            const float scale = (cmd.tone_amp_q15 * driver_phy.supply.get_voltage()) / 32768.0f / 32768.0f;
-                            pwm_voltage_ab.a = (float)wave.a * scale;
-                            pwm_voltage_ab.b = (float)wave.b * scale;
+                            // Full-scale carrier per voice: the mailbox payloads
+                            // land in the synth here, one set_voice() per slot
+                            // (amp 0 = silent), then one tick sums up to three
+                            // overlapping notes and saturates once. Each voice's
+                            // amplitude rides inside the i1.15 sum, so the
+                            // conversion to volts is a single bus-voltage scale
+                            // - per-note loudness stays exact without per-voice
+                            // float math.
+                            for (uint8_t vi = 0u; vi < 3u; ++vi) {
+                                speaker.set_voice(vi, cmd.tone_voice[vi].freq_hz,
+                                                  (int16_t)cmd.tone_voice[vi].amp_q15);
+                            }
+                            const Vec2D wave = speaker.tick_poly(cmd.tone_wave);
+                            const float scale = driver_phy.supply.get_voltage() / 32768.0f;
+                            // DC bias on the rotor d-axis: a small constant field
+                            // aligned with the rotor (Vq = 0) keeps the working
+                            // point away from zero current, where bridge dead
+                            // time and the stator's detent notches make the
+                            // drive resonate audibly instead of singing. The
+                            // rotor-aligned frame means the bias adds holding
+                            // stiffness, not torque.
+                            int16_t s_el = 0, c_el = 0;
+                            angle2sincos((int16_t)angle_el_, &s_el, &c_el);
+                            const float bias_v = driver_phy.supply.get_voltage() *
+                                                 (TONE_DC_BIAS_Q15 / 32768.0f) / 32768.0f;
+                            pwm_voltage_ab.a = (float)wave.a * scale + bias_v * (float)c_el;
+                            pwm_voltage_ab.b = (float)wave.b * scale + bias_v * (float)s_el;
                             driver_phy.motor_ctrl.set_voltage_ab_volts(pwm_voltage_ab);
                             last_current_a_ = 0.0f;              // Nothing commanded through FOC
                             // The bridge IS driven here, so this is emphatically

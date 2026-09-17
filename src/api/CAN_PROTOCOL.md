@@ -647,11 +647,17 @@ programming stalls the CPU with whatever vector is latched on the bridge.
 
 ### 7.4 `0xD0` MIDI control
 
-`[1]` waveform:4 (0 sine; others rejected) / mode:4, `[2]` MIDI note (69 = A4;
-0 = silence), `[3]` volume 0–255, `[4..5]` duration bf16 [ms] (0 = until the
-next command), `[6]` attack share 0–255, `[7]` decay share 0–255. Selects TONE
-mode and enables the stage by itself; the note is bounded to 40–2000 Hz and the
-amplitude to a quarter of the bus voltage.
+`[1]` waveform:4 (`0` sine, `1` square, `2` triangle, `3` sawtooth; others
+rejected) / mode:4, `[2]` MIDI note (69 = A4; 0 = silence), `[3]` volume 0–255,
+`[4..5]` duration bf16 [ms] (0 = until the next command), `[6]` attack share
+0–255, `[7]` decay share 0–255. The mode nibble selects the envelope (bits 0-1:
+`0` linear, `1` exponential, `2` percussive, `3` organ) and a note effect
+(bits 2-3: `0` none, `1` tremolo 8 Hz / 25 %, `2` vibrato 6 Hz / ±2 %, `3`
+trill with the whole tone above at 8 Hz). Selects TONE mode and enables the
+stage by itself; the note is bounded to 40–2000 Hz and the amplitude to a
+quarter of the bus voltage. Up to three notes overlap: the synth keeps three
+voices, a note-on takes a free voice (round-robin steal when all three sound)
+and note `0` silences every voice.
 
 ---
 

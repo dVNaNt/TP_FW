@@ -432,6 +432,15 @@ private:
     /** @brief Advance the MIDI envelope and end the note on time. */
     void service_midi(uint32_t now);
 
+    /** @brief Advance one synth voice: envelope, effect, mailbox post. */
+    void service_voice(uint8_t voice, uint32_t now);
+
+    /** @brief Post one voice's freq|amp word (deduplicated per voice). */
+    void post_voice(uint8_t voice, uint16_t freq, uint32_t amp);
+
+    /** @brief Free a voice slot: silence it and mark it stealable. */
+    void silence_voice(uint8_t voice);
+
     /**
      * @brief Adopt a node address: rebind the filters and persist it.
      * @param id      New address (TP_NODE_UNASSIGNED to return to discovery).
@@ -569,15 +578,23 @@ private:
     uint32_t burst_last_ms_ = 0;      ///< When the previous burst frame arrived.
     int32_t  sync_offset_us_ = 0;     ///< Node time = micros() + this, re-based by Bus Settings.
 
-    // ---- MIDI -----------------------------------------------------------
-    bool     midi_active_ = false;  ///< A timed note is playing.
-    uint32_t midi_start_ms_ = 0;    ///< When the note started.
-    uint32_t midi_end_ms_ = 0;      ///< When the note ends (0 = never).
-    uint32_t midi_attack_ms_ = 0;   ///< Attack length.
-    uint32_t midi_decay_ms_ = 0;    ///< Decay length.
-    uint16_t midi_freq_ = 0;        ///< Note frequency [Hz].
-    uint16_t midi_amp_ = 0;         ///< Peak amplitude, Q15.
-    uint16_t midi_last_amp_ = 0;    ///< Amplitude last posted (avoids mailbox churn).
+    // ---- MIDI (up to three overlapping voices) --------------------------
+    static constexpr uint8_t MIDI_VOICES = 3;
+    bool     v_active_[MIDI_VOICES] = {};   ///< A timed note is playing on this voice.
+    uint32_t v_start_ms_[MIDI_VOICES] = {}; ///< When the note started.
+    uint32_t v_end_ms_[MIDI_VOICES] = {};   ///< When the note ends (0 = never).
+    uint32_t v_attack_ms_[MIDI_VOICES] = {};///< Attack length.
+    uint32_t v_decay_ms_[MIDI_VOICES] = {}; ///< Decay length.
+    uint16_t v_freq_[MIDI_VOICES] = {};     ///< Note frequency [Hz].
+    uint16_t v_trill_hz_[MIDI_VOICES] = {}; ///< Whole tone above the note (trill effect).
+    uint16_t v_amp_[MIDI_VOICES] = {};      ///< Peak amplitude, Q15 (fits 14 bits).
+    uint8_t  v_env_[MIDI_VOICES] = {};      ///< Envelope shape, TpMidiEnvelope value.
+    uint8_t  v_fx_[MIDI_VOICES] = {};       ///< Note effect, TpMidiEffect value.
+    uint16_t v_lfo_phase_[MIDI_VOICES] = {};///< Effect LFO phase, 65536 counts = one turn.
+    uint32_t v_lfo_last_ms_[MIDI_VOICES] = {}; ///< millis() of the previous LFO step.
+    uint32_t v_last_post_[MIDI_VOICES] = {};///< Last posted voice word (mailbox dedup).
+    uint8_t  midi_wave_ = 0;                ///< Timbre, TpMidiWaveform value (shared).
+    uint8_t  midi_rr_ = 0;                  ///< Voice-steal round-robin cursor.
 
     // ---- Calibration and lifecycle -------------------------------------
     uint8_t  cal_pending_ = 0;         ///< TP_CAL_* routines still to start (sequenced).

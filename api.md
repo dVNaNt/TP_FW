@@ -333,13 +333,26 @@ Using motor as music instrument or sound indication
 |   Name   |   Type   |  Size  | Description                            |
 | :------: | :------: | :----: | :------------------------------------- |
 |   CMD    |  uint8   | 8 bit  | 0xD0                                   |
-| Waveform |  uint4   | 4 bit  | Sine/Square/Triangle/Sawtooth          |
-|   Mode   |  uint4   | 4 bit  | TBD e.g. decay type etc                |
-|   Tone   |  uint8   | 8 bit  | Base tone                              |
+| Waveform |  uint4   | 4 bit  | `0` Sine, `1` Square, `2` Triangle, `3` Sawtooth |
+|   Mode   |  uint4   | 4 bit  | bits 0-1 Envelope: `0` Linear, `1` Exponential, `2` Percussive, `3` Organ<br/>bits 2-3 Effect: `0` None, `1` Tremolo 8 Hz 25%, `2` Vibrato 6 Hz ±2%, `3` Trill (whole tone above, 8 Hz) |
+|   Tone   |  uint8   | 8 bit  | Base tone (MIDI note, 69 = A4 = 440 Hz), `0` = silence |
 |  Volume  |  uint8   | 8 bit  | Volume, 0…255 as 0…100%                |
-| Duration | bfloat16 | 16 bit | Duration [ms]                          |
+| Duration | bfloat16 | 16 bit | Duration [ms], `0` = until the next command |
 |  Attack  |  uint8   | 8 bit  | Attack duty (0-255) from full duration |
 |  Decay   |  uint8   | 8 bit  | Decay duty (0-255) from full duration  |
+
+Notes are bounded to 40…2000 Hz. The command selects TONE mode and enables the
+output stage by itself. Envelopes: **Linear** uses the attack/decay shares
+as-is; **Exponential** curves both (piano-style); **Percussive** skips the
+attack and decays exponentially over the whole note (pluck); **Organ** holds
+full volume until the note ends. Effects ride one LFO per voice started in
+phase with every note. Up to **three notes may overlap**: the drive keeps
+three synth voices, a note-on takes a free voice and, when all three sound,
+steals the round-robin one; note `0` silences all voices at once.
+
+MIDI file playback (notes + timestamps only; tempo, durations, envelopes and
+all other parameters belong to the application) is specified separately in
+`tools/MIDI_FILE_FORMAT.md` - intentionally outside this protocol document.
 
 ### 0x00…0x3F + 0x80 – 0xBF: Read/Write Registers
 

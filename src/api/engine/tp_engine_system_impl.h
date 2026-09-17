@@ -239,16 +239,19 @@ inline TpError TpProtocol::handle_midi(const TpFrame& f) {
     if (tp_ == nullptr) {
         return TP_ERR_WRONG_STATE;                       // Not bound to a drive
     }
-    if ((f.midi.wave_mode & 0x0Fu) != TP_WAVE_SINE) {
-        return TP_ERR_BAD_PARAM;                         // The generator only produces a sine
+    const uint8_t wave = (uint8_t)(f.midi.wave_mode & 0x0Fu);   // Timbre nibble
+    if (wave > TP_WAVE_SAWTOOTH) {
+        return TP_ERR_BAD_PARAM;                         // Undefined waveform
     }
+    const uint8_t mode = (uint8_t)(f.midi.wave_mode >> 4);      // Envelope + effect nibble
     const uint32_t now = millis();                       // Note start
     if (f.midi.tone == 0u) {
-        // Silence: end the note, leave the mode to the master.
-        midi_active_ = false;
-        midi_freq_ = 0u;
-        midi_last_amp_ = 0u;
-        tp_->drive.post_u32(DriveReq::SetTone, 0u);
+        // Silence: free every voice, leave the mode to the master.
+        for (uint8_t i = 0u; i < MIDI_VOICES; ++i) {
+            if (v_active_[i]) {
+                silence_voice(i);
+            }
+        }
         return TP_ERR_NONE;
     }
     // MIDI note number -> frequency: 440 Hz * 2^((n - 69) / 12), through the
@@ -272,48 +275,168 @@ inline TpError TpProtocol::handle_midi(const TpFrame& f) {
             return TP_ERR_BAD_PARAM;
         }
     }
-    midi_freq_ = (uint16_t)(hz + 0.5f);
-    midi_amp_ = (uint16_t)(((uint32_t)f.midi.volume * MIDI_MAX_AMP_Q15) / 255u);
-    midi_start_ms_ = now;
-    midi_end_ms_ = (duration_ms > 0.0f) ? (now + (uint32_t)duration_ms) : 0u;
-    midi_attack_ms_ = (uint32_t)(duration_ms * (float)f.midi.attack / 255.0f);
-    midi_decay_ms_ = (uint32_t)(duration_ms * (float)f.midi.decay / 255.0f);
-    midi_active_ = true;
-    midi_last_amp_ = 0xFFFFu;                            // Force the first envelope post
+    midi_wave_ = wave;                                   // Timbre shared by every voice
+    // Voice allocation: prefer a free slot; when all three overlap, steal the
+    // round-robin one (oldest-feeling voice, and no allocation ever fails).
+    uint8_t v = MIDI_VOICES;
+    for (uint8_t i = 0u; i < MIDI_VOICES; ++i) {
+        if (!v_active_[i]) {
+            v = i;                                       // First free slot
+            break;
+        }
+    }
+    if (v == MIDI_VOICES) {
+        v = midi_rr_;                                    // All busy: steal round-robin
+        midi_rr_ = (uint8_t)((midi_rr_ + 1u) % MIDI_VOICES);
+    }
+    v_freq_[v] = (uint16_t)(hz + 0.5f);
+    v_amp_[v] = (uint16_t)(((uint32_t)f.midi.volume * MIDI_MAX_AMP_Q15) / 255u);
+    v_env_[v] = (uint8_t)(mode & 0x03u);                 // Envelope shape, bits 0-1
+    v_fx_[v] = (uint8_t)(mode >> 2);                     // Note effect, bits 2-3
+    // Trill partner: the whole tone above the note, clamped to the generator's
+    // ceiling so the alternation can never be refused mid-note.
+    const float trill_hz = hz * 1.0594631f;
+    v_trill_hz_[v] = (trill_hz > 2000.0f) ? 2000u : (uint16_t)(trill_hz + 0.5f);
+    v_start_ms_[v] = now;
+    v_end_ms_[v] = (duration_ms > 0.0f) ? (now + (uint32_t)duration_ms) : 0u;
+    v_attack_ms_[v] = (uint32_t)(duration_ms * (float)f.midi.attack / 255.0f);
+    v_decay_ms_[v] = (uint32_t)(duration_ms * (float)f.midi.decay / 255.0f);
+    v_lfo_phase_[v] = 0u;                                // Every note starts its LFO in phase
+    v_lfo_last_ms_[v] = now;
+    v_active_[v] = true;
+    v_last_post_[v] = 0xFFFFFFFFu;                       // Force the first envelope post
     if (control_mode() != TP_MODE_TONE) {
         tp_->drive.post_u32(DriveReq::SetMode, TP_MODE_TONE);
     }
+    tp_->drive.post_u32(DriveReq::SetToneWave, wave);    // Timbre for the control ISR
     tp_->drive.post_u32(DriveReq::SetEnable, 1u);        // A note needs the bridge
-    service_midi(now);                                   // First envelope sample right away
+    service_voice(v, now);                               // First envelope sample right away
     return TP_ERR_NONE;
 }
 
+inline void TpProtocol::post_voice(uint8_t voice, uint16_t freq, uint32_t amp) {
+    // Mailbox word: bits 30-31 voice, 0-15 pitch [Hz], 16-29 amplitude Q15.
+    // The peak amplitude (8192) fits 14 bits, so the packing never truncates.
+    const uint32_t word = ((uint32_t)voice << 30) | (uint32_t)freq | ((amp & 0x3FFFu) << 16);
+    tp_->drive.post_u32(DriveReq::SetToneVoice, word);
+    v_last_post_[voice] = word;                          // Dedup baseline for this voice
+}
+
+inline void TpProtocol::silence_voice(uint8_t voice) {
+    v_active_[voice] = false;                            // Slot becomes stealable again
+    v_last_post_[voice] = 0xFFFFFFFFu;                   // ... and the next note re-posts
+    if (tp_ != nullptr) {
+        tp_->drive.post_u32(DriveReq::SetToneVoice, (uint32_t)voice << 30);  // freq 0, amp 0
+    }
+}
+
 inline void TpProtocol::service_midi(uint32_t now) {
-    if (!midi_active_ || (tp_ == nullptr)) {
-        return;                                          // Nothing playing
-    }
-    if ((midi_end_ms_ != 0u) && ((int32_t)(now - midi_end_ms_) >= 0)) {
-        midi_active_ = false;                            // Note over: silence, stay in tone mode
-        midi_last_amp_ = 0u;
-        tp_->drive.post_u32(DriveReq::SetTone, 0u);
-        return;
-    }
-    // Linear attack and decay shares of the duration; an untimed note plays
-    // at full amplitude. Amplitude only re-posts when it changes, so a held
-    // note costs the mailbox nothing.
-    uint32_t amp = midi_amp_;                            // Envelope value this pass
-    if (midi_end_ms_ != 0u) {
-        const uint32_t elapsed = now - midi_start_ms_;   // Into the note
-        const uint32_t remaining = midi_end_ms_ - now;   // Until its end
-        if ((midi_attack_ms_ != 0u) && (elapsed < midi_attack_ms_)) {
-            amp = (midi_amp_ * elapsed) / midi_attack_ms_;
-        } else if ((midi_decay_ms_ != 0u) && (remaining < midi_decay_ms_)) {
-            amp = (midi_amp_ * remaining) / midi_decay_ms_;
+    // Independent voices: each keeps its own envelope, effect LFO and mailbox
+    // dedup, so overlapping notes fade out on their own schedules.
+    for (uint8_t i = 0u; i < MIDI_VOICES; ++i) {
+        if (v_active_[i]) {
+            service_voice(i, now);
         }
     }
-    if ((uint16_t)amp != midi_last_amp_) {
-        midi_last_amp_ = (uint16_t)amp;
-        tp_->drive.post_u32(DriveReq::SetTone, (uint32_t)midi_freq_ | (amp << 16));
+}
+
+inline void TpProtocol::service_voice(uint8_t voice, uint32_t now) {
+    if (tp_ == nullptr) {
+        return;                                          // Not bound to a drive
+    }
+    if ((v_end_ms_[voice] != 0u) && ((int32_t)(now - v_end_ms_[voice]) >= 0)) {
+        silence_voice(voice);                            // Voice over: slot free, mode untouched
+        return;
+    }
+    // ------------------------------------------------------------------
+    // Envelope. Every shape is evaluated thread-side from the wall clock;
+    // the curved ones run on the LUT-based fixed-point exp2 (midi.h) - no
+    // float and no per-sample mailbox traffic.
+    // ------------------------------------------------------------------
+    uint32_t amp = v_amp_[voice];                        // Envelope value this pass
+    if (v_end_ms_[voice] != 0u) {
+        const uint32_t elapsed = now - v_start_ms_[voice];   // Into the note
+        const uint32_t remaining = v_end_ms_[voice] - now;   // Until its end
+        switch (v_env_[voice]) {
+            case TP_MIDI_ENV_LINEAR: {
+                // Straight attack and decay shares of the duration.
+                if ((v_attack_ms_[voice] != 0u) && (elapsed < v_attack_ms_[voice])) {
+                    amp = (v_amp_[voice] * elapsed) / v_attack_ms_[voice];
+                } else if ((v_decay_ms_[voice] != 0u) && (remaining < v_decay_ms_[voice])) {
+                    amp = (v_amp_[voice] * remaining) / v_decay_ms_[voice];
+                }
+                break;
+            }
+            case TP_MIDI_ENV_EXPONENTIAL: {
+                // Curved rise and fall: amp = peak * (1 - 2^(-4 t/att)) on the
+                // attack, amp = peak * 2^(-4 (1 - rem/dec)) on the decay - the
+                // classic piano-style contour. Arguments are Q4.8 into
+                // midi_exp2_neg_q15(): one LUT walk and one shift per sample.
+                if ((v_attack_ms_[voice] != 0u) && (elapsed < v_attack_ms_[voice])) {
+                    const uint32_t y = ((elapsed << 10) / v_attack_ms_[voice]) + 1u;
+                    amp = v_amp_[voice] - (uint32_t)(((uint32_t)v_amp_[voice] *
+                          (uint32_t)midi_exp2_neg_q15(y)) >> 15);
+                } else if ((v_decay_ms_[voice] != 0u) && (remaining < v_decay_ms_[voice])) {
+                    const uint32_t y = 1024u - ((remaining << 10) / v_decay_ms_[voice]);
+                    amp = ((uint32_t)v_amp_[voice] * (uint32_t)midi_exp2_neg_q15(y)) >> 15;
+                }
+                break;
+            }
+            case TP_MIDI_ENV_PERCUSSIVE: {
+                // Percussion: no attack ramp at all, the whole note is one
+                // exponential fall of six octaves (pluck / piano key-off).
+                const uint32_t dur = v_end_ms_[voice] - v_start_ms_[voice];
+                if (dur != 0u) {
+                    uint32_t y = (elapsed * 1536u) / dur;  // Six octaves across the note, Q4.8
+                    if (y > 2048u) {
+                        y = 2048u;                       // Saturate: past -8 octaves the LUT reads 0
+                    }
+                    amp = ((uint32_t)v_amp_[voice] * (uint32_t)midi_exp2_neg_q15(y)) >> 15;
+                }
+                break;
+            }
+            case TP_MIDI_ENV_ORGAN:
+            default: {
+                break;                                   // Flat: full volume until the note is cut
+            }
+        }
+    }
+    // ------------------------------------------------------------------
+    // Effect. One LFO per voice, advanced from the millis() delta so the
+    // modulation rate is wall-clock true however often poll() happens to run.
+    // ------------------------------------------------------------------
+    uint32_t freq = v_freq_[voice];                      // Pitch this pass
+    if (v_fx_[voice] != TP_MIDI_FX_NONE) {
+        const uint32_t dt = now - v_lfo_last_ms_[voice]; // Since the previous service pass
+        v_lfo_last_ms_[voice] = now;
+        v_lfo_phase_[voice] += (uint16_t)((v_fx_[voice] == TP_MIDI_FX_VIBRATO)
+                                          ? (dt * MIDI_LFO_STEP_6HZ) : (dt * MIDI_LFO_STEP_8HZ));
+        const int16_t lfo = midi_sine_q15(v_lfo_phase_[voice]);   // LUT sine in i1.15
+        switch (v_fx_[voice]) {
+            case TP_MIDI_FX_TREMOLO:
+                // 25 % amplitude depth around 75 % loudness: f = 0.75 + 0.25 sin.
+                amp = (amp * (uint32_t)(24576 + ((8192 * lfo) >> 15))) >> 15;
+                break;
+            case TP_MIDI_FX_VIBRATO:
+                // +/-2 % pitch modulation: f = 1 + 0.02 sin. The combined
+                // post below deduplicates, so quiet LFO phases cost nothing.
+                freq = (v_freq_[voice] * (uint32_t)(32768 + ((655 * lfo) >> 15))) >> 15;
+                break;
+            case TP_MIDI_FX_TRILL:
+                // Hard alternation with the whole tone above at the LFO rate.
+                freq = (lfo >= 0) ? v_freq_[voice] : v_trill_hz_[voice];
+                break;
+            case TP_MIDI_FX_NONE:
+            default:
+                break;                                   // Unreachable: guarded above
+        }
+    }
+    // A held voice only re-posts when its own combined freq|amp word changes,
+    // so a static envelope costs the mailbox nothing.
+    const uint32_t word = ((uint32_t)voice << 30) | freq | ((amp & 0x3FFFu) << 16);
+    if (word != v_last_post_[voice]) {
+        tp_->drive.post_u32(DriveReq::SetToneVoice, word);
+        v_last_post_[voice] = word;
     }
 }
 

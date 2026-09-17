@@ -240,12 +240,28 @@ static inline uint8_t tp_io_slot_function(uint8_t slot) {
     return (slot <= TP_IO_BRAKE) ? slot : (uint8_t)(TP_IO_PROBE_1 + (slot - 9u));
 }
 
-/** Waveforms of the MIDI control command (only the sine is implemented). */
+/** Waveforms of the MIDI control command (0xD0, low nibble of byte 1). */
 enum TpMidiWaveform : uint8_t {
-    TP_WAVE_SINE     = 0x0u,  ///< Sine (the only waveform the tone generator produces).
-    TP_WAVE_SQUARE   = 0x1u,  ///< Square (rejected).
-    TP_WAVE_TRIANGLE = 0x2u,  ///< Triangle (rejected).
-    TP_WAVE_SAWTOOTH = 0x3u   ///< Sawtooth (rejected).
+    TP_WAVE_SINE     = 0x0u,  ///< Sine (the polar-rotation oscillator's native output).
+    TP_WAVE_SQUARE   = 0x1u,  ///< Square: bang-bang sign of the phase.
+    TP_WAVE_TRIANGLE = 0x2u,  ///< Triangle: piecewise-linear, sine-aligned.
+    TP_WAVE_SAWTOOTH = 0x3u   ///< Sawtooth: full-range ramp.
+};
+
+/** Envelope shapes of the MIDI control command (0xD0 Mode nibble, bits 0-1). */
+enum TpMidiEnvelope : uint8_t {
+    TP_MIDI_ENV_LINEAR     = 0x0u,  ///< Linear attack / decay shares of the duration.
+    TP_MIDI_ENV_EXPONENTIAL= 0x1u,  ///< Curved (exponential) attack and decay, piano-like.
+    TP_MIDI_ENV_PERCUSSIVE = 0x2u,  ///< Instant attack, exponential decay over the whole note.
+    TP_MIDI_ENV_ORGAN      = 0x3u   ///< Flat envelope: full volume until the note ends.
+};
+
+/** Note effects of the MIDI control command (0xD0 Mode nibble, bits 2-3). */
+enum TpMidiEffect : uint8_t {
+    TP_MIDI_FX_NONE    = 0x0u,  ///< Plain note.
+    TP_MIDI_FX_TREMOLO = 0x1u,  ///< Amplitude modulation, 8 Hz, 25 % depth.
+    TP_MIDI_FX_VIBRATO = 0x2u,  ///< Pitch modulation, 6 Hz, +/-2 %.
+    TP_MIDI_FX_TRILL   = 0x3u   ///< Alternation with the whole tone above, 8 Hz.
 };
 
 /** Flag bits of a cyclic telemetry slot. */

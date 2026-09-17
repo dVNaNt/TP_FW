@@ -94,6 +94,12 @@ enum class DriveAction : uint8_t {
     Tone        = 4   ///< Drive the alpha-beta vector from the tone generator.
 };
 
+/** @brief One MIDI synth voice: pitch and envelope amplitude. */
+struct DriveVoice {
+    uint16_t freq_hz;    ///< Voice pitch [Hz]; 0 = silent slot.
+    uint16_t amp_q15;    ///< Voice amplitude, Q15 fraction of bus volts.
+};
+
 /** @brief Resolved control targets produced by one DriveControl::tick() pass. */
 struct DriveOutput {
     DriveAction action;          ///< What the control loop should do this pass.
@@ -101,8 +107,8 @@ struct DriveOutput {
     float       target_vel_rps;  ///< Velocity target / damper reference [RPS].
     float       max_current_a;   ///< Current envelope for this pass [A].
     float       torque_target_a; ///< Direct q-axis current target [A] (RunTorque only).
-    uint16_t    tone_freq_hz;    ///< Tone frequency [Hz] (Tone only; 0 = silent).
-    uint16_t    tone_amp_q15;    ///< Tone amplitude, Q15 fraction of bus volts (Tone only).
+    DriveVoice  tone_voice[3];   ///< Up to three overlapping synth voices (Tone only).
+    uint8_t     tone_wave;       ///< Tone waveform, TpMidiWaveform value (Tone only).
 };
 
 /** @brief Snapshot of the control state published by the ISR for telemetry. */
@@ -151,7 +157,9 @@ enum class DriveReq : uint8_t {
     TimeScale,       ///< i32 = playback rate, Q10 (1024 = 1.0x).
     SetSafeState,    ///< u32 = DriveSafeState value.
     ArmWatchdog,     ///< u32 = reload value in control ticks (0 disables).
-    SetTone          ///< u32 = frequency [Hz] in bits 0-15, Q15 amplitude in bits 16-31.
+    SetTone,         ///< u32 = frequency [Hz] in bits 0-15, Q15 amplitude in bits 16-31 (voice 0).
+    SetToneWave,     ///< u32 = waveform, a TpMidiWaveform value (0 sine .. 3 sawtooth).
+    SetToneVoice     ///< u32 = voice in bits 30-31, pitch in 0-15, Q15 amp (14 bits) in 16-29.
 };
 
 /**
@@ -221,11 +229,11 @@ public:
      * @param req Fully populated request.
      * @return true when the command was accepted.
      */
-    /** @brief Tone frequency currently commanded [Hz]. */
-    uint16_t tone_freq() const { return tone_freq_hz_; }
+    /** @brief Voice 0 frequency currently commanded [Hz]. */
+    uint16_t tone_freq() const { return tone_voices_[0].freq_hz; }
 
-    /** @brief Tone amplitude currently commanded, Q15 fraction of bus volts. */
-    uint16_t tone_amp() const { return tone_amp_q15_; }
+    /** @brief Voice 0 amplitude currently commanded, Q15 fraction of bus volts. */
+    uint16_t tone_amp() const { return tone_voices_[0].amp_q15; }
 
     bool post(const DriveRequest& req) {
         const uint32_t next = (req_w_ + 1u) & REQ_MASK;  // Slot after the one being filled
@@ -386,8 +394,10 @@ public:
         out.target_vel_rps = 0.0f;                            // Default: no velocity feed-forward
         out.max_current_a = current_limit_a_;                 // Default: full configured envelope
         out.torque_target_a = 0.0f;                           // Default: no direct torque command
-        out.tone_freq_hz = 0u;                                // Default: silent
-        out.tone_amp_q15 = 0u;                                // Default: silent
+        out.tone_voice[0] = {0u, 0u};                         // Default: every voice silent
+        out.tone_voice[1] = {0u, 0u};
+        out.tone_voice[2] = {0u, 0u};
+        out.tone_wave = 0u;                                   // Default: sine
 
         // ---- NVM programming window --------------------------------------
         // The caller owns a de-energized window and will publish it to the
@@ -444,8 +454,10 @@ public:
                 exec_.update_real_pos(target_pos_q32_);
                 out.action = DriveAction::Tone;
                 out.target_pos_q16 = measured_pos_q16;
-                out.tone_freq_hz = tone_freq_hz_;
-                out.tone_amp_q15 = tone_amp_q15_;
+                for (uint8_t i = 0u; i < 3u; ++i) {
+                    out.tone_voice[i] = tone_voices_[i];      // Whole synth, up to 3 voices
+                }
+                out.tone_wave = tone_wave_;
                 break;
             }
             case DriveMode::Torque: {
@@ -580,10 +592,31 @@ private:
     void apply(const DriveRequest& r) {
         switch (r.op) {
             case DriveReq::SetTone: {
-                // Frequency and amplitude travel together so a note change is
-                // one mailbox slot and can never be torn across two passes.
-                tone_freq_hz_ = (uint16_t)(r.arg.u32 & 0xFFFFu);
-                tone_amp_q15_ = (uint16_t)(r.arg.u32 >> 16);
+                // Legacy single-voice entry (kept for the calibration tone):
+                // voice 0 takes the note, the overlap slots are cleared so a
+                // plain tone always replaces everything sounding.
+                tone_voices_[0].freq_hz = (uint16_t)(r.arg.u32 & 0xFFFFu);
+                tone_voices_[0].amp_q15 = (uint16_t)(r.arg.u32 >> 16);
+                tone_voices_[1] = {0u, 0u};
+                tone_voices_[2] = {0u, 0u};
+                break;
+            }
+            case DriveReq::SetToneWave: {
+                // Timbre of the note (0 sine .. 3 sawtooth); values above 3 are
+                // rejected by the protocol layer, but clamp here as well so a
+                // stray mailbox write can never select an undefined shape.
+                tone_wave_ = (uint8_t)((r.arg.u32 <= 3u) ? r.arg.u32 : 0u);
+                break;
+            }
+            case DriveReq::SetToneVoice: {
+                // Packed polyphony: bits 30-31 voice, 0-15 pitch [Hz], 16-29
+                // amplitude Q15 (peak 8192 needs 14 bits). A zero pitch or a
+                // zero amplitude frees the slot for the next note.
+                const uint8_t v = (uint8_t)(r.arg.u32 >> 30);
+                if (v < 3u) {
+                    tone_voices_[v].freq_hz = (uint16_t)(r.arg.u32 & 0xFFFFu);
+                    tone_voices_[v].amp_q15 = (uint16_t)((r.arg.u32 >> 16) & 0x3FFFu);
+                }
                 break;
             }
             case DriveReq::SetMode: {
@@ -706,7 +739,10 @@ private:
                 break;
             case DriveMode::Torque:
                 target_current_a_ = 0.0f;   // Never inherit a torque command across a mode switch
-                tone_freq_hz_ = 0u;         // ... nor a note that would keep the coils singing
+                tone_voices_[0] = {0u, 0u}; // ... nor notes that would keep the coils singing
+                tone_voices_[1] = {0u, 0u};
+                tone_voices_[2] = {0u, 0u};
+                tone_wave_ = 0u;            // ... nor their timbre
                 break;
             case DriveMode::Position:
             case DriveMode::Disabled:
@@ -936,8 +972,8 @@ private:
     float   target_vel_rps_ = 0.0f;     ///< Requested velocity [RPS].
     float   active_vel_rps_ = 0.0f;     ///< Velocity actually being tracked after the ramp [RPS].
     float   target_current_a_ = 0.0f;   ///< Direct q-axis current command [A].
-    uint16_t tone_freq_hz_ = 0u;        ///< Tone frequency [Hz]; 0 is silence.
-    uint16_t tone_amp_q15_ = 0u;        ///< Tone amplitude, Q15 fraction of bus volts.
+    DriveVoice tone_voices_[3] = {};    ///< Synth voices (Tone mode); freq 0 = silent.
+    uint8_t  tone_wave_ = 0u;           ///< Tone waveform, a TpMidiWaveform value.
 
     float current_limit_a_ = 1.0f;      ///< Current envelope [A].
     float vel_limit_rps_ = 50.0f;       ///< Velocity envelope [RPS].

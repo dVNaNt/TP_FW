@@ -1667,10 +1667,15 @@ TONE_MAX_HZ = 2000      # ... and higher ones
 MIN_EVENT_S = 0.02      # Changes closer together than this are not separately audible
 
 
-def midi_frame(note, volume=128, duration_ms=0.0, attack=0, decay=0):
-    """Pack a MIDI Control frame."""
-    return bytes([CMD["midi"], 0, note & 0x7F, volume & 0xFF]) + struct.pack("<H", float_to_bf16(duration_ms)) + \
-        bytes([attack & 0xFF, decay & 0xFF])
+WAVEFORMS = {"sine": 0, "square": 1, "triangle": 2, "sawtooth": 3}
+ENVELOPES = {"linear": 0, "exponential": 1, "percussive": 2, "organ": 3}
+EFFECTS = {"none": 0, "tremolo": 1, "vibrato": 2, "trill": 3}
+
+
+def midi_frame(note, volume=128, duration_ms=0.0, attack=0, decay=0, wave=0, mode=0):
+    """Pack a MIDI Control frame. wave = TpMidiWaveform, mode = envelope | effect<<2."""
+    return bytes([CMD["midi"], (wave & 0x0F) | ((mode & 0x0F) << 4), note & 0x7F, volume & 0xFF]) + \
+        struct.pack("<H", float_to_bf16(duration_ms)) + bytes([attack & 0xFF, decay & 0xFF])
 
 
 def emit(schedule, t, note):
@@ -1848,7 +1853,14 @@ def cmd_music_stop(link, args):
 
 def cmd_tone(link, args):
     """Play one note (MIDI number) for a duration, or 0 to stop."""
-    reply = link.request(args.node, midi_frame(args.note, args.volume, args.duration_ms))
+    # --mode accepts an envelope, an effect, or "envelope/effect".
+    env_name, _, fx_name = args.mode.partition("/")
+    mode = ENVELOPES.get(env_name.strip().lower(), 0)
+    if fx_name:
+        mode |= EFFECTS.get(fx_name.strip().lower(), 0) << 2
+    reply = link.request(args.node, midi_frame(args.note, args.volume, args.duration_ms,
+                                               args.attack, args.decay,
+                                               WAVEFORMS.get(str(args.wave).lower(), args.wave), mode))
     return 0 if expect_ok(reply, "tone") else 1
 
 
@@ -2025,6 +2037,11 @@ def main():
     s.add_argument("note", type=int, help="MIDI note number (69 = A4); 0 stops")
     s.add_argument("--volume", type=int, default=128)
     s.add_argument("--duration-ms", type=float, default=0.0)
+    s.add_argument("--attack", type=int, default=0, help="attack share 0-255 of the duration")
+    s.add_argument("--decay", type=int, default=0, help="decay share 0-255 of the duration")
+    s.add_argument("--wave", default="sine", help="sine | square | triangle | sawtooth")
+    s.add_argument("--mode", default="none",
+                   help="envelope[/effect]: linear|exponential|percussive|organ + none|tremolo|vibrato|trill")
     s.set_defaults(fn=cmd_tone)
 
     s = sub.add_parser("music", help="play the opening of a MIDI file through the motor coils")

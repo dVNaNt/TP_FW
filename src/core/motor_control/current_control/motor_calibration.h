@@ -20,7 +20,7 @@
 #include <cmath>  // For sqrtf and fabsf
 #include "../../common.h"
 #include "../../phy/pwm_driver/driver_pwm.h"
-#include "../../math/helpers/buzzer.h"
+#include "../../math/helpers/midi.h"
 #include "../../math/helpers/frequency_generator.h"  // Frequency generator for HFI
 #include "../../math/helpers/stability_check.h"      // Stability check for current monitoring
 #include "../../math/helpers/timeout_timer.h"        // Timeout timer for countdown operations
