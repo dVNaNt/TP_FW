@@ -1311,3 +1311,44 @@ FLASH: 75488 bytes (65.82% of 114688 bytes): +280 bytes
 RAM: 12556 bytes (38.32% of 32768 bytes): +648 bytes
 
 
+## 2026-09-16 - Exact int64 / int16 division without the 64-bit library divider (core/math/div64.h)
+**Changes:**
+- DivMagic16: precomputed 65-bit reciprocal of an invariant int16 divisor (four UDIVs in set(), no 64-bit divide), div() is one 64x64->128 high multiply plus fix-up and shift, exact for every int64 by Granlund-Montgomery
+- constexpr, so a constant divisor folds to two literal words and an immediate shift
+- div64_16(): base-2^16 schoolbook with three UDIVs for a divisor that changes every call, no setup
+- both truncate toward zero, always_inline, |d| handled as uint32 so INT16_MIN works
+
+**Reasoning:**
+- GCC 12 emits __aeabi_ldivmod for int64 / int16 even when the divisor is a compile-time constant, and the linked __udivmoddi4 is a 698 B shift-subtract loop of a few hundred cycles
+- the hot path needs ~30-40 cycles and deterministic timing
+
+**Notes:**
+- Host test: 65.7M cases (every divisor with dividends around multiples and powers of two, 20M random log-uniform, the constexpr path), 0 failures
+- Cortex-M4 -Os codegen: constant divisor 30 instructions (4 UMULL, immediate shift), invariant divisor 36 plus three struct loads, UDIV variant 19 with 3 UDIV + 2 MLS
+- header not yet included by any code, sizes unchanged
+- the one remaining library divide is ~0ULL / duration_us in hermite_interpolator.h prepare(), a 64/32 reciprocal this header does not cover
+
+FLASH: 75488 bytes (65.82% of 114688 bytes): +0 bytes
+RAM: 12556 bytes (38.32% of 32768 bytes): +0 bytes
+
+
+## 2026-09-16 - Hermite reciprocal via udiv64_32(): the image's last 64-bit division and libgcc's __udivmoddi4 are gone
+**Changes:**
+- udiv64_32() added to core/math/div64.h: high word by one UDIV, then Knuth Algorithm D in base 2^16 (Hacker's Delight divlu) for the 64/32->32 remainder step, three UDIVs total, exact
+- HermiteInterpolator::prepare() computes inv_T_u64_ = udiv64_32(~0ULL, duration_us) instead of ~0ULL / duration_us
+- div64.h header text covers the third routine and its d == 0 behaviour
+
+**Reasoning:**
+- ~0ULL / duration_us in prepare() was the only 64-bit division in the image and pulled __aeabi_uldivmod + __udivmoddi4 (698 B shift-subtract loop, a few hundred cycles at every segment boundary inside the control ISR)
+- the divisor is a full 32-bit microsecond duration, so the int16 routines did not apply
+
+**Notes:**
+- Host test: 69.4M cases against native division (every duration below 2^24 us, the whole 32-bit range at stride 1021, edge divisors x dividends near 2^k and multiples, 50M random), 0 failures
+- release image links no __aeabi_*div* symbol at all now, enter_segment carries three UDIVs
+- cln17_v3_dev 87576 B flash (-612 B), 24868 B RAM
+- not yet bench-tested on a moving segment
+
+FLASH: 74876 bytes (65.29% of 114688 bytes): -612 bytes
+RAM: 12556 bytes (38.32% of 32768 bytes): +0 bytes
+
+

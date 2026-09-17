@@ -19,6 +19,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "../div64.h"   // udiv64_32(): 64/32 reciprocal without the libgcc 64-bit divider
+
 /**
  * @class HermiteInterpolator
  * @brief A high-performance Cubic Hermite Spline Interpolator optimized for ARM Cortex-M4F (STM32G4).
@@ -137,10 +139,12 @@ public:
         v_fac_ = inv_sc * (500000.0f / float(duration_us));
 
         // Compute high-precision 64-bit inverse time factor to replace division with multiplication during runtime evaluation.
+        // udiv64_32() is three hardware UDIVs (~80 cycles); the plain `~0ULL / duration_us`
+        // was the image's only 64-bit division and linked libgcc's 700 B shift-subtract loop.
         if (duration_us <= 1) {
             inv_T_u64_ = ~0ULL;
         } else {
-            inv_T_u64_ = ~0ULL / duration_us;
+            inv_T_u64_ = udiv64_32(~0ULL, duration_us);
         }
     }
 

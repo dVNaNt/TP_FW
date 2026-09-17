@@ -203,13 +203,6 @@ flash must run inside this window, or the rotor gets yanked against a frozen vec
 ### Layout
 
 - `src/core/` — algorithms, header-only, hardware-agnostic
-  - `phy/pwm_driver/` — `DriverPWM`, current sense, supply voltage, temperature, power/OP limits
-  - `phy/encoder_phy/`, `phy/flash_eeprom.h` — encoder interface, EEPROM emulation
-  - `motor_control/` — motor params, angle calibration + table, current control (`foc-current.h`, HFI),
-    `drive_control.h` (control-mode machine + command mailbox + trajectory front end)
-  - `math/` — `filters/` (EMA, median3, PLL), `motion/` (S-curve, Hermite, executor, governor,
-    observer), `helpers/`, `trigonometry.h`, `crc.h` (CRC-8/16/32, software + optional hardware
-    stream)
 - `src/bsp/` — board support, split three ways by what a thing actually depends on:
   - `stm32g4/` — peripheral drivers shared by every board on this MCU family: `cordic.h`, `crc.h`,
     `tim1_pwm.h`, `bootloader.h`, `nvm_flash.h`, `comp_dac.h`, `fdcan.h`. They take their
@@ -327,8 +320,6 @@ banner and heartbeat, the board's `irq_log()`) must sit inside `#ifdef DEV_LOG_E
 
 ## Code Style
 
-Clang-format: Chromium base, 130-char columns, 4-space indent, `AccessModifierOffset: -4`.
-
 - **Every file starts with a Doxygen header** containing `@file`, `@brief`, a detailed description of
   what it does and why, then `Copyright 2026, creapunk` / `Licensed under the Apache License, Version 2.0`.
 - **Comment every line**, in English. Translate any non-English comments you encounter while editing.
@@ -341,8 +332,8 @@ Clang-format: Chromium base, 130-char columns, 4-space indent, `AccessModifierOf
   (`__FPU_PRESENT=1`) and floats are used in the driver layer, but hot paths should stay integer.
 - Do not create README or other doc files unless explicitly asked.
 
-Note: `.kiro/steering/tech.md` carries the original long-form version of these rules but is
-gitignored, so it may be absent in a fresh clone — the above is the authoritative copy.
+Note: `.llm/tech.md` carries the original long-form version of these rules — the above is the
+authoritative copy.
 
 ## Git Workflow
 
