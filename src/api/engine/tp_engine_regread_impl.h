@@ -26,16 +26,49 @@
 
 #include "../tp_engine.h"  // class TpProtocol - the declarations these bodies define
 
-/** @brief Apply the axis offset and direction to a native position for the wire. */
-static inline int32_t tp_axis_to_wire(const TpNodeConfig& c, int32_t pos_q16) {
-    const int32_t shifted = pos_q16 + c.axis_offset_q16;  // Work-field zero
-    return (c.axis_inverted != 0u) ? -shifted : shifted;   // Configured direction
+/** @brief Convert native position q1.15.16 directly to wire q24 in 64-bit domain without 16-bit saturation. */
+static inline int64_t tp_axis_to_wire_q24(const TpNodeConfig& c, int32_t pos_q16) {
+    // Promote native q16 to 64-bit domain and apply axis offset
+    const int64_t shifted_q16 = (int64_t)pos_q16 + c.axis_offset_q16;
+    // Shift left to wire q24 before gearbox scaling to preserve precision
+    int64_t wire_q24 = shifted_q16 << 8;
+    if (c.gear_ratio_div != 0u && c.gear_ratio_mul != 0) {
+        wire_q24 = (wire_q24 * (int64_t)c.gear_ratio_mul) / (int64_t)c.gear_ratio_div;
+    }
+    return (c.axis_inverted != 0u) ? -wire_q24 : wire_q24;
 }
 
-/** @brief Undo the axis offset and direction of a wire position (absolute). */
-static inline int32_t tp_axis_from_wire(const TpNodeConfig& c, int32_t pos_q16) {
-    const int32_t raw = (c.axis_inverted != 0u) ? -pos_q16 : pos_q16;  // Configured direction
-    return raw - c.axis_offset_q16;                                    // Encoder zero
+/** @brief Legacy q16 position helper for internal subsystem checks. */
+static inline int32_t tp_axis_to_wire(const TpNodeConfig& c, int32_t pos_q16) {
+    const int64_t w24 = tp_axis_to_wire_q24(c, pos_q16);
+    return (int32_t)(w24 >> 8);
+}
+
+/** @brief Convert native velocity/accel to wire output frame. */
+static inline float tp_axis_to_wire(const TpNodeConfig& c, float v) {
+    float scaled = v;
+    if (c.gear_ratio_div != 0u && c.gear_ratio_mul != 0) {
+        scaled = (v * (float)c.gear_ratio_mul) / (float)c.gear_ratio_div;
+    }
+    return (c.axis_inverted != 0u) ? -scaled : scaled;
+}
+
+/** @brief Convert wire velocity/accel to native motor frame. */
+static inline float tp_axis_from_wire(const TpNodeConfig& c, float v) {
+    float unscaled = v;
+    if (c.gear_ratio_mul != 0 && c.gear_ratio_div != 0u) {
+        unscaled = (v * (float)c.gear_ratio_div) / (float)c.gear_ratio_mul;
+    }
+    return (c.axis_inverted != 0u) ? -unscaled : unscaled;
+}
+
+/** @brief Convert wire position q16 back to native axis rotor position q16. */
+static inline int32_t tp_axis_from_wire(const TpNodeConfig& c, int32_t wire_q16) {
+    int64_t w = (c.axis_inverted != 0u) ? -(int64_t)wire_q16 : (int64_t)wire_q16;
+    if (c.gear_ratio_mul != 0 && c.gear_ratio_div != 0u) {
+        w = (w * (int64_t)c.gear_ratio_div) / (int64_t)c.gear_ratio_mul;
+    }
+    return (int32_t)(w - c.axis_offset_q16);
 }
 
 /** @brief Apply the axis direction to a displacement or velocity (no offset). */
@@ -187,8 +220,6 @@ inline TpError TpProtocol::read_register(uint8_t cmd, uint8_t sub, const TpFrame
             rsp.currents.sub = sub;
             rsp.currents.supply = tp_pack_bf16(tp_->driver_phy.power.get_supply_current_usage_a());
             if (sub == TP_SUB_CURRENTS_DQ) {
-                // The q current is measured in the FOC frame; the master sees
-                // it in encoder units, the same sign as the torque it commands.
                 rsp.currents.first = tp_pack_bf16(tp_->torque_sign() * tp_->current_driver.current_dq.torque);
                 rsp.currents.second = tp_pack_bf16(tp_->current_driver.current_dq.flux);
                 return TP_ERR_NONE;
@@ -352,9 +383,6 @@ inline TpError TpProtocol::read_status(uint8_t cmd, TpFrame& rsp) {
             if (perr < -0x800000) {
                 perr = -0x800000;                                        // Saturate the 24-bit field
             }
-            // A frozen observer must not be reported as a velocity error: with
-            // the bridge released the last value the loop computed says
-            // nothing about the coasting rotor.
             const float verr = live ? (tp_->position_controller.getEstimatedVelocityRevS() - t.target_vel_rps) : 0.0f;
             tp_pack_i24(rsp.motion1.pos_err, (int32_t)tp_axis_sign(config_, (float)perr));
             rsp.motion1.vel_err = tp_pack_bf16(tp_axis_sign(config_, verr));
@@ -364,7 +392,8 @@ inline TpError TpProtocol::read_status(uint8_t cmd, TpFrame& rsp) {
 
         case TP_REG_MOTION_STATUS_2:
             rsp.motion2.motion_mode = t.motion_mode;
-            tp_pack_i48(rsp.motion2.position, tp_q16_to_q24(tp_axis_to_wire(config_, t.position_q16)));
+            // Pack position directly from 64-bit q24 domain without q16 clamp
+            tp_pack_i48(rsp.motion2.position, tp_axis_to_wire_q24(config_, t.position_q16));
             return TP_ERR_NONE;
 
         case TP_REG_MOTION_STATUS_3: {
@@ -380,7 +409,6 @@ inline TpError TpProtocol::read_status(uint8_t cmd, TpFrame& rsp) {
             return TP_ERR_NOT_IMPLEMENTED;                               // No sensorless homing yet
 
         case TP_REG_ENCODER_POSITION: {
-            // q1.23.32: the turn count above the raw 32-bit single-turn word.
             const int64_t raw = ((int64_t)tp_->encoder.get_rotations() << 32) | (int64_t)tp_->encoder.get_angle();
             tp_pack_i56(rsp.position56.value, raw);
             return TP_ERR_NONE;
@@ -412,23 +440,14 @@ inline TpError TpProtocol::read_diag(uint8_t sub, TpFrame& rsp) {
             return TP_ERR_NONE;
 
         case TP_SUB_DIAG_CALIBRATION: {
-            // The identification's own stage word: Motor::status_ is only
-            // driven through NotCalibrated by the boot sequence, so a runtime
-            // run would otherwise read "done, 100 %" from its first millisecond.
             const MotorStatus ms = tp_->current_driver.get_motor_calibration_status();
             const int32_t poles = tp_->motor_params.get_pole_pairs();      // Counted pole pairs
             const uint8_t running = calibration_running();
             rsp.diag_calib.running = running;
             if ((running & TP_CAL_ELECTRICAL) != 0u) {
-                // The identification walks a known sequence of MotorStatus
-                // values, so the stage number doubles as a coarse progress bar.
                 rsp.diag_calib.stage = (uint8_t)ms;
                 rsp.diag_calib.progress = (uint8_t)((ms == MotorStatus::Success) ? 255u : (((uint32_t)ms * 255u) / 12u));
             } else {
-                // Otherwise the angle sweep is the routine of interest: its
-                // CalStage rides in the stage byte with bit 7 set so a master
-                // can tell the two stage vocabularies apart, and the progress
-                // follows the samples collected.
                 rsp.diag_calib.stage = (uint8_t)(0x80u | tp_->angle_calibrator.stage());
                 rsp.diag_calib.progress = tp_->angle_calibrator.progress_255();
             }
@@ -462,9 +481,6 @@ inline TpError TpProtocol::read_diag(uint8_t sub, TpFrame& rsp) {
             rsp.diag_persist.state = (uint8_t)((store_.is_busy() || tp_->motor_params.is_flash_busy() ? 0x01u : 0u) |
                                                (store_.is_loaded() ? 0x02u : 0u) |
                                                (tp_->motor_params.is_loaded() ? 0x04u : 0u) |
-                                               // Only a save that actually ran and failed sets the
-                                               // failure bit; a node that has never saved is not in
-                                               // an error state.
                                                ((store_.save_attempted() && !store_.is_saved()) ? 0x08u : 0u));
             rsp.diag_persist.config_ver = store_.stored_version();
             rsp.diag_persist.cal_id = tp_->motor_params.get_cal_id();
@@ -483,8 +499,6 @@ inline TpError TpProtocol::read_diag(uint8_t sub, TpFrame& rsp) {
             return TP_ERR_NONE;
 
         case TP_SUB_DIAG_FOC: {
-            // The angle the last control pass handed to the current loop and
-            // the d/q voltage that loop produced: a live view of the FOC frame.
             const Vec2D_f32 u = tp_->current_driver.voltage_dq_;      // Last commanded d/q voltage [V]
             rsp.diag_foc.angle_el = (uint16_t)tp_->current_driver.get_angle();
             rsp.diag_foc.u_d = tp_pack_bf16(u.flux);
