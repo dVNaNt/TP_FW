@@ -118,10 +118,19 @@ inline TpError TpProtocol::handle_motion_task(const TpFrame& f) {
             return TP_ERR_SEGMENT;                       // A part of a segment we are not assembling
         }
         switch (cmd) {
-            case TP_CMD_MOTION_TASK_2:
-                seg_pos_q16_ = tp_q24_to_q16(tp_unpack_i48(f.mt2.pos));
+            case TP_CMD_MOTION_TASK_2: {
+                // Keep the full 48-bit wire payload to preserve extended dynamic range (up to 2^24)
+                const int64_t wire_q24 = tp_unpack_i48(f.mt2.pos);
+                // Convert wire position into axis target using 64-bit domain
+                int64_t wire_scaled = wire_q24;
+                if (config_.gear_ratio_mul != 0 && config_.gear_ratio_div != 0u) {
+                    wire_scaled = (wire_scaled * (int64_t)config_.gear_ratio_div) / (int64_t)config_.gear_ratio_mul;
+                }
+                // Store as high-resolution q16 without premature 16-bit truncation
+                seg_pos_q16_ = (int32_t)(wire_scaled >> 8);
                 seg_parts_ |= SEG_PART_2;
                 break;
+            }
             case TP_CMD_MOTION_TASK_3:
                 seg_torque_raw_ = f.mt3.torque;
                 seg_vel_raw_ = tp_unpack_u24(f.mt3.velocity);
@@ -191,11 +200,17 @@ inline TpError TpProtocol::commit_segment() {
     if (has_lim && TP_MT1_IS_JRK(seg_flags_) && tp_bf16_is_finite(seg_jerk_raw_) && (tp_unpack_bf16(seg_jerk_raw_) > 0.0f)) {
         jerk = tp_unpack_bf16(seg_jerk_raw_);
     }
-    // Absolute targets are converted by the ISR against the queue tail; a
-    // displacement only needs the axis direction applied.
-    const int32_t pos = has_pos ? (is_abs ? tp_axis_from_wire(config_, seg_pos_q16_)
-                                          : ((config_.axis_inverted != 0u) ? -seg_pos_q16_ : seg_pos_q16_))
-                                : 0;
+
+    // Absolute targets apply axis sign and offset in full signed 32-bit width
+    int32_t pos = 0;
+    if (has_pos) {
+        if (is_abs) {
+            const int32_t signed_pos = (config_.axis_inverted != 0u) ? -seg_pos_q16_ : seg_pos_q16_;
+            pos = signed_pos - config_.axis_offset_q16;
+        } else {
+            pos = (config_.axis_inverted != 0u) ? -seg_pos_q16_ : seg_pos_q16_;
+        }
+    }
     const uint32_t duration_us = seg_time_ * 100u;       // Wire time [100 us] -> microseconds
 
     // ---- Segment skeleton --------------------------------------------------
@@ -275,21 +290,18 @@ inline TpError TpProtocol::commit_segment() {
             if (!has_pos) {
                 return TP_ERR_BAD_PARAM;                 // Nothing to anchor to
             }
-            // Redefine "here" WITHOUT moving: every position crosses the wire
-            // through the axis offset of 0x01/0x00 (reported = (native +
-            // offset) x direction), so the anchor is a change of that offset
-            // and nothing else. The control loop keeps holding the same
-            // physical spot; only the number the master sees for it changes.
-            // (Posting the anchor value as a new position TARGET, as this used
-            // to, sent the rotor there at full speed - a 25 rev "set position"
-            // became a 25 rev move.) The offset lives in the node
-            // configuration: save it to keep the anchor across a reboot.
+            // Redefine origin without stepping the rotor
             DriveTelemetry t;                            // Live control snapshot
             tp_->drive.read_telemetry(t);
-            const int32_t wire_now = tp_axis_to_wire(config_, t.position_q16);       // Where the master sees us
-            const int32_t wire_new = is_abs ? seg_pos_q16_ : (wire_now + seg_pos_q16_);  // Where it wants us
-            const int32_t signed_new = (config_.axis_inverted != 0u) ? -wire_new : wire_new;  // Undo the direction
-            config_.axis_offset_q16 = signed_new - t.position_q16;                    // reported == wire_new
+            const int64_t shifted = (int64_t)t.position_q16 + config_.axis_offset_q16;
+            int64_t wire_now = shifted;
+            if (config_.gear_ratio_div != 0u && config_.gear_ratio_mul != 0) {
+                wire_now = (shifted * (int64_t)config_.gear_ratio_mul) / (int64_t)config_.gear_ratio_div;
+            }
+            const int32_t wire_now_32 = (config_.axis_inverted != 0u) ? (int32_t)-wire_now : (int32_t)wire_now;
+            const int32_t wire_new = is_abs ? seg_pos_q16_ : (wire_now_32 + seg_pos_q16_);
+            const int32_t signed_new = (config_.axis_inverted != 0u) ? -wire_new : wire_new;
+            config_.axis_offset_q16 = signed_new - t.position_q16;
             queued = false;
             break;
         }
@@ -354,8 +366,16 @@ inline TpError TpProtocol::apply_setpoint(const TpFrame& f) {
             }
         }
         case TP_CMD_MOTION_TASK_2: {
-            // Cyclic synchronous position: the frame IS the position mode.
-            const int32_t pos = tp_axis_from_wire(config_, tp_q24_to_q16(tp_unpack_i48(f.mt2.pos)));
+            // Cyclic synchronous position: convert wire q24 into rotor q16 in 64-bit domain
+            const int64_t wire_q24 = tp_unpack_i48(f.mt2.pos);
+            int64_t wire_scaled = wire_q24;
+            if (config_.gear_ratio_mul != 0 && config_.gear_ratio_div != 0u) {
+                wire_scaled = (wire_scaled * (int64_t)config_.gear_ratio_div) / (int64_t)config_.gear_ratio_mul;
+            }
+            const int32_t pos_q16 = (int32_t)(wire_scaled >> 8);
+            const int32_t signed_pos = (config_.axis_inverted != 0u) ? -pos_q16 : pos_q16;
+            const int32_t pos = signed_pos - config_.axis_offset_q16;
+
             if (control_mode() != TP_MODE_POSITION) {
                 tp_->drive.post_u32(DriveReq::SetMode, TP_MODE_POSITION);
             }
@@ -384,7 +404,7 @@ inline TpError TpProtocol::apply_setpoint(const TpFrame& f) {
                         tp_->drive.post_f32(DriveReq::CurrentLimit, lim);
                     }
                 }
-                const float vel = tp_axis_sign(config_, tp_unpack_f24(vraw));  // Velocity [RPS]
+                const float vel = tp_axis_from_wire(config_, tp_unpack_f24(vraw));  // Velocity [RPS]
                 return tp_->drive.post_f32(DriveReq::TargetVel, vel) ? TP_ERR_NONE : TP_ERR_BUSY;
             }
             if (control_mode() != TP_MODE_TORQUE) {
